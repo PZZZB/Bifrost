@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="referrer" content="same-origin">
+    <title>Bifröst · Codex 与 Claude 模型网关</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Bifröst 首页">
+          <span class="brand-mark" aria-hidden="true">B</span>
+          <span>Bifröst</span>
+        </a>
+        <div class="connection"><span class="status-dot" id="connection-dot"></span><span id="connection-label">正在连接本机服务</span><span class="version" id="version"></span></div>
+      </header>
+
+      <section class="intro">
+        <div class="eyebrow">CODEX / CLAUDE GATEWAY</div>
+        <h1>Codex 与 Claude，<br><span>按模型选择渠道。</span></h1>
+        <p class="intro-copy">Codex 原有模型使用账号 A，B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用账号 B。Claude 可接入独立 CLI 订阅与 CodeBuddy。客户端继续执行工具并处理权限。</p>
+        <div class="identity-flow" aria-label="Codex 账号分工">
+          <div><span class="identity-letter">A</span><span><strong>原有模型</strong><small>账号 A 提供推理</small></span></div>
+          <span class="flow-line" aria-hidden="true"></span>
+          <div><span class="identity-letter identity-letter-b">B</span><span><strong>两个 B 模型</strong><small>账号 B 提供推理</small></span></div>
+        </div>
+      </section>
+
+      <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+
+      <div class="dashboard">
+        <section class="panel setup-panel" aria-labelledby="setup-title">
+          <div class="panel-heading"><div><div class="eyebrow">SETUP</div><h2 id="setup-title">接入订阅账号</h2></div><span class="pill" id="setup-state">准备中</span></div>
+          <ol class="steps">
+            <li class="step" id="step-login">
+              <div class="step-number">1</div>
+              <div class="step-body">
+                <h3>独立登录账号 B</h3>
+                <p>在官方授权页面登录提供订阅的账号。授权完成后，此处会更新账号信息。</p>
+                <div class="button-row"><button class="button primary" id="login-button" type="button">浏览器登录</button><button class="button secondary" id="device-login-button" type="button">手机授权</button><a id="authorization-link" class="text-link" target="_blank" rel="noopener noreferrer" hidden>打开授权页面</a></div>
+                <p class="inline-status" id="login-state"></p>
+                <div class="device-authorization" id="device-authorization" hidden>
+                  <span>一次性授权代码</span>
+                  <code id="device-user-code"></code>
+                  <a id="device-authorization-link" class="text-link" target="_blank" rel="noopener noreferrer"></a>
+                  <p>在手机打开官方链接，输入上方代码，使用账号 B 完成授权。</p>
+                </div>
+                <div class="account-card" id="account-card" hidden>
+                  <div class="avatar" aria-hidden="true">B</div>
+                  <div class="account-details"><strong id="account-email"></strong><span id="account-plan"></span></div>
+                  <button class="button quiet small" id="logout-button" type="button">退出 B</button>
+                </div>
+              </div>
+            </li>
+            <li class="step" id="step-bind">
+              <div class="step-number">2</div>
+              <div class="step-body">
+                <h3>核对并确认推理身份</h3>
+                <p id="bind-description">核对上方邮箱，确认它就是你要使用订阅额度的账号 B。</p>
+                <button class="button secondary" id="bind-button" type="button" disabled>确认此账号为 B</button>
+                <p class="inline-status" id="bound-account"></p>
+              </div>
+            </li>
+            <li class="step" id="step-verify">
+              <div class="step-number">3</div>
+              <div class="step-body">
+                <h3>验证一次真实推理</h3>
+                <p>选择一个 B 模型，发送简短请求，确认账号 B 能完成推理。仅获取模型列表不算验证通过。</p>
+                <div class="verification-controls"><label class="sr-only" for="model-select">验证使用的 B 模型</label><select id="model-select" disabled><option value="">使用默认 B 模型</option></select><button class="button secondary" id="verify-button" type="button" disabled>验证推理</button></div>
+                <div class="verification-result" id="verification-result" hidden><span class="result-label" id="verification-label"></span><p id="verification-text"></p><small id="verification-meta"></small></div>
+              </div>
+            </li>
+          </ol>
+        </section>
+
+        <aside class="side-column">
+          <section class="panel" aria-labelledby="integration-title">
+            <div class="panel-heading"><div><div class="eyebrow">INTEGRATION</div><h2 id="integration-title">接入当前 Codex</h2></div><span class="pill" id="integration-state">未接入</span></div>
+            <p class="panel-copy" id="integration-description">完成推理验证后，在 Codex 模型选择器中添加两个 B 模型，并按模型分配账号。</p>
+            <div class="config-path"><span>配置文件</span><code id="config-path">读取中</code></div>
+            <p class="integration-note">原有模型使用账号 A；选择 B-GPT-6 Astra 或 B-GPT-6.1 Sol 时使用账号 B。保存当前工作，重启 Codex 后可在模型选择器中切换。</p>
+            <div class="stacked-buttons"><button class="button primary" id="install-button" type="button" disabled>接入本机 Codex</button><button class="button secondary" id="copy-button" type="button" disabled>复制接入配置</button><button class="button quiet" id="restore-button" type="button" hidden>恢复接入前配置</button></div>
+            <p class="footnote">网关密钥仅在复制配置时读取，不在页面展示。</p>
+          </section>
+
+          <section class="panel gateway-panel" aria-labelledby="gateway-title">
+            <div class="panel-heading"><div><div class="eyebrow">GATEWAY</div><h2 id="gateway-title">运行状态</h2></div><span class="pill" id="gateway-state">等待连接</span></div>
+            <div class="endpoint"><span>网关地址</span><code id="gateway-url">读取中</code></div>
+            <div class="metrics"><div><strong id="metric-requests">0</strong><span>收到请求</span></div><div><strong id="metric-completed">0</strong><span>完成</span></div><div><strong id="metric-failed">0</strong><span>失败</span></div></div>
+            <div class="account-usage">
+              <section class="account-usage-row" aria-label="账号 A 请求统计">
+                <div class="account-usage-heading"><strong>账号 A</strong><span>原有模型</span></div>
+                <div class="metrics"><div><strong id="metric-a-requests">0</strong><span>收到请求</span></div><div><strong id="metric-a-completed">0</strong><span>完成</span></div><div><strong id="metric-a-failed">0</strong><span>失败</span></div></div>
+                <div class="last-model"><span>最近模型</span><code id="account-a-last-model">尚无请求</code></div>
+              </section>
+              <section class="account-usage-row" aria-label="账号 B 请求统计">
+                <div class="account-usage-heading"><strong>账号 B</strong><span>两个 B 模型</span></div>
+                <div class="metrics"><div><strong id="metric-b-requests">0</strong><span>收到请求</span></div><div><strong id="metric-b-completed">0</strong><span>完成</span></div><div><strong id="metric-b-failed">0</strong><span>失败</span></div></div>
+                <div class="last-model"><span>最近模型</span><code id="account-b-last-model">尚无请求</code></div>
+              </section>
+            </div>
+            <div class="gateway-error" id="gateway-error" hidden></div>
+            <p class="footnote">页面每 3 秒更新。原有模型使用 A；仅 B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用已确认的账号 B。</p>
+          </section>
+        </aside>
+      </div>
+      <section class="panel with-panel" aria-labelledby="with-title">
+        <div class="panel-heading"><div><div class="eyebrow">WITH / VM</div><h2 id="with-title">With · Opus 5.5</h2></div><span class="pill" id="with-state">读取中</span></div>
+        <p class="panel-copy">仅接入 Opus 5.5。真实聊天和工具回合由用户验收。</p>
+        <div class="with-details">
+          <div class="endpoint"><span>VM 地址 <small id="with-vm-state"></small></span><code id="with-vm-address">读取中</code></div>
+          <div class="endpoint"><span>网关地址</span><code id="with-gateway-url">读取中</code></div>
+          <div class="endpoint"><span>提供方登录</span><code id="with-authentication">读取中</code></div>
+        </div>
+        <div class="metrics with-metrics"><div><strong id="with-requests">—</strong><span>收到请求</span></div><div><strong id="with-completed">—</strong><span>完成</span></div><div><strong id="with-failed">—</strong><span>失败</span></div><div><strong id="with-active">—</strong><span>进行中</span></div></div>
+        <div class="gateway-error" id="with-error" role="status" hidden></div>
+      </section>
+      <section class="panel with-panel codebuddy-panel" aria-labelledby="codebuddy-title">
+        <div class="panel-heading"><div><div class="eyebrow">CODEBUDDY</div><h2 id="codebuddy-title">CodeBuddy · Opus 5.5</h2></div><span class="pill" id="codebuddy-state">读取中</span></div>
+        <p class="panel-copy">独立 CodeBuddy 渠道，仅提供 Opus 5.5。真实聊天和工具回合由用户验收。</p>
+        <p class="footnote">支持图片、预解析文本附件、工具图文结果及自适应思考。实际聊天、工具和扣费待本人实测。</p>
+        <div class="button-row">
+          <button class="button primary" id="codebuddy-login-button" type="button" disabled>官方网页登录</button>
+          <a class="text-link" id="codebuddy-authorization-link" target="_blank" rel="noopener noreferrer" hidden>打开官方授权页面</a>
+          <button class="button quiet" id="codebuddy-logout-button" type="button" disabled>退出本网关会话</button>
+        </div>
+        <p class="footnote" id="codebuddy-login-state">读取接入状态。</p>
+        <p class="footnote">在官方页面由本人完成登录与协议确认。退出仅清除本网关的 CodeBuddy 会话。</p>
+        <div class="with-details">
+          <div class="endpoint"><span>登录账号</span><code id="codebuddy-username">读取中</code></div>
+          <div class="endpoint"><span>提供方登录</span><code id="codebuddy-authentication">读取中</code></div>
+          <div class="endpoint"><span>模型可用性</span><code id="codebuddy-model-available">读取中</code></div>
+          <div class="endpoint"><span>网关地址</span><code id="codebuddy-gateway-url">读取中</code></div>
+          <div class="endpoint"><span>连接方式</span><code id="codebuddy-transport">读取中</code></div>
+          <div class="endpoint"><span>员工 Token 倍率</span><code id="codebuddy-billing-multiplier">待服务端确认</code></div>
+        </div>
+        <div class="codebuddy-catalog">
+          <div class="endpoint"><span>目录来源</span><code id="codebuddy-catalog-source">读取中</code></div>
+          <div class="endpoint"><span>目录保存时间</span><code id="codebuddy-catalog-saved-at">未返回</code></div>
+          <p class="footnote" id="codebuddy-catalog-note">实际可用性与计费待本人实测。</p>
+        </div>
+        <div class="codebuddy-source-metadata">
+          <span>目录 credits（源数据）<strong id="codebuddy-source-credits">未返回</strong></span>
+          <span>目录活动说明<strong id="codebuddy-source-promotion">未返回</strong></span>
+        </div>
+        <p class="footnote">credits、promotion 是目录源元数据，不能据此推导员工 Token 倍率。</p>
+        <details class="token-recent">
+          <summary>图片、附件与思考的支持范围</summary>
+          <p class="footnote">图片支持 JPEG、PNG、GIF、WebP 的 base64 或公开 HTTPS 引用。嵌入图片解码后每张最多 5 MiB；每请求最多 100 张，包含历史、附件及工具结果。网关不下载远程图片，其实际大小由上游检查。</p>
+          <p class="footnote">附件支持纯文本 document 和预解析的 text/image 内容；tool_result 同样保留图文顺序。原始 PDF、Office、视频、音频及 file_id 返回 400，须先解析为文本或图片。</p>
+          <p class="footnote">思考使用 <code>adaptive</code>；<code>display=summarized</code> 显示摘要，默认 <code>omitted</code> 隐藏摘要。<code>effort</code> 支持 low、medium、high、xhigh，默认 high；enabled + budget、disabled 和 effort=max 返回 400。</p>
+          <p class="footnote">可见摘要来自 Chat 的 <code>reasoning_content</code>，使用空 signature 回放。默认 / omitted 返回空 thinking 块，其 signature 或 signature_delta 携带 <code>bridge-codebuddy-v1:</code> 前缀的 AES-GCM 加密接续标记，须由客户端原样回传。</p>
+          <p class="footnote">接续标记绑定登录账号和真实模型，属于本网关状态，不是厂商签名。同一 Windows 用户保留独立 DPAPI 密钥后可跨重启续接；原生非空签名及 redacted thinking 返回 400。真实客户端能否保留并回传标记仍待本人验收。</p>
+        </details>
+        <div class="metrics with-metrics"><div><strong id="codebuddy-requests">—</strong><span>收到请求</span></div><div><strong id="codebuddy-completed">—</strong><span>完成</span></div><div><strong id="codebuddy-failed">—</strong><span>失败</span></div><div><strong id="codebuddy-active">—</strong><span>进行中</span></div></div>
+        <div class="gateway-error" id="codebuddy-error" role="status" hidden></div>
+      </section>
+      <section class="panel quota-panel" aria-labelledby="quota-title">
+        <div class="panel-heading"><div><div class="eyebrow">ACCOUNT QUOTAS</div><h2 id="quota-title">账号剩余额度</h2></div><button class="button secondary small" id="quota-refresh-button" type="button">刷新额度</button></div>
+        <p class="panel-copy">官方账户额度，包含其他设备的消耗。未返回的数据表示未知，不按 0% 或 100% 计算。</p>
+        <div class="quota-accounts">
+          <section class="quota-account" aria-labelledby="quota-a-title">
+            <div class="quota-account-heading"><div><h3 id="quota-a-title">账号 A</h3><span id="quota-a-plan">套餐未返回</span></div><span class="pill pending" id="quota-a-state">等待查询</span></div>
+            <div class="quota-windows" id="quota-a-windows"><p class="quota-empty">等待官方额度</p></div>
+            <p class="quota-credits" id="quota-a-credits" hidden></p>
+            <div class="gateway-error" id="quota-a-error" role="status" hidden></div>
+            <p class="quota-updated" id="quota-a-updated">尚未查询</p>
+          </section>
+          <section class="quota-account" aria-labelledby="quota-b-title">
+            <div class="quota-account-heading"><div><h3 id="quota-b-title">账号 B</h3><span id="quota-b-plan">套餐未返回</span></div><span class="pill pending" id="quota-b-state">等待查询</span></div>
+            <div class="quota-windows" id="quota-b-windows"><p class="quota-empty">等待官方额度</p></div>
+            <p class="quota-credits" id="quota-b-credits" hidden></p>
+            <div class="gateway-error" id="quota-b-error" role="status" hidden></div>
+            <p class="quota-updated" id="quota-b-updated">尚未查询</p>
+          </section>
+        </div>
+        <p class="footnote">打开页面时查询一次，之后仅手动刷新。重置时间与更新时间使用洛杉矶时间（America/Los_Angeles）。个人限额不代表 Team 总余额；CodeBuddy / With 额度暂未接入。</p>
+      </section>
+      <section class="panel token-panel" aria-labelledby="token-title">
+        <div class="panel-heading"><div><div class="eyebrow">TOKEN USAGE</div><h2 id="token-title">Token 用量</h2></div><span class="pill" id="token-state">读取中</span></div>
+        <p class="panel-copy">仅统计网关启用记录后的服务端用量；不换算订阅剩余额度。</p>
+        <div class="token-totals">
+          <div><span>总输入 Token</span><strong id="token-total-input">—</strong></div>
+          <div><span>总输出 Token</span><strong id="token-total-output">—</strong></div>
+          <div><span>服务端总 Token</span><strong id="token-total-all">—</strong></div>
+        </div>
+        <div class="token-subsets"><span>缓存命中 <strong id="token-total-cached">—</strong><small>输入子集</small></span><span>思考 Token <strong id="token-total-reasoning">—</strong><small>输出子集</small></span></div>
+        <p class="footnote token-subset-note">缓存命中已包含在输入中，思考 Token 已包含在输出中，不重复相加。</p>
+        <div class="token-accounts with-token-accounts">
+          <section class="token-account" aria-label="账号 A Token 用量">
+            <div class="account-usage-heading"><strong>账号 A</strong><span>原有模型</span></div>
+            <div class="token-account-main"><div><span>输入</span><strong id="token-a-input">—</strong></div><div><span>输出</span><strong id="token-a-output">—</strong></div></div>
+            <div class="token-account-subsets"><span>缓存命中 <strong id="token-a-cached">—</strong></span><span>思考 <strong id="token-a-reasoning">—</strong></span></div>
+          </section>
+          <section class="token-account" aria-label="账号 B Token 用量">
+            <div class="account-usage-heading"><strong>账号 B</strong><span>两个 B 模型</span></div>
+            <div class="token-account-main"><div><span>输入</span><strong id="token-b-input">—</strong></div><div><span>输出</span><strong id="token-b-output">—</strong></div></div>
+            <div class="token-account-subsets"><span>缓存命中 <strong id="token-b-cached">—</strong></span><span>思考 <strong id="token-b-reasoning">—</strong></span></div>
+          </section>
+          <section class="token-account" aria-label="With Token 用量">
+            <div class="account-usage-heading"><strong>With</strong><span>Opus 5.5</span></div>
+            <div class="token-account-main"><div><span>输入</span><strong id="token-with-input">—</strong></div><div><span>输出</span><strong id="token-with-output">—</strong></div></div>
+            <div class="token-account-subsets"><span>缓存命中 <strong id="token-with-cached">—</strong></span><span>思考 <strong id="token-with-reasoning">—</strong></span></div>
+          </section>
+          <section class="token-account" aria-label="CodeBuddy Token 用量">
+            <div class="account-usage-heading"><strong>CodeBuddy</strong><span>Opus 5.5</span></div>
+            <div class="token-account-main"><div><span>输入</span><strong id="token-codebuddy-input">—</strong></div><div><span>输出</span><strong id="token-codebuddy-output">—</strong></div></div>
+            <div class="token-account-subsets"><span>缓存命中 <strong id="token-codebuddy-cached">—</strong></span><span>思考 <strong id="token-codebuddy-reasoning">—</strong></span></div>
+          </section>
+          <section class="token-account" id="token-claude-row" aria-label="Claude 订阅 Token 用量" hidden>
+            <div class="account-usage-heading"><strong>Claude 订阅</strong><span>CLI 后端</span></div>
+            <div class="token-account-main"><div><span>输入</span><strong id="token-claude-input">—</strong></div><div><span>输出</span><strong id="token-claude-output">—</strong></div></div>
+            <div class="token-account-subsets"><span>缓存命中 <strong id="token-claude-cached">—</strong></span><span>思考 <strong id="token-claude-reasoning">—</strong></span></div>
+          </section>
+        </div>
+        <div class="token-record-meta"><span id="token-started-at">等待服务端记录时间</span><span id="token-coverage"></span></div>
+        <div class="gateway-error" id="token-error" role="status" hidden></div>
+        <details class="token-recent" open>
+          <summary>最近 10 次请求</summary>
+          <div class="token-table-scroll" tabindex="0" role="region" aria-label="最近请求 Token 明细">
+            <table class="token-table"><thead><tr><th scope="col">时间</th><th scope="col">账号</th><th scope="col">模型</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">状态</th></tr></thead><tbody id="token-recent-body"><tr><td colspan="6" class="empty-table">等待用量记录</td></tr></tbody></table>
+          </div>
+        </details>
+        <p class="footnote">未返回用量的请求显示“未返回”，不计入 Token 合计。用量数据每 3 秒更新。</p>
+      </section>
+      <footer><span>Bifröst</span><span>Codex · Claude · 多渠道接入</span></footer>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,66 @@
+import { readFile } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
+import { isIP } from 'node:net';
+import { createAnthropicGatewayServer } from '../src/anthropic-gateway.mjs';
+import { ClaudeCliHub } from '../src/claude-cli-provider.mjs';
+import { startRelayControl } from '../src/relay-control.mjs';
+
+let hub, server, control, controlStart, closing;
+function close() {
+  return closing ??= (async () => {
+    await controlStart?.then(value => value.close(), () => {});
+    const results = await Promise.allSettled([
+      server && new Promise(done => { server.close(done); server.closeAllConnections(); }),
+      hub?.close(),
+    ]);
+    if (results.some(result => result.status === 'rejected')) throw new Error('Claude relay could not close.');
+  })();
+}
+try {
+  const [configPath, ...extra] = process.argv.slice(2);
+  if (!configPath || !isAbsolute(configPath) || extra.length) throw new Error();
+  const bytes = await readFile(configPath);
+  if (bytes.length > 65_536) throw new Error();
+  const config = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  if (config.version !== 1 || !isIP(config.listener?.address) ||
+      !Number.isInteger(config.listener.port) || config.listener.port < 1024 || config.listener.port > 65535 ||
+      !Array.isArray(config.listener.allowedHosts) || !config.listener.allowedHosts.length ||
+      !Array.isArray(config.listener.allowedPeers) || !config.listener.allowedPeers.length ||
+      config.listener.allowedPeers.some(value => !isIP(value)) ||
+      typeof config.gatewayKeyFile !== 'string' || !isAbsolute(config.gatewayKeyFile) ||
+      !Array.isArray(config.models) || !config.models.length || config.models.some(model =>
+        !model || typeof model.id !== 'string' || typeof model.name !== 'string' || typeof model.upstream !== 'string') ||
+      ![config.cli?.binary, config.cli?.configDir, config.cli?.profileDir, config.cli?.stateDir]
+        .every(value => typeof value === 'string' && isAbsolute(value))) throw new Error();
+  const mcpPort = config.mcpPort ?? 3436;
+  if (!Number.isInteger(mcpPort) || mcpPort < 1 || mcpPort > 65535 || mcpPort === config.listener.port) throw new Error();
+  const gatewayKey = (await readFile(config.gatewayKeyFile, 'utf8')).replace(/\r?\n$/, '');
+  if (!/^[\x21-\x7e]{40,4096}$/.test(gatewayKey)) throw new Error();
+  // Loading the official SDK is metadata-only. A missing dependency must not advertise ready models.
+  await import('@anthropic-ai/claude-agent-sdk');
+  hub = new ClaudeCliHub({ binary: config.cli.binary, configDir: config.cli.configDir,
+    profileDir: config.cli.profileDir, stateDir: config.cli.stateDir, mcpPort });
+  await hub.start();
+  server = createAnthropicGatewayServer({ gatewayKey,
+    allowedHosts: config.listener.allowedHosts, allowedPeers: config.listener.allowedPeers,
+    routes: config.models.map(model => ({ account: 'Claude', model, provider: hub.provider(model.upstream) })) });
+  await new Promise((yes, no) => {
+    server.once('error', no); server.listen(config.listener.port, config.listener.address, () => {
+      server.off('error', no); yes();
+    });
+  });
+  controlStart = startRelayControl({ key: gatewayKey, address: process.platform === 'win32'
+    ? `\\\\.\\pipe\\CodexAccountBridge-ClaudeRelay-${process.pid}` : join(config.cli.stateDir, `control-${process.pid}.sock`),
+  onStop: () => close().catch(() => { process.exitCode = 1; }) });
+  control = await controlStart;
+  server.on('error', () => { process.exitCode = 1; void close().catch(() => {}); });
+  const signalStop = () => { void close().catch(() => { process.exitCode = 1; }); };
+  process.once('SIGINT', signalStop); process.once('SIGTERM', signalStop);
+  process.stdout.write(`${JSON.stringify({ event: 'ready', transport: 'official-claude-sdk',
+    listener: server.address(), controlPipe: control.address(),
+    configuredModels: config.models.map(model => model.id), realInference: false })}\n`);
+} catch {
+  await close().catch(() => {});
+  process.stderr.write('Claude relay could not start. Check the private configuration, official CLI and listener.\n');
+  process.exitCode = 1;
+}
