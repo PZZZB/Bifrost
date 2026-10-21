@@ -275,7 +275,11 @@ export class ClaudeCliHub {
     const turn = { queue: new Queue(), body: structuredClone(body), blocks: new Map(), bytes: 0,
       message: null, stopReason: null, messageStopped: false, ended: false, signal };
     run.turn = turn;
-    const abort = () => { void this.stopRun(run, '客户端已取消 CLI 请求。'); };
+    const abort = () => {
+      turn.error = '客户端已取消 CLI 请求。';
+      turn.queue.end({ type: 'error', error: { type: 'api_error', message: turn.error } });
+      void this.stopRun(run, turn.error);
+    };
     turn.abort = abort; signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     try {
@@ -297,7 +301,11 @@ export class ClaudeCliHub {
       async pull(controller) {
         const event = await turn.queue.next();
         if (event === null) controller.close(); else controller.enqueue(sse(event));
-      }, cancel: () => this.stopRun(run, '客户端已取消 CLI 回复。'),
+      }, cancel: () => {
+        // A truncated native message may already have detached its retiring run.
+        turn.queue.end();
+        return this.stopRun(run, '客户端已取消 CLI 回复。');
+      },
     });
     if (body.stream === true) return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
     // Drain the same event path so JSON and SSE share interruption semantics.
@@ -363,7 +371,12 @@ export class ClaudeCliHub {
     if (event.type === 'message_start') {
       if (turn.message || !object(event.message) || typeof event.message.id !== 'string' ||
           event.message.type !== 'message' || event.message.role !== 'assistant') {
-        await this.stopRun(run, 'CLI 消息起始字段或顺序无效。'); return;
+        // Keep only schema checks and validated state; never include IDs, message content, or unknown field values.
+        const diagnostic = { existing_message: Boolean(turn.message),
+          previous_message_stopped: Boolean(turn.messageStopped), previous_stop_reason: turn.stopReason ?? null,
+          message_object: object(event.message), id_type: typeof event.message?.id,
+          message_type_valid: event.message?.type === 'message', role_valid: event.message?.role === 'assistant' };
+        await this.stopRun(run, `CLI 消息起始字段或顺序无效。${JSON.stringify(diagnostic)}`); return;
       }
       turn.message = structuredClone(event.message); turn.message.content = [];
     } else if (event.type === 'content_block_start') {
@@ -421,6 +434,21 @@ export class ClaudeCliHub {
     } else if (event.type === 'error') {
       await this.stopRun(run, '官方 CLI 模型流返回错误。'); return;
     } else if (event.type !== 'ping') { await this.stopRun(run, 'CLI 返回了未知的模型流事件。'); return; }
+    if (event.type === 'message_stop' && turn.stopReason === 'max_tokens') {
+      // The API message is valid but truncated. The SDK may automatically continue it;
+      // return this message's real limit status and retire the session to stop SDK continuation.
+      turn.ended = true;
+      run.historyHash = null;
+      run.turn = null;
+      const retiring = this.stopRun(run, 'CLI 输出达到 max_tokens；已取消自动续写。');
+      try { await turn.queue.push(event); }
+      finally {
+        turn.queue.end();
+        turn.signal?.removeEventListener('abort', turn.abort);
+        await retiring;
+      }
+      return;
+    }
     // Delay an ordinary message_stop until the SDK confirms a successful turn.
     if (event.type === 'message_stop' && turn.stopReason !== 'tool_use') return;
     await turn.queue.push(event);

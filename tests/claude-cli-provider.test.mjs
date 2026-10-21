@@ -104,6 +104,15 @@ function answer(worker, text = 'Fixture answer.', { output = 4, input = 10, resu
   worker.result({ usage: { input_tokens: resultUsage, output_tokens: resultUsage } });
 }
 
+function truncateAnswer(worker, text = 'First truncated answer.') {
+  startMessage(worker);
+  worker.emit({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+  worker.emit({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } });
+  worker.emit({ type: 'content_block_stop', index: 0 });
+  worker.emit({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 1 } });
+  worker.emit({ type: 'message_stop' });
+}
+
 function callTools(worker, calls) {
   startMessage(worker);
   for (let index = 0; index < calls.length; index++) {
@@ -691,6 +700,239 @@ test('a native builtin tool is rejected without returning it as a desktop tool r
   assert.equal(worker.sends.length, 1);
   assert.equal(worker.closes, 1);
 });
+
+const messageStartError = 'CLI 消息起始字段或顺序无效。';
+const privateMessageFixture = 'PRIVATE_CLI_START_DIAGNOSTIC_FIXTURE';
+const startDiagnostic = {
+  existing_message: false, previous_message_stopped: false, previous_stop_reason: null,
+  message_object: true, id_type: 'string', message_type_valid: true, role_valid: true,
+};
+
+function diagnosticMessage() {
+  return { id: `${privateMessageFixture}:id`, type: 'message', role: 'assistant', model,
+    content: [{ type: 'text', text: `${privateMessageFixture}:content` }],
+    usage: { input_tokens: 1, output_tokens: 0 } };
+}
+
+async function assertStartDiagnostic(response, expected) {
+  assert.equal(response.status, 502);
+  const wire = await response.text();
+  assert.ok(!wire.includes(privateMessageFixture), 'Diagnostics must not disclose original message values.');
+  const body = JSON.parse(wire);
+  assert.equal(body.type, 'error');
+  assert.equal(body.error.type, 'api_error');
+  assert.ok(body.error.message.startsWith(messageStartError));
+  assert.deepEqual(JSON.parse(body.error.message.slice(messageStartError.length).trim()), expected);
+}
+
+test('a valid first CLI message start still produces a successful assistant response', async t => {
+  const state = await fixture(t);
+  const { worker, message } = await completed(state);
+  assert.equal(message.id, 'msg-fixture');
+  assert.equal(message.type, 'message');
+  assert.equal(message.role, 'assistant');
+  assert.equal(message.content[0].text, 'Fixture answer.');
+  assert.equal(worker.closes, 0);
+});
+
+for (const field of ['id', 'type', 'role']) {
+  test(`a CLI message start missing ${field} reports only the failing field shape`, async t => {
+    const state = await fixture(t);
+    const pending = state.request(input);
+    await until(() => state.workers[0]?.sends.length);
+    const worker = state.workers[0], message = diagnosticMessage();
+    delete message[field];
+    worker.emit({ type: 'message_start', message });
+    await assertStartDiagnostic(await pending, { ...startDiagnostic,
+      ...(field === 'id' ? { id_type: 'undefined' }
+        : field === 'type' ? { message_type_valid: false } : { role_valid: false }) });
+    assert.equal(worker.closes, 1);
+  });
+}
+
+for (const [field, value, expected] of [
+  ['id', { value: privateMessageFixture }, { id_type: 'object' }],
+  ['type', `${privateMessageFixture}:type`, { message_type_valid: false }],
+  ['role', `${privateMessageFixture}:role`, { role_valid: false }],
+]) {
+  test(`a CLI message start with invalid ${field} never discloses its original value`, async t => {
+    const state = await fixture(t);
+    const pending = state.request(input);
+    await until(() => state.workers[0]?.sends.length);
+    const worker = state.workers[0];
+    worker.emit({ type: 'message_start', message: { ...diagnosticMessage(), [field]: value } });
+    await assertStartDiagnostic(await pending, { ...startDiagnostic, ...expected });
+    assert.equal(worker.closes, 1);
+  });
+}
+
+for (const [description, message] of [
+  ['null', null], ['string', privateMessageFixture], ['array', [privateMessageFixture]],
+]) {
+  test(`a non-object CLI start message (${description}) reports its invalid shape without message content`, async t => {
+    const state = await fixture(t);
+    const pending = state.request(input);
+    await until(() => state.workers[0]?.sends.length);
+    const worker = state.workers[0];
+    worker.emit({ type: 'message_start', message });
+    await assertStartDiagnostic(await pending, { ...startDiagnostic,
+      message_object: false, id_type: 'undefined', message_type_valid: false, role_valid: false });
+    assert.equal(worker.closes, 1);
+  });
+}
+
+for (const [reason, stopped] of [
+  [null, false], ['max_tokens', false], ['refusal', false], ['refusal', true],
+]) {
+  test(`a repeated CLI message start after ${reason ?? 'no stop reason'} with stopped=${stopped} reports prior state`, async t => {
+    const state = await fixture(t);
+    const pending = state.request(input);
+    await until(() => state.workers[0]?.sends.length);
+    const worker = state.workers[0]; startMessage(worker);
+    if (reason) worker.emit({ type: 'message_delta', delta: { stop_reason: reason }, usage: { output_tokens: 1 } });
+    if (stopped) worker.emit({ type: 'message_stop' });
+    worker.emit({ type: 'message_start', message: diagnosticMessage() });
+    await assertStartDiagnostic(await pending, { ...startDiagnostic,
+      existing_message: true, previous_message_stopped: stopped, previous_stop_reason: reason });
+    assert.equal(worker.closes, 1);
+  });
+}
+
+for (const stream of [false, true]) {
+  const format = stream ? 'SSE' : 'JSON';
+  test(`a complete max_tokens API message finishes ${format} without an SDK result`, { timeout: 2000 }, async t => {
+    const state = await fixture(t);
+    const pending = state.request({ ...input, max_tokens: 1, stream });
+    await until(() => state.workers[0]?.sends.length);
+    const worker = state.workers[0], run = [...state.hub.runs.values()][0];
+    truncateAnswer(worker);
+    const response = await pending;
+    assert.equal(response.status, 200);
+    if (stream) {
+      const wire = await response.text();
+      assert.equal((wire.match(/event: message_start\n/g) ?? []).length, 1);
+      assert.equal((wire.match(/event: message_stop\n/g) ?? []).length, 1);
+      assert.match(wire, /"stop_reason":"max_tokens"/);
+      assert.match(wire, /"output_tokens":1/);
+      assert.match(wire, /First truncated answer\./);
+      assert.doesNotMatch(wire, /event: error/);
+    } else {
+      const message = await response.json();
+      assert.equal(message.stop_reason, 'max_tokens');
+      assert.equal(message.content[0].text, 'First truncated answer.');
+      assert.equal(message.usage.input_tokens, 10);
+      assert.equal(message.usage.output_tokens, 1);
+      assert.equal(message.usage.cache_read_input_tokens, 3);
+      assert.equal(message.usage.cache_creation_input_tokens, 2);
+    }
+    await run.stopping;
+    assert.equal(worker.closes, 1);
+    assert.equal(state.hub.runs.size, 0);
+    assert.equal(state.hub.saved.size, 0);
+    assert.deepEqual(JSON.parse(await readFile(join(state.root, 'state', 'sessions.json'), 'utf8')), []);
+  });
+
+  test(`a max_tokens ${format} reply excludes queued CLI continuation and later SDK errors`, { timeout: 2000 }, async t => {
+    const state = await fixture(t);
+    const pending = state.request({ ...input, max_tokens: 1, stream });
+    await until(() => state.workers[0]?.sends.length);
+    const worker = state.workers[0], run = [...state.hub.runs.values()][0];
+    truncateAnswer(worker);
+    const privateContinuation = 'PRIVATE_CLI_AUTOCONTINUATION_FIXTURE';
+    worker.emit({ type: 'message_start', message: { ...diagnosticMessage(), id: privateContinuation,
+      usage: { input_tokens: 777777, output_tokens: 777777 } } });
+    worker.emit({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: privateContinuation } });
+    worker.emit({ type: 'content_block_stop', index: 0 });
+    worker.emit({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 777777 } });
+    worker.emit({ type: 'message_stop' });
+    worker.result({ subtype: 'error_during_execution', is_error: true,
+      usage: { input_tokens: 777777, output_tokens: 777777 } });
+    const response = await pending;
+    assert.equal(response.status, 200);
+    const wire = await response.text();
+    assert.match(wire, /First truncated answer\./);
+    assert.match(wire, /"stop_reason":"max_tokens"/);
+    assert.match(wire, /"output_tokens":1/);
+    assert.ok(!wire.includes(privateContinuation));
+    assert.ok(!wire.includes(privateMessageFixture));
+    assert.doesNotMatch(wire, /777777|event: error/);
+    if (stream) assert.equal((wire.match(/event: message_stop\n/g) ?? []).length, 1);
+    await run.stopping;
+    assert.equal(worker.closes, 1);
+    assert.equal(state.hub.saved.size, 0);
+  });
+}
+
+test('a max_tokens turn invalidates its existing native prefix and rebuilds the follow-up without resume', { timeout: 2000 }, async t => {
+  const state = await fixture(t);
+  const first = await completed(state);
+  const secondBody = continuation(input, first.message, 'Question that gets truncated.');
+  const pending = state.request(secondBody);
+  await until(() => first.worker.sends.length === 2);
+  const run = [...state.hub.runs.values()][0], nativeId = first.worker.sessionId;
+  assert.equal(state.workers.length, 1);
+  truncateAnswer(first.worker);
+  const response = await pending;
+  assert.equal(response.status, 200);
+  const truncated = await response.json();
+  assert.equal(truncated.stop_reason, 'max_tokens');
+  await run.stopping;
+  assert.equal(state.hub.runs.size, 0);
+  assert.equal(state.hub.saved.size, 0);
+  assert.deepEqual(JSON.parse(await readFile(join(state.root, 'state', 'sessions.json'), 'utf8')), []);
+  const followUp = continuation(secondBody, truncated, 'Continue from the truncated answer.');
+  const next = await completed(state, followUp);
+  assert.equal(state.workers.length, 2);
+  assert.notEqual(next.worker.sessionId, nativeId);
+  assert.equal(next.worker.options.resumeSessionId, undefined);
+  assert.equal(first.worker.closes, 1);
+  assert.ok(Array.isArray(next.worker.sends[0]));
+  assert.ok(next.worker.sends[0].some(block => block.text === 'First truncated answer.'));
+  assert.ok(next.worker.sends[0].some(block => block.text === 'Continue from the truncated answer.'));
+});
+
+test('max_tokens does not make an unclosed content block a successful API message', { timeout: 2000 }, async t => {
+  const state = await fixture(t);
+  const pending = state.request(input);
+  await until(() => state.workers[0]?.sends.length);
+  const worker = state.workers[0]; startMessage(worker);
+  worker.emit({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: 'Incomplete block.' } });
+  worker.emit({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 1 } });
+  worker.emit({ type: 'message_stop' });
+  const response = await pending;
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).type, 'error');
+  assert.equal(worker.closes, 1);
+});
+
+for (const cancellation of ['stream cancellation', 'AbortSignal']) {
+  test(`${cancellation} releases an unread retired max_tokens turn under backpressure`, { timeout: 3000 }, async t => {
+    const state = await fixture(t), controller = new AbortController();
+    const response = await state.request({ ...input, stream: true }, { signal: controller.signal });
+    const worker = state.workers[0], run = [...state.hub.runs.values()][0], turn = run.turn;
+    startMessage(worker);
+    worker.emit({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+    for (let index = 0; index < 253; index++) worker.emit({ type: 'content_block_delta', index: 0,
+      delta: { type: 'text_delta', text: 'x' } });
+    worker.emit({ type: 'content_block_stop', index: 0 });
+    worker.emit({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 128 } });
+    worker.emit({ type: 'message_stop' });
+    await until(() => worker.closes === 1 && turn.queue.writers.length > 0);
+    assert.equal(state.hub.runs.size, 0);
+    if (cancellation === 'stream cancellation') await response.body.cancel();
+    else controller.abort();
+    await run.pump;
+    assert.equal(turn.queue.writers.length, 0);
+    assert.equal(turn.queue.ended, true);
+    assert.equal(state.hub.saved.size, 0);
+    assert.equal(worker.closes, 1);
+    if (cancellation === 'AbortSignal') {
+      const wire = await response.text();
+      assert.match(wire, /event: error/);
+      assert.doesNotMatch(wire, /event: message_stop/);
+    }
+  });
+}
 
 for (const missing of ['message_start', 'stop_reason']) {
   test(`a successful SDK result with missing ${missing} cannot fabricate an empty successful reply`, async t => {
