@@ -123,11 +123,36 @@ function Initialize-OwnerBeforeAssets($Owner,$Rule) {
     Write-Atomic $manifestPath $utf8.GetBytes(($owner|ConvertTo-Json -Depth 8)) $null
     return $owner
 }
+function ConvertTo-GuestRelayModels($Models) {
+    if($Models -isnot [array] -or $Models.Count -lt 1 -or $Models.Count -gt 64){throw 'Relay models must be an array containing 1 to 64 entries.'}
+    $normalized=New-Object Collections.Generic.List[object]
+    $ids=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($model in $Models){
+        if($model -is [Collections.IDictionary]){$keys=@($model.Keys)}
+        elseif($model -is [pscustomobject]){$keys=@($model.PSObject.Properties.Name)}
+        else{throw 'Each relay model must contain only id, name and upstream strings.'}
+        if($keys.Count -ne 3 -or @($keys|Where-Object{$_ -cnotin @('id','name','upstream')}).Count){throw 'Each relay model must contain only id, name and upstream strings.'}
+        if($model.id -isnot [string] -or $model.upstream -isnot [string] -or $model.name -isnot [string] -or
+            $model.id -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._/\[\]-]{0,255}$' -or
+            $model.upstream -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._/\[\]-]{0,255}$' -or
+            $model.name.Length -lt 1 -or $model.name.Length -gt 256 -or $model.name.Trim() -cne $model.name -or
+            $model.name -match '[\x00-\x1f\x7f]' -or -not $ids.Add($model.id)){throw 'Relay model fields are invalid or repeat an id.'}
+        $normalized.Add([ordered]@{id=$model.id;name=$model.name;upstream=$model.upstream})
+    }
+    return ,$normalized.ToArray()
+}
+function Get-GuestRelayModels {
+    $models=@(@{id='claude/opus';name='Claude - Original subscription Opus';upstream='opus'},
+        @{id='claude/sonnet';name='Claude - Original subscription Sonnet';upstream='sonnet'},
+        @{id='claude/haiku';name='Claude - Original subscription Haiku';upstream='haiku'})
+    if($request.PSObject.Properties.Name -ccontains 'Models'){$models=$request.Models}
+    return ,(ConvertTo-GuestRelayModels $models)
+}
 function New-RelayConfiguration {
     return [ordered]@{version=1;listener=@{address=[string]$address;port=[int]$request.GatewayPort;
         allowedHosts=@(([string]$address+':'+$request.GatewayPort),('127.0.0.1:'+ $request.GatewayPort));allowedPeers=@([string]$peer)};
         gatewayKeyFile=$keyPath;mcpPort=[int]$request.McpPort;
-        models=@(@{id='claude/opus';name='Claude - Original subscription Opus';upstream='opus'},@{id='claude/sonnet';name='Claude - Original subscription Sonnet';upstream='sonnet'},@{id='claude/haiku';name='Claude - Original subscription Haiku';upstream='haiku'});
+        models=(Get-GuestRelayModels);
         cli=@{binary=$cliBinary;configDir=(Join-Path $cliRoot 'data\profile\.claude');profileDir=(Join-Path $cliRoot 'data\profile');stateDir=(Join-Path $root 'data\sdk-state')}}
 }
 function Remove-RetiredAssets($Files) {
@@ -359,6 +384,7 @@ try{
     $reportPath=Join-Path $requestDirectory ('codex-relay-vm-'+$requestId+'.result.json')
     $request=Get-Content -LiteralPath $requestFile -Raw|ConvertFrom-Json
     if($request.Home -ine $env:USERPROFILE -or $request.Action -cnotin @('Plan','Prepare','Start','Status','Stop','Restore') -or $request.ReportPath -ine $reportPath){throw 'The relay request targets an unexpected account.'}
+    $relayModels=Get-GuestRelayModels
     $base=Resolve-GuestPath (Join-Path $request.Home 'AppData\Local\CodexAccountBridge') $request.Home
     $root=Resolve-GuestPath (Join-Path $base 'ClaudeRelay') $base;$cliRoot=Resolve-GuestPath (Join-Path $base 'OfficialClaudeCli') $base
     $cliBinary=Resolve-GuestPath (Join-Path $cliRoot 'bin\claude.exe') $cliRoot
@@ -376,7 +402,7 @@ try{
     $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     if($request.Action -ceq 'Plan'){
         $result=[ordered]@{Success=$true;Action='Plan';RuntimeRoot=$root;Snapshot=$snapshot;CliPrepared=$snapshot.CliPrepared;
-            IsAdministrator=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);RealInference=$false}
+            Models=$relayModels;IsAdministrator=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);RealInference=$false}
     }elseif($request.Action -ceq 'Status'){
         $backend=$null;if($owner -and $owner.Phase -ceq 'prepared'){$backend=Public-Manager (Invoke-Manager 'Status')}
         $result=[ordered]@{Success=$true;Action='Status';Prepared=($owner -and $owner.Phase -ceq 'prepared');RuntimeRoot=$root;Backend=$backend;RealInference=$false}
@@ -441,6 +467,7 @@ try{
             $stage='verify-manager';$null=Invoke-Manager 'Plan'
             $result=[ordered]@{Success=$true;Action='Prepare';Prepared=$true;RuntimeRoot=$root;GatewayKeyFile=$keyPath;StartShortcut=$startShortcut;StopShortcut=$stopShortcut;
                 GatewayAddress=[string]$address;AllowedPeer=[string]$peer;GatewayPort=[int]$request.GatewayPort;McpAddress='127.0.0.1';McpPort=[int]$request.McpPort;
+                Models=$relayModels;
                 ServiceStarted=$false;LoginStarted=$false;OAuthCopied=$false;DesktopModeChanged=$false;RealInference=$false}
         }else{
             $stage='restore-owned-assets'

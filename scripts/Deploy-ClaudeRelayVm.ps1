@@ -11,7 +11,8 @@ param(
     [string]$AllowedPeer='192.168.168.1',
     [int]$GatewayPort=3435,
     [int]$McpPort=3436,
-    [string]$PlanHash
+    [string]$PlanHash,
+    [string]$ModelsJsonFile
 )
 $ErrorActionPreference='Stop'
 $relayProduct='CodexAccountBridge.OfficialClaudeRelayVm'
@@ -28,6 +29,41 @@ function Assert-RelayLocalPath([string]$Path) {
     if($absolute.Substring([IO.Path]::GetPathRoot($absolute).Length).Contains(':')){throw 'Relay deployment paths cannot use alternate data streams.'}
     while($cursor){if(Test-Path -LiteralPath $cursor){if((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Relay deployment paths cannot cross reparse points.'}};$cursor=[IO.Path]::GetDirectoryName($cursor)}
     return $absolute
+}
+function ConvertTo-RelayModels($Models) {
+    if($Models -isnot [array] -or $Models.Count -lt 1 -or $Models.Count -gt 64){throw 'Relay models must be an array containing 1 to 64 entries.'}
+    $normalized=New-Object Collections.Generic.List[object]
+    $ids=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($model in $Models){
+        if($model -is [Collections.IDictionary]){$keys=@($model.Keys)}
+        elseif($model -is [pscustomobject]){$keys=@($model.PSObject.Properties.Name)}
+        else{throw 'Each relay model must contain only id, name and upstream strings.'}
+        if($keys.Count -ne 3 -or @($keys|Where-Object{$_ -cnotin @('id','name','upstream')}).Count){throw 'Each relay model must contain only id, name and upstream strings.'}
+        if($model.id -isnot [string] -or $model.upstream -isnot [string] -or $model.name -isnot [string] -or
+            $model.id -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._/\[\]-]{0,255}$' -or
+            $model.upstream -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._/\[\]-]{0,255}$' -or
+            $model.name.Length -lt 1 -or $model.name.Length -gt 256 -or $model.name.Trim() -cne $model.name -or
+            $model.name -match '[\x00-\x1f\x7f]' -or -not $ids.Add($model.id)){throw 'Relay model fields are invalid or repeat an id.'}
+        $normalized.Add([ordered]@{id=$model.id;name=$model.name;upstream=$model.upstream})
+    }
+    return ,$normalized.ToArray()
+}
+function Read-RelayModels([string]$Path) {
+    if(-not $Path){return ,(ConvertTo-RelayModels @(
+        @{id='claude/opus';name='Claude - Original subscription Opus';upstream='opus'},
+        @{id='claude/sonnet';name='Claude - Original subscription Sonnet';upstream='sonnet'},
+        @{id='claude/haiku';name='Claude - Original subscription Haiku';upstream='haiku'}))}
+    $path=Assert-RelayLocalPath $Path
+    if(-not [IO.File]::Exists($path) -or ([IO.FileInfo]$path).Length -gt 64KB){throw 'The public relay model catalog is missing or exceeds 64 KiB.'}
+    $text=[IO.File]::ReadAllText($path,(New-Object Text.UTF8Encoding($false,$true)))
+    if([Text.Encoding]::UTF8.GetByteCount($text) -gt 64KB -or -not $text.TrimStart().StartsWith('[') -or
+        -not $text.TrimEnd().EndsWith(']')){throw 'The public relay model catalog must be a JSON array of at most 64 KiB.'}
+    try{
+        # Windows PowerShell preserves JSON arrays; newer versions need NoEnumerate to keep single and nested arrays distinct.
+        if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('NoEnumerate')){$models=ConvertFrom-Json -InputObject $text -NoEnumerate}
+        else{$models=ConvertFrom-Json -InputObject $text}
+    }catch{throw 'The public relay model catalog is not valid JSON.'}
+    return ,(ConvertTo-RelayModels $models)
 }
 function Set-RelayPrivateDirectory([string]$Path) {
     $null=Assert-RelayLocalPath $Path
@@ -113,7 +149,7 @@ function Invoke-RelayVmRequest([string]$Operation,$Package,$Reviewed=$null,[stri
     $hostRequest=Join-Path $staging 'request.json';$hostReport=Join-Path $staging 'result.json'
     try{
         $request=[ordered]@{Action=$Operation;Home=$GuestHome;ReportPath=$guestReport;GatewayAddress=$GatewayAddress;AllowedPeer=$AllowedPeer;
-            GatewayPort=$GatewayPort;McpPort=$McpPort;BundleHash=$Package.BundleHash;FileCount=$Package.FileCount;SdkVersion=$Package.SdkVersion;NodeVersion=$Package.NodeVersion}
+            GatewayPort=$GatewayPort;McpPort=$McpPort;Models=$relayModels;BundleHash=$Package.BundleHash;FileCount=$Package.FileCount;SdkVersion=$Package.SdkVersion;NodeVersion=$Package.NodeVersion}
         if($Reviewed){$request.ExpectedSnapshot=$Reviewed.Snapshot}
         if($BundlePath){$request.BundlePath=$guestBundle;$request.ZipHash=Get-RelayHash $BundlePath}
         [IO.File]::WriteAllText($hostRequest,($request|ConvertTo-Json -Depth 8),$relayUtf8)
@@ -152,15 +188,17 @@ function Invoke-RelayVmRequest([string]$Operation,$Package,$Reviewed=$null,[stri
 function Get-RelayVmPlan($Package) {
     $guest=Invoke-RelayVmRequest 'Plan' $Package
     $description=[ordered]@{Product=$relayProduct;VmInvoker=$relayInvoker;GuestScriptHash=$relayGuestHash;Home=$GuestHome;
-        BundleHash=$Package.BundleHash;GatewayAddress=$GatewayAddress;AllowedPeer=$AllowedPeer;GatewayPort=$GatewayPort;McpPort=$McpPort;Snapshot=$guest.Snapshot}
+        BundleHash=$Package.BundleHash;GatewayAddress=$GatewayAddress;AllowedPeer=$AllowedPeer;GatewayPort=$GatewayPort;McpPort=$McpPort;Models=$relayModels;Snapshot=$guest.Snapshot}
     return [ordered]@{Action='Plan';PlanHash=(Get-RelayTextHash ($description|ConvertTo-Json -Depth 10 -Compress));RuntimeRoot=$guest.RuntimeRoot;
         VmInvoker=$relayInvoker;GuestScriptHash=$relayGuestHash;Snapshot=$guest.Snapshot;BundleHash=$Package.BundleHash;FileCount=$Package.FileCount;TotalBytes=$Package.TotalBytes;
         SdkVersion=$Package.SdkVersion;NodeVersion=$Package.NodeVersion;CliPrepared=$guest.CliPrepared;IsAdministrator=$guest.IsAdministrator;
         GatewayAddress=$GatewayAddress;AllowedPeer=$AllowedPeer;GatewayPort=$GatewayPort;McpAddress='127.0.0.1';McpPort=$McpPort;
+        Models=$relayModels;
         CopiesGatewayKey=$true;CopiesOAuth=$false;PrepareStartsService=$false;PrepareStartsLogin=$false;DesktopModeChanged=$false;RealInference=$false}
 }
 
 $GuestHome=Assert-RelayLocalPath $GuestHome
+$relayModels=Read-RelayModels $ModelsJsonFile
 $VmInvoker=Assert-RelayLocalPath $VmInvoker;$GuestScript=Assert-RelayLocalPath $GuestScript
 if(-not [IO.File]::Exists($VmInvoker) -or -not [IO.File]::Exists($GuestScript)){throw 'The VM wrapper and guest deployment source must exist.'}
 $relayInvoker=[ordered]@{Path=$VmInvoker;SHA256=(Get-RelayHash $VmInvoker)};$relayGuestHash=Get-RelayHash $GuestScript

@@ -248,18 +248,18 @@ relay 的私有配置包含 `version=1`、`listener`（明确的 IP、端口、H
   },
   "routes": [
     {
-      "account": "CodeBuddy",
-      "provider": "codebuddy",
-      "model": {"id": "claude-codebuddy-opus-5-5", "name": "CodeBuddy · Opus 5.5"}
-    },
-    {
       "account": "Claude",
       "provider": "claude-cli",
       "model": {
-        "id": "claude/native-opus",
-        "name": "Claude · 原订阅 Opus",
+        "id": "claude-opus-5-5",
+        "name": "Opus 5.5",
         "upstream": "REPLACE_FROM_VERIFIED_CLI_CATALOG"
       }
+    },
+    {
+      "account": "CodeBuddy",
+      "provider": "codebuddy",
+      "model": {"id": "claude-codebuddy-opus-5-5", "name": "CodeBuddy Opus 5.5"}
     }
   ]
 }
@@ -274,14 +274,27 @@ relay 的私有配置包含 `version=1`、`listener`（明确的 IP、端口、H
 ```powershell
 # 按实际已配置并可见的模型 ID 填写；不发送真实推理。
 & D:\Bifrost\scripts\Configure-WithVm.ps1 -Action Plan `
-  -InferenceModels @('claude-codebuddy-opus-5-5', 'claude/native-opus')
+  -InferenceModels @('claude-opus-5-5', 'claude-codebuddy-opus-5-5')
 & D:\Bifrost\scripts\Configure-WithVm.ps1 -Action Apply -ModelsOnly `
   -GatewayBaseUrl http://127.0.0.1:43157 `
   -GatewayKeyFile D:\Bifrost\.state\with-vm\gateway.key `
-  -InferenceModels @('claude-codebuddy-opus-5-5', 'claude/native-opus')
+  -InferenceModels @('claude-opus-5-5', 'claude-codebuddy-opus-5-5')
 ```
 
-`-InferenceModels` 显式替换受管理模型列表，与旧 `-CodeBuddyOnly`、`-IncludeCodeBuddy` 开关互斥。它先验证渠道状态和精确目录，保留最初恢复值及其他配置的冲突检测。此脚本针对现有虚拟机部署；通用网关核心不依赖 VMware。
+`-InferenceModels` 显式替换受管理模型列表，接受模型 ID 字符串或官方模型对象；对象的 `name` 必须匹配网关目录中的精确 ID，`labelOverride` 只控制菜单名称。也可用 `-ModelsJsonFile D:\path\models.json` 读取 UTF-8 JSON 数组，便于通过 PowerShell 5 的 `-File` 入口传递对象。两种参数互斥，也不能与旧 `-CodeBuddyOnly`、`-IncludeCodeBuddy` 开关合用。脚本保留条目顺序和完整模型对象，先验证渠道状态和精确目录，并保留最初恢复值及其他配置的冲突检测。将 CodeBuddy 条目放在数组最后即可追加到菜单末尾。
+
+模型对象支持[官方配置字段](https://claude.com/docs/third-party/claude-desktop/configuration#models) `name`、`labelOverride`、`anthropicFamilyTier`、`isFamilyDefault`、`supports1m`、`prefer1m`、`maxEffort`；拒绝未知字段、重复 ID 和重复的同族默认模型。仅对已确认支持 1M 上下文的部署声明 `supports1m`。模型目录检查不会发送推理请求；此脚本针对现有虚拟机部署，通用网关核心不依赖 VMware。
+
+例如，模型文件可以保留原模型的正式 ID 和名称，把 CodeBuddy 追加到最后：
+
+```json
+[
+  {"name": "claude-opus-5-5", "labelOverride": "Opus 5.5", "anthropicFamilyTier": "opus", "isFamilyDefault": true},
+  {"name": "claude-codebuddy-opus-5-5", "labelOverride": "CodeBuddy Opus 5.5", "anthropicFamilyTier": "opus"}
+]
+```
+
+VM relay 部署也接受 `-ModelsJsonFile`，文件是由 `id`、`name`、`upstream` 组成的数组。`Plan` 和 `Prepare` 传入同一目录；模型 ID、名称、上游和顺序都纳入 PlanHash。客户端正式 ID 可以直接对应官方 CLI 的明确版本，菜单无需使用 `native` 路由别名。模型来源应为已登录 CLI 的初始化目录，桌面名称和排序可参照官方模型目录；公共目录不等于账号模型权限。3p 模式仍使用自己的列表配置，不能承诺与原账号的菜单分组、权限和默认偏好自动同步。
 
 CLI 会话恢复、官方历史导入和服务端提示缓存分别验证。已有 Desktop 历史首次交给 CLI 时，以明确标注角色的历史内容导入一次；后续匹配会话只提交新增用户消息并保留原生 session ID。这并非替换 CLI 的原生 assistant 历史。缓存标记的位置变化不会重建内容相同的会话；缓存由官方 CLI 管理，不能承诺迁移 1p 的缓存或相同命中率。网关记录原始流中的 `cache_read_input_tokens`、`cache_creation_input_tokens`，不重复累计 SDK 的整段会话统计。
 

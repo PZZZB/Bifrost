@@ -227,3 +227,20 @@
 - 已通过既有部署适配器更新并重启虚拟机中继。第二次检测从虚拟机 `127.0.0.1:43157` 发出，经过宿主 Messages 网关再返回虚拟机 CLI，HTTP 200、响应类型 `message`、结束原因 `max_tokens`，上游报告输出 1 token、输入 2 token、缓存写入 583 token。该检测不证明缓存命中、非空自然语言回复或完整工具回合；启动告警需用户点击 Check again 后复核。
 - 完整 JavaScript 离线测试 615/615 通过，其中 CLI 专项 68/68；独立源码复核通过。覆盖 JSON/SSE 截断、迟到续写和 SDK 错误隔离、索引清理、追问不复用截断会话，以及取消背压释放。宿主 Codex 服务没有为本次更新重启。
 - 两次授权检测均已使用，未继续发起模型请求。诊断证据位于 `.state/native-startup-20261021-attempt-1.json`、`.state/native-startup-20261021-attempt-2.json`，均不进入仓库；完整聊天和工具回合仍由用户验证。
+
+## Claude 模型菜单配置（2026-10-21，洛杉矶）
+
+- VM 官方 SDK 的 `supportedModels()` 初始化目录读取成功，输入流没有产生用户消息，未发送模型推理。目录包含当前四个模型家族及旧版本的明确 wire ID；不把默认别名再列成一个模型。
+- 待切换列表按官方公开 Chat 目录的名称和顺序，与该 VM CLI 返回的明确模型 ID 取交集：12 个原模型，最后追加 `CodeBuddy Opus 5.5`。未出现在 CLI 目录中的弃用项不加入。公共目录不是账号权限的证明，也没有验证原账号菜单的全部分组和默认偏好。
+- 用户明确表示尚无新会话、不需要旧 `native` 别名。新的客户端配置、宿主路由和 relay 目录均不包含这些别名；每个原模型请求携带明确版本，CodeBuddy 使用独立 ID。原模型的每个家族只标记首项为默认，CodeBuddy 不争用原 Opus 家族默认值。没有声明未经验证的 1M 能力。
+- `Configure-WithVm.ps1` 支持官方模型对象及 UTF-8 `ModelsJsonFile`，保持字符串调用兼容。对象标签、顺序、能力和最初恢复值受现有清单管理；ID、类型、唯一性及家族默认字段严格验证，目录检查只做 GET。对象键顺序变化不触发覆盖，数组条目顺序仍参与冲突检测。
+- Relay 部署脚本新增独立的 `ModelsJsonFile`，模型 ID、名称、上游和顺序纳入 PlanHash，guest 在修改资产前再次验证。配置仍通过现有原子发布和恢复日志生成；`Status`、`Start`、`Stop` 不会用默认目录覆盖实际配置。
+- PowerShell 5.1 和 7.6.5 分别通过 Configure 46 项、relay host 17 项、relay guest 31 项离线验证。独立交叉审查通过。检查包含单项数组、嵌套数组拒绝、规范化、PlanHash 变更、对象保存及恢复，无 VM、网络或推理调用。
+- 12 个正式 ID 的 relay Prepare 已实际成功，结果为 `ServiceStarted=false`、`LoginStarted=false`、`OAuthCopied=false`、`DesktopModeChanged=false`、`RealInference=false`。随后用户要求等待通知再重启宿主，因此新菜单和宿主路由没有启用；当前 relay 目录需与现行宿主路由保持一致，统一切换前不宣称新模型已可选。待切换数据和部署证据仅保存在 `.state/`。
+
+## Windows 工作区提示的只读诊断（2026-10-21）
+
+- VM 的 `VirtualMachinePlatform`、`HypervisorPlatform`、`Microsoft-Hyper-V-All` 均为 Disabled；当前没有 `vmcompute`、`hns` 服务，来宾未报告 SLAT/VM monitor 扩展。VMX 没有 `vhv.enable`，保留既有 `hypervisor.cpuid.v0 = "FALSE"`。
+- 宿主正在运行 Hyper-V，VMware 日志明确记录 `Monitor Mode: ULM`。这说明不能仅打开来宾 Windows 功能就认定完整 Cowork 工作区可用；Workstation 的嵌套虚拟化还受宿主 Hyper-V/VBS 模式约束。没有更改系统功能、VMX、代理、VPS 路由或启动配置，也没有重启系统。
+- 官方文档区分 3p 的本地界面/会话与原账号云端会话，并单独提供 Chat、本地文件分析和 Cowork 控制。原账号普通聊天正常，不能证明来宾本地工作区可启动；这条提示本身也不能证明所有聊天和模型请求都失败。
+- 对本地公开 ASAR 拷贝完成定向 REA 静态检查；模型对象及 `desktopHome` 的 schema 可见。主 bundle 语义图因内存限制覆盖不完整，没有执行客户端或修改二进制。代码中存在但当前公开文档未列出的 `no-vm` 值没有应用，不能当作已验证的官方部署方案。

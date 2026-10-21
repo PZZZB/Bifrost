@@ -14,6 +14,7 @@ $relayProduct='CodexAccountBridge.OfficialClaudeRelayVm'
 $testRoot=Join-Path $project ('.state\relay-vm-host-test-'+[guid]::NewGuid().ToString('N'))
 $fixture=Join-Path $testRoot 'source';$StateDir=Join-Path $testRoot 'claude-relay-vm'
 $GuestHome='C:\Users\Developer';$GatewayAddress='192.168.168.10';$AllowedPeer='192.168.168.1';$GatewayPort=3435;$McpPort=3436
+$relayModels=Read-RelayModels
 $passed=0
 function Require([bool]$Value,[string]$Message){if(-not $Value){throw $Message}}
 function Must-Fail([scriptblock]$Body){$failed=$false;try{& $Body|Out-Null}catch{$failed=$true};Require $failed 'An invalid relay deployment input was accepted.'}
@@ -39,6 +40,48 @@ try{
     $wrapperA=Join-Path $testRoot 'wrapper-a.ps1';$wrapperB=Join-Path $testRoot 'wrapper-b.ps1'
     Write-Fixture $wrapperA '# offline wrapper';Write-Fixture $wrapperB '# offline wrapper'
     $relayInvoker=@{Path=$wrapperA;SHA256=(Get-RelayHash $wrapperA)}
+    Require ($relayModels -is [array] -and $relayModels.Count -eq 3 -and
+        ($relayModels.id -join ',') -ceq 'claude/opus,claude/sonnet,claude/haiku' -and
+        ($relayModels.upstream -join ',') -ceq 'opus,sonnet,haiku') 'The default relay model aliases changed.'
+    $passed++
+
+    $catalogA=Join-Path $testRoot 'models-a.json';$catalogB=Join-Path $testRoot 'models-b.json'
+    Write-Fixture $catalogA '[{"upstream":"claude-opus-future","name":"Original Opus","id":"native/opus"}]'
+    Write-Fixture $catalogB '[{"id":"native/opus","name":"Original Opus","upstream":"claude-opus-future"}]'
+    $custom=Read-RelayModels $catalogA
+    Require ($custom -is [array] -and $custom.Count -eq 1 -and
+        ($custom[0].Keys -join ',') -ceq 'id,name,upstream' -and $custom[0].upstream -ceq 'claude-opus-future') 'A single custom model lost its array shape or stable property order.'
+    Write-Fixture $catalogB '[{"id":"native/opus","name":"Original Opus","upstream":"opus[1m]"},{"id":"claude/opus","name":"Legacy Opus","upstream":"opus[1m]"}]'
+    $aliases=Read-RelayModels $catalogB
+    Require ($aliases.Count -eq 2 -and $aliases[1].id -ceq 'claude/opus' -and $aliases[0].upstream -ceq $aliases[1].upstream) 'Distinct model aliases cannot share a valid upstream.'
+    $passed++
+
+    $catalogCase=0
+    foreach($invalid in @('null','{}','[]','[null]','["model"]','[[{"id":"native/opus","name":"Original Opus","upstream":"opus"}]]',
+        '[{"id":"native/opus","name":"Original Opus"}]',
+        '[{"id":"native/opus","name":"Original Opus","upstream":"opus","extra":true}]',
+        '[{"Id":"native/opus","name":"Original Opus","upstream":"opus"}]',
+        '[{"id":1,"name":"Original Opus","upstream":"opus"}]',
+        '[{"id":"native/opus","name":"","upstream":"opus"}]',
+        '[{"id":"native/opus","name":" Original Opus","upstream":"opus"}]',
+        '[{"id":"native/opus","name":"Original\nOpus","upstream":"opus"}]',
+        '[{"id":"native/opus","name":"Original Opus","upstream":false}]',
+        '[{"id":"native/opus","name":"Original Opus","upstream":"opus --flag"}]',
+        '[{"id":"native/opus","name":"Original Opus","upstream":"opus"},{"id":"native/opus","name":"Duplicate","upstream":"sonnet"}]',
+        '[{"id":"native/opus","name":"Original Opus","upstream":"opus"}')){
+        $catalogCase++;Write-Fixture $catalogB $invalid
+        try{Must-Fail {Read-RelayModels $catalogB}}catch{throw ('Model catalog rejection case '+$catalogCase+' failed: '+$_.Exception.Message)}
+    }
+    $many=@(for($i=0;$i -lt 65;$i++){[ordered]@{id=('model-'+$i);name='Model';upstream='opus'}})
+    Write-Fixture $catalogB (ConvertTo-Json -InputObject $many -Depth 5);Must-Fail {Read-RelayModels $catalogB}
+    Write-Fixture $catalogB ('x'*65537);Must-Fail {Read-RelayModels $catalogB}
+    foreach($field in @('id','name','upstream')){
+        $tooLong=[ordered]@{id='model';name='Model';upstream='opus'};$tooLong[$field]='x'*257
+        Write-Fixture $catalogB (ConvertTo-Json -InputObject @($tooLong) -Depth 5);Must-Fail {Read-RelayModels $catalogB}
+    }
+    Must-Fail {Read-RelayModels 'relative-models.json'};Must-Fail {Read-RelayModels (Join-Path $testRoot 'absent.json')}
+    $passed++
+
     $package=Get-RelayPackage $fixture $node
     Require ((Get-RelayPackage ($fixture+'\') $node).BundleHash -ceq $package.BundleHash) 'A trailing source directory separator changed dependency paths.'
     Require (@($package.Manifest|Where-Object{$_.Path -cin @('app/src/relay-control.mjs','app/src/models.mjs')}).Count -eq 2) 'The transitive relay source closure was incomplete.'
@@ -75,6 +118,17 @@ try{
     Require ($planB.PlanHash -cne $planC.PlanHash) 'Editing the guest deployment helper did not invalidate the reviewed plan.'
     $relayGuestHash=Get-RelayHash $GuestScript;$passed++
 
+    $relayModels=Read-RelayModels $catalogA;$modelPlanA=Get-RelayVmPlan $package
+    Write-Fixture $catalogB '[{"id":"native/opus","name":"Original Opus","upstream":"claude-opus-future"}]'
+    $relayModels=Read-RelayModels $catalogB;$modelPlanB=Get-RelayVmPlan $package
+    Require ($modelPlanA.PlanHash -ceq $modelPlanB.PlanHash -and $modelPlanB.Models[0].upstream -ceq 'claude-opus-future') 'Catalog property order or source path changed a normalized plan.'
+    foreach($field in @('id','name','upstream')){
+        $changed=[ordered]@{id='native/opus';name='Original Opus';upstream='claude-opus-future'};$changed[$field]+='-changed'
+        $relayModels=ConvertTo-RelayModels @($changed)
+        Require ((Get-RelayVmPlan $package).PlanHash -cne $modelPlanB.PlanHash) 'A model catalog change did not invalidate the reviewed plan.'
+    }
+    $relayModels=Read-RelayModels;$passed++
+
     $relayInvoker=@{Path=$wrapperA;SHA256=(Get-RelayHash $wrapperA)}
     Write-Fixture $wrapperA '$script:unexpectedWrapperRan=$true'
     $script:unexpectedWrapperRan=$false;Must-Fail {Invoke-RelayVm 'runProgramInGuest' @('never-run')}
@@ -88,6 +142,7 @@ try{
             $script:transportCount++
             if($Operation -ceq 'copyFileFromHostToGuest'){
                 Require ([IO.File]::Exists($Arguments[0])) 'The transfer source was not a real reviewed file.'
+                if($Arguments[0] -like '*\request.json'){$script:transferredModels=(Get-Content -LiteralPath $Arguments[0] -Raw|ConvertFrom-Json).Models}
             }elseif($Operation -ceq 'copyFileFromGuestToHost'){
                 if($Arguments[0] -like '*.result.json'){
                     $keyPath=Join-Path $GuestHome 'AppData\Local\CodexAccountBridge\ClaudeRelay\data\gateway.key'
@@ -104,6 +159,11 @@ try{
     }
     $null=& $runTransport 'Plan'
     Require ($script:transportCount -gt 0 -and $script:exportCount -eq 0) 'Plan exported a secret or skipped its public metadata transport.';$passed++
+    Require ($script:transferredModels.Count -eq 3 -and $script:transferredModels[2].id -ceq 'claude/haiku') 'The default catalog did not enter the guest request.'
+    $relayModels=Read-RelayModels $catalogA;$null=& $runTransport 'Plan'
+    Require ($script:transferredModels -is [array] -and $script:transferredModels.Count -eq 1 -and
+        $script:transferredModels[0].id -ceq 'native/opus' -and $script:transferredModels[0].upstream -ceq 'claude-opus-future') 'A custom single-model catalog was not transferred as an array.'
+    $relayModels=Read-RelayModels;$passed++
     $script:wrongKeyPath=$true;Must-Fail {& $runTransport 'Prepare'}
     Require ($script:exportCount -eq 0) 'An unexpected account key path was copied before validation.';$script:wrongKeyPath=$false;$passed++
     $result=& $runTransport 'Prepare'

@@ -11,7 +11,8 @@ param(
     [switch]$SkipFirewall,
     [switch]$IncludeCodeBuddy,
     [switch]$CodeBuddyOnly,
-    [string[]]$InferenceModels,
+    [object[]]$InferenceModels,
+    [string]$ModelsJsonFile,
     [switch]$ModelsOnly
 )
 
@@ -178,14 +179,64 @@ function Assert-DesktopGatewayUrl([string]$BaseUrl, [string]$Operation) {
     if ($Operation -ceq 'Apply' -and $parsed.Host -cne '127.0.0.1') { throw 'Claude Desktop requires loopback HTTP. Run Repair-ClaudeVmGateway.ps1 -Action Apply for an existing installation; use -ForwardOnly before a new installation.' }
 }
 
-function Get-RequestedVmModels([bool]$IncludeCodeBuddy, [bool]$CodeBuddyOnly, [string[]]$InferenceModels) {
+function Get-InferenceModelName($Model) {
+    if ($Model -is [string]) { return $Model }
+    return $Model.name
+}
+
+function Assert-InferenceModelEntries([object[]]$Models, [bool]$ExplicitModels = $true) {
+    if ($Models.Count -lt 1 -or $Models.Count -gt 256) { throw 'Unexpected VM model set.' }
+    $seen = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $defaults = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($model in $Models) {
+        if ($model -isnot [string]) {
+            if (-not $ExplicitModels -or ($model -isnot [Collections.IDictionary] -and $model -isnot [pscustomobject])) { throw 'Unexpected VM model set.' }
+            $keys = if ($model -is [Collections.IDictionary]) { @($model.Keys) } else { @($model.PSObject.Properties.Name) }
+            if ('name' -cnotin $keys -or @($keys | Where-Object { $_ -cnotin @('name', 'labelOverride', 'supports1m', 'prefer1m', 'anthropicFamilyTier', 'isFamilyDefault', 'maxEffort') }).Count -gt 0) { throw 'Unexpected VM model set.' }
+            if ('labelOverride' -cin $keys -and ($model.labelOverride -isnot [string] -or
+                [string]::IsNullOrWhiteSpace($model.labelOverride) -or $model.labelOverride.Length -gt 256 -or $model.labelOverride -match '[\x00-\x1f\x7f]')) { throw 'Unexpected VM model set.' }
+            foreach ($key in @('supports1m', 'prefer1m', 'isFamilyDefault')) {
+                if ($key -cin $keys -and $model.$key -isnot [bool]) { throw 'Unexpected VM model set.' }
+            }
+            if ('anthropicFamilyTier' -cin $keys -and ($model.anthropicFamilyTier -isnot [string] -or
+                $model.anthropicFamilyTier -cnotin @('opus', 'sonnet', 'haiku', 'fable', 'mythos'))) { throw 'Unexpected VM model set.' }
+            if ('maxEffort' -cin $keys -and ($model.maxEffort -isnot [string] -or
+                $model.maxEffort -cnotin @('low', 'medium', 'high', 'xhigh', 'max'))) { throw 'Unexpected VM model set.' }
+            if ($model.prefer1m -eq $true -and $model.supports1m -ne $true) { throw 'Unexpected VM model set.' }
+            if ($model.isFamilyDefault -eq $true -and (-not $model.anthropicFamilyTier -or -not $defaults.Add($model.anthropicFamilyTier))) { throw 'Unexpected VM model set.' }
+        }
+        $name = Get-InferenceModelName $model
+        if ($name -isnot [string] -or $name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$' -or
+            -not $seen.Add($name) -or (-not $ExplicitModels -and $name -cnotin @('claude-opus-5-5', 'claude-codebuddy-opus-5-5'))) { throw 'Unexpected VM model set.' }
+    }
+    if (-not $ExplicitModels -and $Models.Count -gt 2) { throw 'Unexpected VM model set.' }
+}
+
+function Read-InferenceModelsFile([string]$Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'ModelsJsonFile must name an existing JSON array file.' }
+    $file = Get-Item -LiteralPath $Path
+    if ($file.Length -gt 65536) { throw 'ModelsJsonFile must be at most 64 KiB.' }
+    try {
+        $text = [IO.File]::ReadAllText($file.FullName).TrimStart([char]0xFEFF).Trim()
+        if (-not $text.StartsWith('[') -or -not $text.EndsWith(']')) { throw 'Expected array.' }
+        if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('NoEnumerate')) {
+            $models = ConvertFrom-Json -InputObject $text -NoEnumerate
+        } else { $models = ConvertFrom-Json -InputObject $text }
+        if ($models -isnot [array]) { throw 'Expected array.' }
+    } catch { throw 'ModelsJsonFile must contain a valid JSON array.' }
+    Assert-InferenceModelEntries $models
+    return ,$models
+}
+
+function Get-RequestedVmModels([bool]$IncludeCodeBuddy, [bool]$CodeBuddyOnly, [object[]]$InferenceModels, [string]$ModelsJsonFile) {
     if ($IncludeCodeBuddy -and $CodeBuddyOnly) { throw 'IncludeCodeBuddy and CodeBuddyOnly cannot be used together.' }
+    if ($PSBoundParameters.ContainsKey('ModelsJsonFile')) {
+        if ($PSBoundParameters.ContainsKey('InferenceModels') -or $IncludeCodeBuddy -or $CodeBuddyOnly) { throw 'ModelsJsonFile cannot be combined with InferenceModels, IncludeCodeBuddy or CodeBuddyOnly.' }
+        return ,(Read-InferenceModelsFile $ModelsJsonFile)
+    }
     if ($PSBoundParameters.ContainsKey('InferenceModels')) {
         if ($IncludeCodeBuddy -or $CodeBuddyOnly) { throw 'InferenceModels cannot be combined with IncludeCodeBuddy or CodeBuddyOnly.' }
-        if ($InferenceModels.Count -lt 1 -or @($InferenceModels | Select-Object -Unique).Count -ne $InferenceModels.Count -or
-            @($InferenceModels | Where-Object { $_ -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$' }).Count -gt 0) {
-            throw 'InferenceModels must contain nonempty, unique model IDs without whitespace or control characters.'
-        }
+        Assert-InferenceModelEntries $InferenceModels
         return ,@($InferenceModels)
     }
     if ($CodeBuddyOnly) { return ,@('claude-codebuddy-opus-5-5') }
@@ -261,7 +312,8 @@ $reportPath = $null
 
 function To-Map($Value) {
     if ($Value -is [Collections.IDictionary]) { return ,$Value }
-    if ($Value -is [pscustomobject]) {
+    # ConvertFrom-Json can wrap scalar array entries in PSObject; keep their JSON type.
+    if ($null -ne $Value -and $Value.GetType() -eq [System.Management.Automation.PSCustomObject]) {
         $map = [ordered]@{}
         foreach ($property in $Value.PSObject.Properties) { $map[$property.Name] = To-Map $property.Value }
         return ,$map
@@ -269,6 +321,8 @@ function To-Map($Value) {
     if ($Value -is [array]) { return ,@(foreach ($item in $Value) { To-Map $item }) }
     return $Value
 }
+
+# The host injects its model-entry helpers here so both sides enforce one schema.
 
 function Private-Directory([string]$Directory) {
     [IO.Directory]::CreateDirectory($Directory) | Out-Null
@@ -319,10 +373,30 @@ function Field($Document, [string]$Key) {
     return [ordered]@{ Exists = $false }
 }
 
+function Test-JsonEqual($Left, $Right) {
+    $leftValue = To-Map $Left
+    $rightValue = To-Map $Right
+    if ($leftValue -is [Collections.IDictionary] -or $rightValue -is [Collections.IDictionary]) {
+        if ($leftValue -isnot [Collections.IDictionary] -or $rightValue -isnot [Collections.IDictionary] -or $leftValue.Count -ne $rightValue.Count) { return $false }
+        foreach ($key in $leftValue.Keys) {
+            if ($key -cnotin @($rightValue.Keys) -or -not (Test-JsonEqual $leftValue[$key] $rightValue[$key])) { return $false }
+        }
+        return $true
+    }
+    if ($leftValue -is [array] -or $rightValue -is [array]) {
+        if ($leftValue -isnot [array] -or $rightValue -isnot [array] -or $leftValue.Count -ne $rightValue.Count) { return $false }
+        for ($index = 0; $index -lt $leftValue.Count; $index++) {
+            if (-not (Test-JsonEqual $leftValue[$index] $rightValue[$index])) { return $false }
+        }
+        return $true
+    }
+    return ((ConvertTo-Json -InputObject $leftValue -Depth 100 -Compress) -ceq (ConvertTo-Json -InputObject $rightValue -Depth 100 -Compress))
+}
+
 function Equal-Field($Actual, $Expected) {
     if ([bool]$Actual.Exists -ne [bool]$Expected.Exists) { return $false }
     if (-not $Actual.Exists) { return $true }
-    return (($Actual.Value | ConvertTo-Json -Depth 100 -Compress) -ceq ($Expected.Value | ConvertTo-Json -Depth 100 -Compress))
+    return (Test-JsonEqual $Actual.Value $Expected.Value)
 }
 
 function Set-Fields($Document, $Fields, [string]$Side) {
@@ -346,15 +420,18 @@ function Assert-Fields($Document, $Fields, [string]$Phase) {
     }
 }
 
-function Set-RequestedModels($Manifest, [string[]]$Models, [bool]$ExplicitModels = $false) {
+function Set-RequestedModels($Manifest, [object[]]$Models, [bool]$ExplicitModels = $false) {
+    Assert-InferenceModelEntries $Models $ExplicitModels
+    $requestedIds = @($Models | ForEach-Object { Get-InferenceModelName $_ })
     $changed = $false
     foreach ($file in $Manifest.Files) {
         foreach ($field in $file.Fields) {
             if ($field.Key -cne 'inferenceModels') { continue }
             $current = @($field.Installed.Value)
-            if (($current -join ',') -ceq ($Models -join ',')) { continue }
-            $codeBuddyOnly = $Models.Count -eq 1 -and $Models[0] -ceq 'claude-codebuddy-opus-5-5'
-            if ($Manifest.Phase -ceq 'upgrading' -or (-not $ExplicitModels -and -not $codeBuddyOnly -and @($current | Where-Object { $_ -cnotin $Models }).Count -gt 0)) {
+            if (Equal-Field $field.Installed ([ordered]@{ Exists = $true; Value = @($Models) })) { continue }
+            $currentIds = @($current | ForEach-Object { Get-InferenceModelName $_ })
+            $codeBuddyOnly = $requestedIds.Count -eq 1 -and $requestedIds[0] -ceq 'claude-codebuddy-opus-5-5'
+            if ($Manifest.Phase -ceq 'upgrading' -or (-not $ExplicitModels -and -not $codeBuddyOnly -and @($currentIds | Where-Object { $_ -cnotin $requestedIds }).Count -gt 0)) {
                 throw 'A model upgrade is pending or the requested set would remove an installed model outside CodeBuddyOnly mode.'
             }
             $field.PreviousInstalled = $field.Installed
@@ -376,7 +453,9 @@ function New-FilePlan([string]$Path, $Values) {
     }
 }
 
-function Assert-GatewayReady([string]$BaseUrl, [string]$Key, [string[]]$Models = @('claude-opus-5-5'), [bool]$ExplicitModels = $false) {
+function Assert-GatewayReady([string]$BaseUrl, [string]$Key, [object[]]$Models = @('claude-opus-5-5'), [bool]$ExplicitModels = $false) {
+    Assert-InferenceModelEntries $Models $ExplicitModels
+    $requestedIds = @($Models | ForEach-Object { Get-InferenceModelName $_ })
     $arguments = @{
         Uri = ($BaseUrl.TrimEnd('/') + '/health'); Method = 'Get'
         Headers = @{ Authorization = 'Bearer ' + $Key }; TimeoutSec = 15
@@ -384,7 +463,7 @@ function Assert-GatewayReady([string]$BaseUrl, [string]$Key, [string[]]$Models =
     try { $health = Invoke-RestMethod @arguments }
     catch { throw 'Gateway readiness is unavailable. The previous configuration was retained.' }
     if ($health.ok -isnot [bool] -or -not $health.ok) { throw 'The gateway is not ready. The previous configuration was retained.' }
-    $withRequested = 'claude-opus-5-5' -cin $Models -and
+    $withRequested = 'claude-opus-5-5' -cin $requestedIds -and
         (-not $ExplicitModels -or $null -ne $health.providers.With -or $null -eq $health.providers.Claude)
     $withProvider = if ($null -ne $health.providers.With) { $health.providers.With } else { $health.provider }
     if ($withRequested -and
@@ -392,12 +471,12 @@ function Assert-GatewayReady([string]$BaseUrl, [string]$Key, [string[]]$Models =
          $withProvider.ready -isnot [bool] -or -not $withProvider.ready)) {
         throw 'The With provider is not authenticated and ready. The previous configuration was retained.'
     }
-    if ('claude-codebuddy-opus-5-5' -cin $Models -and
+    if ('claude-codebuddy-opus-5-5' -cin $requestedIds -and
         ($health.providers.CodeBuddy.authenticated -isnot [bool] -or -not $health.providers.CodeBuddy.authenticated -or
          $health.providers.CodeBuddy.ready -isnot [bool] -or -not $health.providers.CodeBuddy.ready)) {
         throw 'The CodeBuddy provider is not authenticated and ready. The previous configuration was retained.'
     }
-    $claudeModels = @($Models | Where-Object { $_ -cne 'claude-codebuddy-opus-5-5' -and
+    $claudeModels = @($requestedIds | Where-Object { $_ -cne 'claude-codebuddy-opus-5-5' -and
         -not ($_ -ceq 'claude-opus-5-5' -and $withRequested) })
     $claudeAuthentication = $health.providers.Claude.authenticated
     if ($claudeModels.Count -gt 0 -and $null -ne $claudeAuthentication -and
@@ -417,7 +496,7 @@ function Assert-GatewayReady([string]$BaseUrl, [string]$Key, [string[]]$Models =
         @($modelIds | Select-Object -Unique).Count -ne $modelIds.Count -or
         @($modelIds | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$' }).Count -gt 0 -or
         (-not $ExplicitModels -and @($modelIds | Where-Object { $_ -cnotin @('claude-opus-5-5', 'claude-codebuddy-opus-5-5') }).Count -gt 0) -or
-        @($Models | Where-Object { $_ -cnotin $modelIds }).Count -gt 0) {
+        @($requestedIds | Where-Object { $_ -cnotin $modelIds }).Count -gt 0) {
         throw 'The gateway model catalog does not match the requested models.'
     }
 }
@@ -436,11 +515,7 @@ try {
     if ($request.Contains('ExplicitModels') -and $request.ExplicitModels -isnot [bool]) { throw 'Unexpected model selection mode.' }
     $explicitModels = $request.Contains('ExplicitModels') -and $request.ExplicitModels -eq $true
     $models = if ($request.Contains('Models')) { @($request.Models) } else { @('claude-opus-5-5') }
-    if ($models.Count -lt 1 -or
-        @($models | Select-Object -Unique).Count -ne $models.Count -or
-        @($models | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$' }).Count -gt 0 -or
-        (-not $explicitModels -and ($models.Count -gt 2 -or
-         @($models | Where-Object { $_ -cnotin @('claude-opus-5-5', 'claude-codebuddy-opus-5-5') }).Count -gt 0))) { throw 'Unexpected VM model set.' }
+    Assert-InferenceModelEntries $models $explicitModels
     $reportPath = $request.ReportPath
     Remove-Item -LiteralPath $RequestFile -Force
     if ($env:COMPUTERNAME -cne 'CLAUDE-DEV-VM' -or $request.Home -cne 'C:\Users\Developer') { throw 'This configuration targets only the existing Claude Workspace VM.' }
@@ -493,7 +568,7 @@ try {
                     disableDeploymentModeChooser = $true; inferenceModels = @($models)
                     alwaysStartWithDefaultModel = $true
                 }
-                # Official third-party Desktop model configuration accepts this string array.
+                # Official third-party Desktop configuration accepts IDs and model objects.
                 # The gateway independently restricts each alias to its selected provider.
                 $files += New-FilePlan $profilePath $profileValues
                 $files += New-FilePlan $metaPath ([ordered]@{ entries = $entries; appliedId = $request.ProfileId })
@@ -554,6 +629,10 @@ try {
     if ($PSCommandPath) { Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue }
 }
 '@
+$modelHelpers = foreach ($name in @('Get-InferenceModelName', 'Assert-InferenceModelEntries')) {
+    'function ' + $name + ' {' + (Get-Item -LiteralPath ('Function:\' + $name)).Definition + '}'
+}
+$GuestPayload = $GuestPayload.Replace('# The host injects its model-entry helpers here so both sides enforce one schema.', ($modelHelpers -join "`n"))
 
 function Invoke-Vm([string]$Operation, [string[]]$OperationArguments, [switch]$AllowFailure) {
     & $VmInvoker -Operation $Operation -OperationArguments $OperationArguments | Out-Null
@@ -603,9 +682,10 @@ function Invoke-GuestConfiguration([string]$GuestAction, [string]$GatewayKey) {
     }
 }
 
-$explicitModels = $PSBoundParameters.ContainsKey('InferenceModels')
+$explicitModels = $PSBoundParameters.ContainsKey('InferenceModels') -or $PSBoundParameters.ContainsKey('ModelsJsonFile')
 $modelOptions = @{ IncludeCodeBuddy = [bool]$IncludeCodeBuddy; CodeBuddyOnly = [bool]$CodeBuddyOnly }
-if ($explicitModels) { $modelOptions.InferenceModels = $InferenceModels }
+if ($PSBoundParameters.ContainsKey('InferenceModels')) { $modelOptions.InferenceModels = $InferenceModels }
+if ($PSBoundParameters.ContainsKey('ModelsJsonFile')) { $modelOptions.ModelsJsonFile = $ModelsJsonFile }
 $requestedModels = Get-RequestedVmModels @modelOptions
 Assert-DesktopGatewayUrl $GatewayBaseUrl $Action
 if ($GuestHome -cne 'C:\Users\Developer' -or $PackageFamily -notmatch '^(Claude|AnthropicPBC\.Claude)_[A-Za-z0-9]+$') { throw 'Unexpected guest profile or package family.' }

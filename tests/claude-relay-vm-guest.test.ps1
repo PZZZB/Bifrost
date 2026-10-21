@@ -6,7 +6,7 @@ $tokens=$null;$parseErrors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$parseErrors)
 if($parseErrors.Count){throw 'The relay guest adapter does not parse.'}
 foreach($name in @('Resolve-GuestPath','File-Hash','Text-Hash','Private-Directory','Write-Atomic','Read-Owner','Resolve-OwnedPath','Assert-OwnedFiles',
-    'Index-OwnedFiles','New-TargetRecord','Publish-StagedAsset','Initialize-OwnerBeforeAssets','New-RelayConfiguration','Remove-RetiredAssets','Restore-OwnedAssets',
+    'Index-OwnedFiles','New-TargetRecord','Publish-StagedAsset','Initialize-OwnerBeforeAssets','ConvertTo-GuestRelayModels','Get-GuestRelayModels','New-RelayConfiguration','Remove-RetiredAssets','Restore-OwnedAssets',
     'Rule-Hash','Assert-OwnedRule','New-ScopedRule','Assert-ScopedRule','New-ManagerProcess','Read-ManagerResult','Invoke-Manager','Public-Manager','Stop-InstalledRelay','Remove-RelayStaging','Read-Bundle')){
     $definitions=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
     if($definitions.Count -ne 1){throw 'An expected guest helper was not found.'}
@@ -163,6 +163,45 @@ if($Action -cne 'Start' -or $PlanHash -cne ('b'*64)){throw 'PRIVATE_FAKE_MANAGER
             $config.listener.allowedHosts -ccontains '192.168.168.10:3435' -and $config.listener.allowedHosts -ccontains '127.0.0.1:3435') 'The host TCP forward would fail exact Host validation.'
         Assert-Test (@($config.listener.allowedPeers).Count -eq 1 -and $config.listener.allowedPeers[0] -ceq '192.168.168.1') 'Forwarded Host support widened the peer allowlist.'
         Assert-Test ($config.cli.configDir.StartsWith($cliRoot+'\',[StringComparison]::OrdinalIgnoreCase)) 'The relay uses another account profile.'
+        Assert-Test (($config.models.id -join ',') -ceq 'claude/opus,claude/sonnet,claude/haiku' -and
+            ($config.models.upstream -join ',') -ceq 'opus,sonnet,haiku') 'The default model catalog changed.'
+    }
+
+    Test-Case 'guest catalog validation preserves canonical models and legacy aliases without fixed versions' {
+        $catalog=@([pscustomobject]@{upstream='claude-opus-future';name='Original Opus';id='claude-opus-future'},
+            [pscustomobject]@{name='Legacy Opus';upstream='claude-opus-future';id='claude/opus'})
+        $request|Add-Member NoteProperty Models $catalog
+        $config=New-RelayConfiguration
+        Assert-Test ($config.models -is [array] -and $config.models.Count -eq 2 -and
+            $config.models[0].id -ceq 'claude-opus-future' -and $config.models[1].id -ceq 'claude/opus' -and
+            $config.models[0].upstream -ceq $config.models[1].upstream) 'The generated relay configuration dropped canonical models or aliases.'
+        Assert-Test (($config.models[0].Keys -join ',') -ceq 'id,name,upstream') 'The guest model catalog did not normalize field order.'
+        $request.Models=@($catalog[0]);$single=New-RelayConfiguration
+        $roundTrip=ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $single -Depth 8)
+        Assert-Test ($roundTrip.models -is [array] -and $roundTrip.models.Count -eq 1) 'A single model became a JSON object.'
+    }
+
+    Test-Case 'guest independently rejects malformed catalogs before configuration generation' {
+        foreach($json in @('null','{}','[]','[null]','["model"]','[[{"id":"native/opus","name":"Original Opus","upstream":"opus"}]]',
+            '[{"id":"native/opus","name":"Original Opus"}]',
+            '[{"id":"native/opus","name":"Original Opus","upstream":"opus","extra":true}]',
+            '[{"Id":"native/opus","name":"Original Opus","upstream":"opus"}]',
+            '[{"id":1,"name":"Original Opus","upstream":"opus"}]',
+            '[{"id":"native/opus","name":" ","upstream":"opus"}]',
+            '[{"id":"native/opus","name":"Original\nOpus","upstream":"opus"}]',
+            '[{"id":"native/opus","name":"Original Opus","upstream":false}]',
+            '[{"id":"native/opus","name":"Original Opus","upstream":"opus --flag"}]',
+            '[{"id":"native/opus","name":"Original Opus","upstream":"opus"},{"id":"native/opus","name":"Duplicate","upstream":"sonnet"}]')){
+            $value=ConvertFrom-Json -InputObject ('{"Models":'+$json+'}')
+            $request|Add-Member NoteProperty Models $value.Models -Force
+            Expect-Failure {New-RelayConfiguration}
+        }
+        $request.Models=@(for($i=0;$i -lt 65;$i++){[ordered]@{id=('model-'+$i);name='Model';upstream='opus'}})
+        Expect-Failure {New-RelayConfiguration}
+        $request.Models=@([ordered]@{id='model';name=('x'*257);upstream='opus'})
+        Expect-Failure {New-RelayConfiguration}
+        $request.Models=@([ordered]@{id=('x'*257);name='Model';upstream='opus'})
+        Expect-Failure {New-RelayConfiguration}
     }
 
     Test-Case 'first ownership is durable before the runtime acquires any content' {

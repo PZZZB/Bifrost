@@ -15,15 +15,27 @@ $literal = $hostAst.Find({ param($node)
 $guestTokens = $null; $guestErrors = $null
 $guestAst = [Management.Automation.Language.Parser]::ParseInput($literal.Value, [ref]$guestTokens, [ref]$guestErrors)
 if ($guestErrors.Count) { throw 'Guest payload does not parse.' }
-$needed = @('To-Map', 'Hash-File', 'Read-Document', 'Write-Json', 'Field', 'Equal-Field', 'Set-Fields', 'Assert-Fields', 'New-FilePlan', 'Assert-GatewayReady', 'Set-RequestedModels')
+$needed = @('To-Map', 'Hash-File', 'Read-Document', 'Write-Json', 'Field', 'Test-JsonEqual', 'Equal-Field', 'Set-Fields', 'Assert-Fields', 'New-FilePlan', 'Assert-GatewayReady', 'Set-RequestedModels')
 foreach ($definition in $guestAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
     if ($definition.Name -in $needed) { . ([scriptblock]::Create($definition.Extent.Text)) }
 }
 foreach ($definition in $hostAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
-    if ($definition.Name -in @('Get-PrivateDirectory', 'Test-SameSet', 'Get-PortException', 'Assert-RuleShape', 'Assert-AllowRule', 'Assert-AllowSnapshot', 'Invoke-FirewallApply', 'Invoke-FirewallRestore', 'Assert-DesktopGatewayUrl', 'Get-RequestedVmModels')) {
+    if ($definition.Name -in @('Get-PrivateDirectory', 'Test-SameSet', 'Get-PortException', 'Assert-RuleShape', 'Assert-AllowRule', 'Assert-AllowSnapshot', 'Invoke-FirewallApply', 'Invoke-FirewallRestore', 'Assert-DesktopGatewayUrl', 'Get-InferenceModelName', 'Assert-InferenceModelEntries', 'Read-InferenceModelsFile', 'Get-RequestedVmModels')) {
         . ([scriptblock]::Create($definition.Extent.Text))
     }
 }
+# Exercise the exact helper injection used to produce the standalone guest script.
+foreach ($statement in $hostAst.EndBlock.Statements) {
+    if ($statement -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $statement.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+        $statement.Left.VariablePath.UserPath -in @('GuestPayload', 'modelHelpers')) {
+        . ([scriptblock]::Create($statement.Extent.Text))
+    }
+}
+$guestAst = [Management.Automation.Language.Parser]::ParseInput($GuestPayload, [ref]$guestTokens, [ref]$guestErrors)
+if ($guestErrors.Count -or @($guestAst.FindAll({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Get-InferenceModelName', 'Assert-InferenceModelEntries')
+}, $true)).Count -ne 2) { throw 'The standalone guest payload did not receive the shared model schema.' }
 # Function mocks take precedence over the real Windows firewall cmdlets.
 $fakeRules = @{}
 function Get-Rule([string]$Name) {
@@ -69,7 +81,8 @@ try {
     try { Get-RequestedVmModels $true $true | Out-Null } catch { $rejected = $true }
     if (-not $rejected) { throw 'Conflicting CodeBuddy switches were accepted.' }
     $passed++
-    if ('InferenceModels' -cnotin @($hostAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })) {
+    if ('InferenceModels' -cnotin @($hostAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }) -or
+        'ModelsJsonFile' -cnotin @($hostAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })) {
         throw 'Explicit inference model selection is not exposed by the host adapter.'
     }
     $explicitSelection = @('claude/claude-opus-5-5', 'claude/claude-sonnet-5', 'claude-codebuddy-opus-5-5')
@@ -90,7 +103,71 @@ try {
     $selected = Get-RequestedVmModels $false $false -InferenceModels @('claude/opus', 'Claude/opus')
     if ($selected.Count -ne 2) { throw 'Exact model identifiers were compared without case sensitivity.' }
     $passed++
-    $modelGuard = $guestAst.Find({ param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text.Contains("throw 'Unexpected VM model set.'") }, $true)
+    $objectSelection = @(
+        [ordered]@{ name = 'claude/claude-opus-5-5'; labelOverride = 'Opus 5.5'; anthropicFamilyTier = 'opus'; isFamilyDefault = $true; maxEffort = 'max' },
+        'claude/claude-sonnet-5',
+        [ordered]@{ name = 'claude-codebuddy-opus-5-5'; labelOverride = 'CodeBuddy Opus 5.5'; anthropicFamilyTier = 'opus'; isFamilyDefault = $false; supports1m = $false }
+    )
+    $selected = Get-RequestedVmModels $false $false -InferenceModels $objectSelection
+    if (-not (Test-JsonEqual $selected $objectSelection) -or
+        @($selected | ForEach-Object { Get-InferenceModelName $_ })[-1] -cne 'claude-codebuddy-opus-5-5') { throw 'Object model entries lost labels, order, or the final CodeBuddy row.' }
+    $passed++
+    foreach ($invalidObjects in @(
+        @([ordered]@{ name = 'claude/model'; unknown = $true }),
+        @([ordered]@{ Name = 'claude/model' }),
+        @([ordered]@{ name = [int]5 }),
+        @([ordered]@{ name = 'claude/model'; labelOverride = "bad`nlabel" }),
+        @([ordered]@{ name = 'claude/model'; labelOverride = ' ' }),
+        @([ordered]@{ name = 'claude/model'; supports1m = 'true' }),
+        @([ordered]@{ name = 'claude/model'; prefer1m = $true }),
+        @([ordered]@{ name = 'claude/model'; isFamilyDefault = $true }),
+        @([ordered]@{ name = 'claude/model'; anthropicFamilyTier = 'Opus' }),
+        @([ordered]@{ name = 'claude/model'; maxEffort = 'ultra' }),
+        @('claude/model', [ordered]@{ name = 'claude/model'; labelOverride = 'Duplicate ID' }),
+        @([ordered]@{ name = 'claude/model'; anthropicFamilyTier = 'opus'; isFamilyDefault = $true },
+          [ordered]@{ name = 'claude/other'; anthropicFamilyTier = 'opus'; isFamilyDefault = $true }),
+        @($null)
+    )) {
+        $rejected = $false
+        try { Get-RequestedVmModels $false $false -InferenceModels $invalidObjects | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw 'A malformed or ambiguous model object was accepted.' }
+    }
+    Get-RequestedVmModels $false $false -InferenceModels @([ordered]@{
+        name = 'claude/model'; supports1m = $true; prefer1m = $true; anthropicFamilyTier = 'mythos'; isFamilyDefault = $true; maxEffort = 'xhigh'
+    }) | Out-Null
+    $passed++
+    $modelsFile = Join-Path $testRoot 'models.json'
+    [IO.File]::WriteAllText($modelsFile, (ConvertTo-Json -InputObject $objectSelection -Depth 20), $utf8)
+    $selected = Get-RequestedVmModels $false $false -ModelsJsonFile $modelsFile
+    if (-not (Test-JsonEqual $selected $objectSelection)) { throw 'The model JSON file did not preserve object metadata and row order.' }
+    foreach ($options in @(
+        @{ IncludeCodeBuddy = $true; CodeBuddyOnly = $false },
+        @{ IncludeCodeBuddy = $false; CodeBuddyOnly = $true },
+        @{ IncludeCodeBuddy = $false; CodeBuddyOnly = $false; InferenceModels = @('claude/model') }
+    )) {
+        $rejected = $false
+        try { Get-RequestedVmModels @options -ModelsJsonFile $modelsFile | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw 'A models JSON file accepted conflicting model selection switches.' }
+    }
+    $passed++
+    foreach ($singleJson in @('["claude/one"]', '[{"name":"claude/one","labelOverride":"Only model"}]')) {
+        [IO.File]::WriteAllText($modelsFile, $singleJson, $utf8)
+        $selected = Read-InferenceModelsFile $modelsFile
+        if ($selected -isnot [array] -or $selected.Count -ne 1 -or (Get-InferenceModelName $selected[0]) -cne 'claude/one' -or
+            $selected[0] -is [array]) { throw 'A single model JSON entry gained or lost an array level.' }
+    }
+    $passed++
+    foreach ($invalidJson in @('{}', '"claude/model"', '[]', '[null]', '[', '[{"name":"claude/model"}',
+        '[[{"name":"claude/model"}]]', '[["claude/model"]]', '[{"name":"claude/model","unknown":true}]')) {
+        [IO.File]::WriteAllText($modelsFile, $invalidJson, $utf8); $rejected = $false
+        try { Read-InferenceModelsFile $modelsFile | Out-Null } catch { $rejected = $true }
+        if (-not $rejected) { throw 'An invalid model JSON document was accepted.' }
+    }
+    [IO.File]::WriteAllText($modelsFile, (' ' * 65537), $utf8); $rejected = $false
+    try { Read-InferenceModelsFile $modelsFile | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'An oversized model JSON document was accepted.' }
+    $passed++
+    $modelGuard = $guestAst.Find({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.Extent.Text -ceq 'Assert-InferenceModelEntries $models $explicitModels' }, $true)
     if (-not $modelGuard) { throw 'Guest model validation was not located.' }
     $guardBlock = [scriptblock]::Create($modelGuard.Extent.Text)
     $explicitModels = $false
@@ -105,6 +182,12 @@ try {
     foreach ($validModels in @($explicitSelection, @('claude/opus'), @('claude/opus', 'Claude/opus'))) {
         $models = $validModels; & $guardBlock
     }
+    $models = To-Map ($objectSelection | ConvertTo-Json -Depth 20 | ConvertFrom-Json)
+    & $guardBlock
+    $explicitModels = $false; $rejected = $false
+    try { & $guardBlock } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Object model entries bypassed the explicit-selection marker in the guest.' }
+    $explicitModels = $true
     foreach ($invalidModels in @(@(), @(''), @('claude model'), @('claude/model', 'claude/model'), @([int]5))) {
         $models = $invalidModels; $rejected = $false
         try { & $guardBlock } catch { $rejected = $true }
@@ -304,6 +387,16 @@ try {
     }
     $readinessFixture.providers.CodeBuddy.authenticated = $true
     $passed++
+    $readinessCalls.Clear()
+    Assert-GatewayReady 'http://127.0.0.1:43157' 'test-readiness-key' $objectSelection $true
+    if (($readinessCalls -join ',') -cne 'http://127.0.0.1:43157/health,http://127.0.0.1:43157/v1/models') {
+        throw 'Object selection changed the metadata-only preflight endpoints.'
+    }
+    $readinessFixture.providers.CodeBuddy.ready = $false; $rejected = $false
+    try { Assert-GatewayReady 'http://127.0.0.1:43157' 'test-readiness-key' $objectSelection $true } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Object selection labels bypassed the CodeBuddy readiness requirement.' }
+    $readinessFixture.providers.CodeBuddy.ready = $true
+    $passed++
     foreach ($invalidCatalog in @(
         @{ data = @(@{ id = 'claude/Claude-opus-5-5' }, @{ id = 'claude/claude-sonnet-5' }, @{ id = 'claude-codebuddy-opus-5-5' }) },
         @{ data = @(@{ id = 'claude/claude-opus-5-5' }, @{ id = 'claude/claude-opus-5-5' }, @{ id = 'claude/claude-sonnet-5' }, @{ id = 'claude-codebuddy-opus-5-5' }) },
@@ -391,6 +484,48 @@ try {
         $explicitCurrent.Data.Contains('inferenceGatewayApiKey') -or $explicitCurrent.Data.unrelated -cne 'preserved') {
         throw 'Explicit model replacement did not restore the initial fields and retain unrelated data.'
     }
+    $passed++
+
+    $objectProfile = Join-Path $testRoot 'object-profile.json'
+    $originalObjectModels = @([ordered]@{ name = 'claude/original'; labelOverride = 'Original label'; supports1m = $false })
+    Write-Json $objectProfile ([ordered]@{ inferenceModels = $originalObjectModels; unrelated = 'preserved' })
+    $objectPlan = New-FilePlan $objectProfile ([ordered]@{ inferenceModels = $objectSelection })
+    $objectCurrent = Read-Document $objectProfile
+    Set-Fields $objectCurrent.Data $objectPlan.Fields 'Installed'
+    Write-Json $objectProfile $objectCurrent.Data $objectCurrent.Hash -CheckHash
+    $objectCurrent = Read-Document $objectProfile
+    Assert-Fields $objectCurrent.Data $objectPlan.Fields 'installed'
+    if (-not (Test-JsonEqual $objectCurrent.Data.inferenceModels $objectSelection)) { throw 'Installing object models changed metadata or row order.' }
+    $objectManifest = [ordered]@{ Phase = 'installed'; Files = @($objectPlan) }
+    $reorderedKeys = @(
+        [ordered]@{ maxEffort = 'max'; isFamilyDefault = $true; anthropicFamilyTier = 'opus'; labelOverride = 'Opus 5.5'; name = 'claude/claude-opus-5-5' },
+        'claude/claude-sonnet-5',
+        [ordered]@{ supports1m = $false; isFamilyDefault = $false; anthropicFamilyTier = 'opus'; labelOverride = 'CodeBuddy Opus 5.5'; name = 'claude-codebuddy-opus-5-5' }
+    )
+    if (Set-RequestedModels $objectManifest $reorderedKeys $true) { throw 'JSON property ordering unnecessarily changed the model upgrade journal.' }
+    $renamedModels = To-Map ($objectSelection | ConvertTo-Json -Depth 20 | ConvertFrom-Json)
+    $renamedModels[0].labelOverride = 'Updated Opus label'
+    if (-not (Set-RequestedModels $objectManifest $renamedModels $true) -or $objectManifest.Phase -cne 'upgrading') { throw 'A label-only model change was ignored.' }
+    Assert-Fields $objectCurrent.Data $objectPlan.Fields 'upgrading'
+    Set-Fields $objectCurrent.Data $objectPlan.Fields 'Installed'
+    Write-Json $objectProfile $objectCurrent.Data $objectCurrent.Hash -CheckHash
+    $objectCurrent = Read-Document $objectProfile
+    if ($objectCurrent.Data.inferenceModels[0].labelOverride -cne 'Updated Opus label' -or
+        -not (Test-JsonEqual $objectPlan.Fields[0].Original.Value $originalObjectModels) -or
+        -not (Test-JsonEqual $objectPlan.Fields[0].PreviousInstalled.Value $objectSelection)) { throw 'An object upgrade lost the prior installation or original recovery metadata.' }
+    $objectManifest.Phase = 'installed'; $objectPlan.Fields[0].Remove('PreviousInstalled')
+    $editedModels = To-Map ($objectCurrent.Data.inferenceModels | ConvertTo-Json -Depth 20 | ConvertFrom-Json)
+    $editedModels[0].isFamilyDefault = $false
+    $editedDocument = [ordered]@{ inferenceModels = $editedModels }; $rejected = $false
+    try { Assert-Fields $editedDocument $objectPlan.Fields 'installed' } catch { $rejected = $true }
+    if (-not $rejected) { throw 'A concurrent model metadata edit was overwritten.' }
+    Assert-Fields $objectCurrent.Data $objectPlan.Fields 'prepared'
+    Set-Fields $objectCurrent.Data $objectPlan.Fields 'Original'
+    Write-Json $objectProfile $objectCurrent.Data $objectCurrent.Hash -CheckHash
+    $objectCurrent = Read-Document $objectProfile
+    if (-not (Test-JsonEqual $objectCurrent.Data.inferenceModels $originalObjectModels) -or $objectCurrent.Data.unrelated -cne 'preserved') { throw 'Object model restoration lost the original array or unrelated settings.' }
+    if ((Test-JsonEqual @('claude/one') 'claude/one') -or (Test-JsonEqual @([ordered]@{ name = 'claude/one' }) ([ordered]@{ name = 'claude/one' })) -or
+        (Test-JsonEqual $true 'true') -or (Test-JsonEqual @('first', 'second') @('second', 'first'))) { throw 'Deep JSON comparison collapsed array shape, types, or model row order.' }
     $passed++
 
     $hostAddress = '192.168.168.1'; $guestAddress = '192.168.168.10'; $interfaceAlias = 'VMware Network Adapter VMnet1'; $port = 43157
