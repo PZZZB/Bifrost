@@ -45,7 +45,9 @@ export function createServiceControl({ stateDir, projectDir, getActiveRequests, 
       try { activeRequests = activeCount(); } catch {}
       return { supported, platform, pending: pending !== null || preparing, activeRequests,
         ready: true, independentOfCodex: supported, error: lastError,
-        message: supported ? null : '当前进程没有可验证的独立后台托管；请使用桌面重启快捷方式。' };
+        message: supported ? null : platform === 'win32'
+          ? '当前进程没有可验证的独立后台托管；请在项目目录运行 .\\Start-Bridge.ps1 -Restart -Open。'
+          : '当前运行方式暂不支持网页重启，请通过所用进程管理器手动重启服务。' };
     },
     async request(body) {
       if (!body || typeof body !== 'object' || Array.isArray(body) ||
@@ -56,7 +58,9 @@ export function createServiceControl({ stateDir, projectDir, getActiveRequests, 
       preparing = true;
       try {
         const config = await owner();
-        if (!config) throw new BridgeError('当前服务不支持网页重启，请使用桌面重启快捷方式。', 503, 'restart_unsupported');
+        if (!config) throw new BridgeError(platform === 'win32'
+          ? '当前服务不支持网页重启，请在项目目录运行 .\\Start-Bridge.ps1 -Restart -Open。'
+          : '当前服务不支持网页重启，请通过所用进程管理器手动重启。', 503, 'restart_unsupported');
         const active = activeCount();
         if (active > 0 && !body.allowInterrupt) {
           const error = new BridgeError(`当前有 ${active} 个活跃请求。请等待完成，或明确允许中断后重试。`, 409, 'gateway_busy');

@@ -129,10 +129,10 @@ function renderServiceControl() {
   text('service-confirm-button', restartActiveRequests > 0 ? '允许中断并重启' : '确认重启');
   elements['service-confirm-button'].disabled = !idle;
   elements['service-cancel-button'].disabled = !idle;
-  text('service-error', serviceUnavailable ? '重启服务后可用。当前服务尚未提供网页重启接口。' : reportedError);
+  text('service-error', serviceUnavailable ? '重启服务后可用。当前服务尚未提供网页重启接口；Windows 请在项目目录运行 .\\Start-Bridge.ps1 -Restart -Open，然后刷新本页。' : reportedError);
   elements['service-error'].hidden = !serviceUnavailable && !reportedError;
   if (!restartInProgress && !restartConfirmation && !serviceUnavailable && !serviceError && data?.message) text('service-message', data.message);
-  else if (!restartInProgress && !restartConfirmation && !serviceUnavailable && !serviceError && data?.supported === false) text('service-message', '当前运行方式暂不支持网页重启。');
+  else if (!restartInProgress && !restartConfirmation && !serviceUnavailable && !serviceError && data?.supported === false) text('service-message', '当前运行方式暂不支持网页重启，请按部署方式手动重启服务；Windows 可在项目目录运行 .\\Start-Bridge.ps1 -Restart -Open。');
 }
 
 async function refreshServiceStatus() {

@@ -272,3 +272,8 @@
 - 上述隔离 CLI 检查捕获四次外部 CONNECT 尝试，目标为 chatgpt.com、github.com 和 api.github.com；均在回环代理返回 502，未建立隧道。来源未核实，没有将其标成已确认的遥测，也不宣称零外连尝试。模型请求只到本地模拟网关，未加载既有账号或发送真实模型推理。
 - UI 结构及行为用离线测试核对。隔离页面预览因 Cua 返回 `Browser is not available: iab` 未取得截图；临时预览已关闭，没有操作真实浏览器或调用真实管理 API。报告为 `.state/management-ui-visual-report.json`。
 - 本轮没有执行 Cursor 真实授权或模型推理，没有修改虚拟机、Claude、代理、VPS、账号 A/B 凭证或已安装的 Codex 路由，也没有启用暂缓的 Claude 模型配置。Cursor 的实时模型权限、自定义 systemPrompt 权限、缓存、质量和实际扣费仍需用户授权后验收。
+
+## 单一桌面入口（2026-10-22，洛杉矶）
+
+- 桌面保留 `Bifrost.lnk`，仍以 `Start-Bridge.ps1 -Open` 启动或复用独立后台服务并打开管理页；移除额外的 `Bifrost - Restart.lnk`。日常重启统一在网页执行，旧服务首次加载网页控制功能仍可用命令行手动重启一次。
+- 静态 HTML、JavaScript、CSS 已确认逐次读盘且使用 `Cache-Control: no-store`，更新后刷新网页即可；后端程序与启动配置更新需要重启。没有执行桌面入口、重启服务或修改虚拟机。
