@@ -277,3 +277,11 @@
 
 - 桌面保留 `Bifrost.lnk`，仍以 `Start-Bridge.ps1 -Open` 启动或复用独立后台服务并打开管理页；移除额外的 `Bifrost - Restart.lnk`。日常重启统一在网页执行，旧服务首次加载网页控制功能仍可用命令行手动重启一次。
 - 静态 HTML、JavaScript、CSS 已确认逐次读盘且使用 `Cache-Control: no-store`，更新后刷新网页即可；后端程序与启动配置更新需要重启。没有执行桌面入口、重启服务或修改虚拟机。
+
+## Codex 内部元数据兼容（2026-10-22，洛杉矶）
+
+- 用户选择 Cursor Gemini 4 后，严格输入校验返回 `不支持参数 input.message.internal_chat_message_metadata_passthrough。`。错误发生在共享 Responses 转换阶段，尚未创建 Cursor Agent 或发送模型推理。
+- 对照官方 Codex 的[内部元数据定义](https://github.com/openai/codex/blob/07316174c6f62deb20278c53add2dbd9dcf6da70/codex-rs/protocol/src/models.rs#L987-L1033)及[第三方 provider 清理逻辑](https://github.com/openai/codex/blob/07316174c6f62deb20278c53add2dbd9dcf6da70/codex-rs/core/src/client.rs#L1048-L1066)，该字段属于回合、时间及内部审计记录。转换层在所有已支持输入条目上识别其对象或 null，校验后不映射到第三方模型。未增加通用未知字段放行，也不把审计值当成工具权限或执行证据。
+- 新增四项回归覆盖所有已支持条目、非法类型和非有限数、未知字段继续拒绝、真实工具数据中的同名键保留。A 原始字节及 B 仅替换模型的既有路由 fixture 增加该字段，确认原生通道仍保留。完整离线 JavaScript 检查 761/761、`npm run check` 及 diff 检查通过，独立源码审查无阻断。
+- 实际 Codex CLI `0.163.0-alpha.11.1` 的合成兼容模式通过：三个 HTTP 在模拟 provider 边界为 21 个条目注入元数据，每轮改变 turn_id；两个本地工具调用仍继续同一 SDK Run，仅一次 send，SDK 参数、工具配置和结果中未出现该字段或注入值。原始客户端 HTTP 捕获没有被改写或冒充已携带该字段。证据：`.state/cursor-codex-offline-1792661285454-772205/result.json`；无注入模式也通过：`.state/cursor-codex-offline-1792661306706-65bfba/result.json`。
+- 两次离线 CLI 检查均只使用空白临时配置、模拟 SDK 和回环代理；四次外部 CONNECT 尝试被本地阻断，没有建立隧道。没有发送真实模型请求、读取原账号凭证、重启服务或操作虚拟机。运行中的服务须由用户在网页重启后加载修复，真实 Cursor 回合仍由用户验证。

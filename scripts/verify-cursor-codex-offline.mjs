@@ -28,6 +28,7 @@ const argument = (flag, fallback) => {
 };
 const binary = argument('--binary', process.env.CODEX_BINARY || 'codex');
 const requestedModel = argument('--model', CURSOR_MODELS[0].id);
+const syntheticInternalMetadata = process.argv.includes('--internal-metadata');
 const selectedModel = resolveCursorModel(requestedModel);
 if (!selectedModel) throw new Error('--model must name one of the two Cursor aliases.');
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,6 +52,11 @@ const sdkUsage = { inputTokens: 50, outputTokens: 15, cacheReadTokens: 12, cache
 const requests = [], clientEvents = [], responseItems = [], terminalResponses = [], responseReads = [], usageEvents = [], errors = [];
 const sdkCreated = [], sdkSends = [], sdkCallbacks = [], sdkCancellations = [], sdkClosed = [], httpTasks = [];
 const blockedNetworkRequests = [];
+const metadataField = 'internal_chat_message_metadata_passthrough';
+const metadataFixturePrefix = 'bifrost-cursor-offline-synthetic-internal-meta-http-';
+const metadataInputTypes = new Set(['message', 'reasoning', 'function_call', 'custom_tool_call', 'tool_search_call',
+  'function_call_output', 'custom_tool_call_output', 'tool_search_output']);
+const internalMetadataInjections = [], sdkMetadataLeakChecks = [];
 let child, timer, nativeVersion = null, exitCode = null, selectedTool = null, callbackReturned = false;
 let adapterCalls = 0, originalInferenceCalls = 0, externalEndpointAttempts = 0;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -74,6 +80,39 @@ function readPayload(bytes, headers) {
     }
   }
   return JSON.parse(bytes.toString('utf8'));
+}
+function injectInternalMetadata(options, requestIndex) {
+  if (!syntheticInternalMetadata) return options;
+  // Inject only at the fake provider boundary. The native HTTP capture above
+  // the adapter remains unchanged and is not evidence of a native client field.
+  const body = JSON.parse(Buffer.from(options.body).toString('utf8'));
+  const turnId = `${metadataFixturePrefix}${requestIndex + 1}`;
+  const inputTypes = [];
+  for (const item of Array.isArray(body.input) ? body.input : []) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const type = item.type ?? 'message';
+    if (!metadataInputTypes.has(type)) continue;
+    item[metadataField] = { turn_id: turnId, client_turn_id: `${turnId}-client`,
+      fixture: `${turnId}-fixture`, item_index: inputTypes.length };
+    inputTypes.push(type);
+  }
+  assert.ok(inputTypes.length > 0, 'Every synthetic metadata HTTP request must contain supported input items.');
+  internalMetadataInjections.push({ requestIndex, turnId, count: inputTypes.length, inputTypes });
+  return { ...options, body: Buffer.from(JSON.stringify(body)) };
+}
+function assertNoInternalMetadata(value, phase) {
+  if (!syntheticInternalMetadata) return;
+  const seen = new WeakSet();
+  const visit = current => {
+    if (typeof current === 'string') {
+      assert.ok(!current.includes(metadataField), `${phase} must not receive the internal metadata field.`);
+      assert.ok(!current.includes(metadataFixturePrefix), `${phase} must not receive synthetic internal metadata values.`);
+    } else if (current && typeof current === 'object' && !seen.has(current)) {
+      seen.add(current);
+      for (const [key, child] of Object.entries(current)) { visit(key); visit(child); }
+    }
+  };
+  visit(value); sdkMetadataLeakChecks.push(phase);
 }
 function toolArguments(schema) {
   const properties = schema.properties ?? {};
@@ -109,6 +148,7 @@ const cursorService = {
 const fakeSdk = {
   JsonlLocalAgentStore: class { constructor(path) { this.path = path; } },
   Agent: { async create(options) {
+    assertNoInternalMetadata(options, 'sdk-create-options');
     assert.equal(options.apiKey, sdkKey); assert.equal(options.teamId, 42);
     assert.deepEqual(options.model, { id: selectedModel.upstream });
     assert.deepEqual(options.tools, ['mcp']); assert.deepEqual(options.mcpServers, {});
@@ -117,6 +157,7 @@ const fakeSdk = {
     assert.equal(sdkCreated.length, 0, 'A tool round must create exactly one SDK agent.');
     sdkCreated.push({ model: options.model, tools: options.tools, settingsSources: options.local.settingSources, storeIsolated: true });
     const agent = { agentId: 'cursor-offline-agent-one', close() { sdkClosed.push(agent.agentId); }, async send(message, sendOptions) {
+      assertNoInternalMetadata({ message, sendOptions }, 'sdk-send-message-and-options');
       assert.equal(sdkSends.length, 0, 'The original SDK Run must resume; a second send is not allowed.');
       assert.deepEqual(sendOptions.model, { id: selectedModel.upstream });
       assert.deepEqual(sendOptions.mcpServers, {});
@@ -131,6 +172,7 @@ const fakeSdk = {
             && /Tool (?:exec_command|shell_command|shell):/.test(tool.description));
           assert.ok(entry, 'Native Codex must expose a local client shell tool.');
           const [alias, tool] = entry;
+          assertNoInternalMetadata(tool, 'sdk-client-tool-options');
           selectedTool = { alias, description: tool.description.split('\n').find(line => line.startsWith('Tool '))?.slice(0, 160),
             parameterNames: Object.keys(tool.inputSchema?.properties ?? {}) };
           events.push({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Read the local fixture.' }] } });
@@ -141,6 +183,7 @@ const fakeSdk = {
             const callback = { runId: run.id, alias, sdkToolCallId, requestedAfterHttp: requests.length, returned: false };
             sdkCallbacks.push(callback);
             return tool.execute(toolArguments(tool.inputSchema), { toolCallId: sdkToolCallId }).then(result => {
+              assertNoInternalMetadata(result, 'sdk-client-tool-result');
               assert.ok(requests.length >= index + 2, 'Each callback requires a subsequent HTTP tool result.');
               assert.ok(Array.isArray(result.content));
               const raw = result.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
@@ -165,7 +208,7 @@ const fakeSdk = {
 const responses = new CursorResponsesProvider({ cursorService, stateDir: work, sdkLoader: async () => fakeSdk, requestTimeoutMs: 45000 });
 const requestResponses = responses.request.bind(responses);
 responses.request = async options => {
-  const requestIndex = adapterCalls++, response = await requestResponses(options);
+  const requestIndex = adapterCalls++, response = await requestResponses(injectInternalMetadata(options, requestIndex));
   responseReads.push(response.clone().text().then(body => {
     if (!response.ok) { errors.push({ phase: 'adapter', status: response.status, message: redact(body) }); return; }
     for (const frame of body.split(/\r?\n\r?\n/)) {
@@ -256,6 +299,17 @@ try {
   assert.equal(replies.at(-1)?.item.text?.trim(), expected); assert.equal(callbackReturned, true);
   assert.equal(requests.length, 3); assert.equal(adapterCalls, 3); assert.equal(sdkCreated.length, 1);
   assert.equal(sdkSends.length, 1); assert.equal(sdkCallbacks.length, 2); assert.equal(sdkCancellations.length, 0);
+  if (syntheticInternalMetadata) {
+    assert.equal(internalMetadataInjections.length, requests.length);
+    assert.equal(new Set(internalMetadataInjections.map(item => item.turnId)).size, requests.length,
+      'Synthetic internal metadata must change across HTTP requests without starting another SDK Run.');
+    for (const injection of internalMetadataInjections) {
+      assert.equal(injection.count, requests[injection.requestIndex].input.filter(item => metadataInputTypes.has(item.type)).length,
+        'Every supported native input item must receive synthetic metadata at the adapter boundary.');
+    }
+    assert.deepEqual(sdkMetadataLeakChecks, ['sdk-create-options', 'sdk-send-message-and-options', 'sdk-client-tool-options',
+      'sdk-client-tool-result', 'sdk-client-tool-result']);
+  }
   assert.equal(originalInferenceCalls, 0);
   assert.equal(externalEndpointAttempts, blockedNetworkRequests.length);
   assert.ok(blockedNetworkRequests.every(attempt => attempt.blocked && attempt.responseStatus === 502 && !attempt.tunnelEstablished),
@@ -283,6 +337,8 @@ try {
   const runUsage = (await responses.status()).runUsageDiagnostics;
   assert.equal(runUsage.length, 1); assert.equal(runUsage[0].httpAttribution, 'unknown'); assert.equal(runUsage[0].usage.total_tokens, 80);
   const proof = { passed: true, nativeVersion, realInference: false, existingAuthLoaded: false, model: selectedModel.id,
+    syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
+    internalMetadataInjections, sdkMetadataLeakChecks,
     fixtureDirectory: work, globalReasoningEffort: 'max', sdkReasoning: 'cursor-default',
     catalogParallelToolCalls: false, clientParallelToolCalls: requests.map(request => request.parallelToolCalls), externalToolExecution: 'serial',
     exactLocalToolOutput: true, finalReplyMatched: true, sameSdkRunResumed: true, sdkAgentCreates: sdkCreated.length,
@@ -293,10 +349,13 @@ try {
     selectedTool, requests, responseItems, terminalResponses, sdkCreated, sdkSends, usageRecords: usageEvents.length, errors };
   await writeFile(join(work, 'result.json'), JSON.stringify(proof, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify({ passed: true, nativeVersion, model: selectedModel.id, realInference: false, existingAuthLoaded: false,
+    syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     localToolCalls: commands.length, sameSdkRunResumed: true, sdkSends: 1, httpUsageUnknown: true,
     inheritedMaxUsesCursorDefault: true, evidencePath: join(work, 'result.json') }, null, 2));
 } catch (error) {
   const proof = { passed: false, nativeVersion, realInference: false, existingAuthLoaded: false, model: selectedModel.id,
+    syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
+    internalMetadataInjections, sdkMetadataLeakChecks,
     exitCode, failure: redact(error.message), callbackReturned, selectedTool, requests, responseItems, terminalResponses,
     sdkCreated, sdkSends, sdkCallbacks, originalInferenceCalls, externalEndpointAttempts, blockedNetworkRequests,
     clientEvents: clientEvents.map(event => ({ type: event.type, message: event.type === 'error' ? redact(event.message) : undefined,

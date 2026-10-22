@@ -44,6 +44,16 @@ function finiteJson(value, where, depth = 0) {
   if (depth > 256 || typeof value === 'number' && !Number.isFinite(value)) fail(`${where} 含无法保真传递的 JSON 数值或嵌套。`, where);
   if (value && typeof value === 'object') for (const child of Object.values(value)) finiteJson(child, where, depth + 1);
 }
+function inputItemShape(value, allowed, where) {
+  const field = 'internal_chat_message_metadata_passthrough';
+  shape(value, [...allowed, field], where);
+  if (value[field] == null) return;
+  if (!object(value[field])) fail(`${where}.${field} 必须是对象或 null。`, `${where}.${field}`);
+  finiteJson(value[field], `${where}.${field}`);
+  // Codex strips this OpenAI-only bookkeeping for non-OpenAI providers too.
+  // It is never model content or tool authority. Validate this exact item
+  // field only; the conversions below never forward it to external providers.
+}
 function errorData(error) {
   return { message: error instanceof AdapterError ? error.message : 'CodeBuddy Responses 适配失败。',
     type: error?.status >= 500 ? 'server_error' : 'invalid_request_error',
@@ -277,7 +287,7 @@ function translate(raw, instructionMarker, profile = {}) {
     if (!object(item)) fail('input 包含无效条目。', 'input');
     const type = item.type ?? 'message';
     if (type === 'message') {
-      shape(item, ['type', 'role', 'content', 'id', 'status', 'phase', 'channel'], 'input.message');
+      inputItemShape(item, ['type', 'role', 'content', 'id', 'status', 'phase', 'channel'], 'input.message');
       if (!['user', 'assistant', 'developer', 'system'].includes(item.role)) fail('消息 role 无效。', 'input.role');
       if (item.status !== undefined && item.status !== 'completed') fail('不能接续未完成的消息。', 'input.status');
       if (item.phase != null && !['commentary', 'partial_answer', 'final_answer'].includes(item.phase)) fail('消息 phase 无效。', 'input.phase');
@@ -307,7 +317,7 @@ function translate(raw, instructionMarker, profile = {}) {
         flush(); upstream.messages.push({ role: 'user', content: blocks }); conversationStarted = true;
       }
     } else if (type === 'reasoning') {
-      shape(item, ['type', 'id', 'summary', 'content', 'encrypted_content', 'status'], 'input.reasoning');
+      inputItemShape(item, ['type', 'id', 'summary', 'content', 'encrypted_content', 'status'], 'input.reasoning');
       if (item.summary != null && (!Array.isArray(item.summary) || item.summary.length) ||
           item.content != null && (!Array.isArray(item.content) || item.content.length)) {
         fail('CodeBuddy Responses 当前仅接续本网关的加密思考，不接受额外的明文思考内容。', 'input.reasoning');
@@ -317,7 +327,7 @@ function translate(raw, instructionMarker, profile = {}) {
         if (item.summary?.length || item.content?.length || String(item.id ?? '').startsWith(profile.reasoningIdPrefix ?? 'rs_bifrost_cb_')) fail('思考接续内容缺失或不属于当前渠道，请新建会话。', 'input.reasoning');
       } else assistantBlocks((profile.openState ?? openEnvelope)(item.encrypted_content));
     } else if (['function_call', 'custom_tool_call', 'tool_search_call'].includes(type)) {
-      shape(item, ['type', 'id', 'call_id', 'name', 'namespace', 'arguments', 'input', 'status', 'execution', 'encrypted_function_args'], 'input.tool_call');
+      inputItemShape(item, ['type', 'id', 'call_id', 'name', 'namespace', 'arguments', 'input', 'status', 'execution', 'encrypted_function_args'], 'input.tool_call');
       if (item.encrypted_function_args != null && item.encrypted_function_args !== false &&
           (!Array.isArray(item.encrypted_function_args) || item.encrypted_function_args.length)) {
         fail('CodeBuddy 不能处理 OpenAI 加密工具参数。', 'input');
@@ -338,7 +348,7 @@ function translate(raw, instructionMarker, profile = {}) {
       assistantBlocks([{ type: 'tool_use', id: call, name: mapped.alias, input: args }]);
       pending.set(call, mapped); seenCalls.add(call);
     } else if (['function_call_output', 'custom_tool_call_output', 'tool_search_output'].includes(type)) {
-      shape(item, ['type', 'id', 'call_id', 'name', 'output', 'status', 'namespace', 'execution', 'tools'], 'input.tool_output');
+      inputItemShape(item, ['type', 'id', 'call_id', 'name', 'output', 'status', 'namespace', 'execution', 'tools'], 'input.tool_output');
       const call = callId(item.call_id, 'input.call_id'), mapped = pending.get(call);
       const expected = type === 'function_call_output' ? 'function' : type === 'custom_tool_call_output' ? 'custom' : 'tool_search';
       if (!mapped || mapped.type !== expected || item.namespace != null && mapped.namespace !== item.namespace ||

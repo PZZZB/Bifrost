@@ -94,6 +94,8 @@ ssh -L 43155:127.0.0.1:43155 user@server
 
 Codex 发送 Responses 请求；网关转换为 Anthropic Messages，再复用现有 CodeBuddy Chat Completions 适配器。工具名称、命名空间、参数与结果在转换中保留，工具仍在当前 Codex 执行；自定义工具的完整原始输入封装为字符串传递。支持文本、内嵌图片、函数与自定义客户端工具、流式回复及后续工具回合。未适配的内容或字段返回明确错误。
 
+Cursor 与 CodeBuddy 共用的转换层识别 Codex 的 `internal_chat_message_metadata_passthrough`：只接受输入条目上的对象或 null，检查后不传给第三方模型，不将其中的内部审计值当成提示或工具执行记录。正文、工具参数和结果中恰好同名的普通数据仍保留。A/B 原生路线继续保留原始字段。
+
 CodeBuddy 使用 adaptive 思考，支持 `low`、`medium`、`high`、`xhigh`，默认 `high`。当前桥接上下文保守设为 200k、最大输出为 32768 token。隐藏思考和扩展元数据沿用现有加密、账号与模型绑定机制，经带 `bifrost-codebuddy-responses-v1:` 前缀的自有封套在 Responses 历史中续接；这不是 OpenAI 的加密凭证，也不会发送给 A/B。此模式暂不显示思考摘要。
 
 OpenAI 托管的联网搜索、服务端压缩、服务端会话存储及结构化输出保证不在此适配范围。Codex 默认附带但未使用的 `web_search` 声明会被移除，同时明确告知模型此能力不可用；强制选择搜索或包含托管工具历史的请求会报错。模型仍可使用实际提供的客户端联网工具。系统及 developer 更新保留原顺序，以标记内容和顶层优先级说明转换；并行工具尚未全部返回时，更新随紧接的工具结果传递。
@@ -118,7 +120,7 @@ Cursor SDK 会话存储包含运行所需的历史和检查点，位于私有数
 
 已完成并写入有效 SDK 检查点的会话可在服务重启后恢复；恢复索引绑定账号、模型、系统指令与已展示历史，并在下次续聊前消费一次。检查点默认保留 7 天，历史索引最多保留 128 份。正在等待工具回调的 Run 只能在当前进程续接，强制重启或退出授权会使它失效；这也是网页重启会检查活跃 Run 的原因。注销会清除本网关的 Cursor 恢复索引。
 
-`node scripts/verify-cursor-codex-offline.mjs` 使用实际 Codex CLI、本地模拟 SDK 和临时配置做工具回合验证，不加载现有授权或调用 Cursor 模型。
+`node scripts/verify-cursor-codex-offline.mjs` 使用实际 Codex CLI、本地模拟 SDK 和临时配置做工具回合验证，不加载现有授权或调用 Cursor 模型。增加 `--internal-metadata` 可在模拟 provider 边界注入内部元数据，检查字段兼容、跨 HTTP 续接和第三方数据隔离；报告会区分合成注入与原始客户端请求。
 
 Cursor 的 API Key 按官方 [CLI 认证说明](https://cursor.com/docs/cli/reference/authentication) 归属授权用户；SDK 的套餐池与费用规则见官方 [SDK 文档](https://cursor.com/docs/sdk/typescript) 和 [套餐说明](https://cursor.com/docs/account/pricing/legacy-cursor-plans)。不同 Teams 计费版本有区别，不能据 Teams 标签承诺所有模型请求均包含在固定订阅内。当前接入不查询 Cursor 剩余额度，实时权限、模型质量及实际扣费由用户完成授权后验证。
 

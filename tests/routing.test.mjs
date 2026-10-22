@@ -32,7 +32,7 @@ test('normal models preserve A identity and exact request bytes even while B is 
   const { url, gateway, bReads } = await fixture(t, async (address, options) => {
     sent = { address, ...options }; return new Response(completed);
   }, true);
-  const body = '{ "model" : "gpt-6.1-sol", "input": [{"text":"原样"}], "tools": [] }';
+  const body = '{ "model" : "gpt-6.1-sol", "input": [{"role":"user","content":"原样","internal_chat_message_metadata_passthrough":{"turn_id":"native-a-turn"}}], "tools": [] }';
   const response = await fetch(`${url}/responses`, { method: 'POST', body,
     headers: { ...headers, Cookie: 'original-a=value; bridge_session=must-not-forward', 'X-Original-Provider-Header': 'kept' } });
   assert.equal(response.status, 200); await response.text();
@@ -53,7 +53,8 @@ test('B aliases change only model identity and never forward A credentials', asy
   const { url, gateway } = await fixture(t, async (address, options) => {
     sent = { address, ...options }; return new Response(completed);
   });
-  const body = { model: 'B-gpt-6-astra', input: [{ type: 'function_call_output', call_id: 'one', output: '工具结果' }],
+  const body = { model: 'B-gpt-6-astra', input: [{ type: 'function_call_output', call_id: 'one', output: '工具结果',
+    internal_chat_message_metadata_passthrough: { turn_id: 'native-b-turn', tool_calls_complete: true } }],
     tools: [{ type: 'custom', name: 'apply_patch', format: { type: 'text' } }] };
   const response = await fetch(`${url}/responses`, { method: 'POST', headers: { ...headers, Cookie: 'a=secret' }, body: JSON.stringify(body) });
   assert.equal(response.status, 200); await response.text();
