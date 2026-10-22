@@ -189,11 +189,14 @@
         <div class="with-details">
           <div class="endpoint"><span>登录账号</span><code id="cursor-account">读取中</code></div>
           <div class="endpoint"><span>套餐归属</span><code id="cursor-plan">待核实</code></div>
+          <div class="endpoint"><span>接入模式</span><code id="cursor-prompt-mode">未返回</code></div>
+          <div class="endpoint"><span>指令优先级</span><code id="cursor-prompt-priority">未返回</code></div>
           <div class="endpoint"><span>Gemini 4</span><code id="cursor-gemini-state">登录后确认</code></div>
           <div class="endpoint"><span>Grok 4.7</span><code id="cursor-grok-state">登录后确认</code></div>
         </div>
         <div class="metrics with-metrics"><div><strong id="cursor-requests">—</strong><span>收到请求</span></div><div><strong id="cursor-completed">—</strong><span>完成</span></div><div><strong id="cursor-failed">—</strong><span>失败</span></div><div><strong id="cursor-active">—</strong><span>进行中</span></div></div>
         <p class="footnote">请本人在 Cursor 官方页面授权。模型目录不代表已完成真实聊天或扣费验证。</p>
+        <p class="footnote" id="cursor-prompt-note">服务返回接入模式后显示指令处理方式。</p>
           <p class="footnote">上游未提供思考强度控制时，使用 Cursor 默认思考。跨工具回合的单条请求 Token 用量可能未知，以 Cursor 账单为准。</p>
         <div class="gateway-error" id="cursor-error" role="status" hidden></div>
       </section>

@@ -285,3 +285,14 @@
 - 新增四项回归覆盖所有已支持条目、非法类型和非有限数、未知字段继续拒绝、真实工具数据中的同名键保留。A 原始字节及 B 仅替换模型的既有路由 fixture 增加该字段，确认原生通道仍保留。完整离线 JavaScript 检查 761/761、`npm run check` 及 diff 检查通过，独立源码审查无阻断。
 - 实际 Codex CLI `0.163.0-alpha.11.1` 的合成兼容模式通过：三个 HTTP 在模拟 provider 边界为 21 个条目注入元数据，每轮改变 turn_id；两个本地工具调用仍继续同一 SDK Run，仅一次 send，SDK 参数、工具配置和结果中未出现该字段或注入值。原始客户端 HTTP 捕获没有被改写或冒充已携带该字段。证据：`.state/cursor-codex-offline-1792661285454-772205/result.json`；无注入模式也通过：`.state/cursor-codex-offline-1792661306706-65bfba/result.json`。
 - 两次离线 CLI 检查均只使用空白临时配置、模拟 SDK 和回环代理；四次外部 CONNECT 尝试被本地阻断，没有建立隧道。没有发送真实模型请求、读取原账号凭证、重启服务或操作虚拟机。运行中的服务须由用户在网页重启后加载修复，真实 Cursor 回合仍由用户验证。
+
+## Cursor 项目规则兼容模式与启动错误（2026-10-22，洛杉矶）
+
+- 用户遇到 `cursor_system_prompt_denied` 后，同意使用兼容格式。官方 SDK 文档说明 `systemPrompt` 受服务端账号权限控制；Cursor 官方人员 2026-10-19 明确说明尚未对外部账号开放，建议使用项目规则或 `AGENTS.md`。本次改用公开项目规则入口，保留 Cursor 内置系统提示，不宣称原 Codex system/developer 层级或模型行为等价。
+- 实际服务默认 `promptMode: project-rules`，只在本次 SDK 隔离目录创建包含原指令正文的 `AGENTS.md`，不传 `systemPrompt`，设置来源精确限定为 `['project']`。文件采用独占创建；续接和恢复时核对原文、大小、真实路径及硬链接数，并拒绝额外项目设置。原生模式显式 `system` 仍可选择；错误模式禁用该渠道，不影响 A/B/CodeBuddy。现行本地配置缺少该字段，下一次用户重启将采用兼容模式，没有改写本地配置。
+- 保留客户端工具回调和同一 SDK Run；客户端问答测试确认回答返回原来的 Promise，后一条真正用户消息才调用下一次 send。恢复索引 v2 增加接入模式绑定；旧 v1 仅允许 system 模式，切换模式不复用旧索引。新增规则文件篡改、缺失、额外设置、硬链接和重启恢复检查。
+- 启动 preflight 在提交 HTTP/SSE 响应头之前等到首个有效输出、工具或成功结束，认证和权限错误直接返回 JSON 401/403。只收到 usage 不会提前提交成功；输出开始后的错误仍通过 SSE 报告，不重放 SDK 请求。断连和未消费流取消会等待共享清理任务，释放 Run、回调及状态目录。
+- SDK 错误只输出固定安全描述，区分认证、权限、额度、配置和网络；含 systemPrompt 字样的 token 过期或服务不可用不再误判为该能力受限。Run 终态的结构化错误码优先于中间通用错误文本。独立审查发现的两个分类问题均已修复并加入回归，最终复核没有阻断项。
+- 完整 JavaScript 离线测试 780/780、`npm run check` 和 diff 检查通过。Cursor provider/错误/网关定向 51 项通过。全量日志为 `.state/cursor-project-rules-tests.log`。网页根据运行中服务返回值显示模式；旧后端缺少字段时只显示待重启，不把磁盘上的新 UI 当成后端已更新。
+- 实际 Codex CLI `0.163.0-alpha.11.1` 搭配模拟 SDK 的两种模式都通过：兼容模式证明全部三段原始 system/developer 指令都在隔离 `AGENTS.md`，无 `systemPrompt` 且仅 project 来源；system 模式证明使用 `systemPrompt`、无规则副本且设置来源为空。各三个 HTTP 合成注入 21 个元数据条目，同一 Run 完成两次本地工具回调，仅一次 send，SDK 未收到这些内部元数据。证据分别为 `.state/cursor-codex-offline-1792664634038-5ca58f/result.json` 与 `.state/cursor-codex-offline-1792664634055-239afd/result.json`；每次四个外部 CONNECT 均被回环代理阻断，未建立隧道。
+- 本次没有真实模型推理、账号授权、服务重启、虚拟机或 Claude 修改。真实 Cursor SDK 是否加载规则、模型遵循效果、权限、用量与费用继续由用户完整回合验证；离线 fake SDK 检查不替代这些证据。当前网页重启接口已就绪，等待用户自行在管理页重启加载。

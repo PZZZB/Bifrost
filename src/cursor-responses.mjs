@@ -1,10 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, readFile, unlink, lstat, realpath, readdir, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, unlink, lstat, realpath, readdir, rm } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { resolveCursorModel } from './cursor-service.mjs';
 import { translateResponses, ResponsesConversion, encodeResponsesEvent } from './codebuddy-responses.mjs';
 import { imagePart, ImageConversionError } from './codebuddy-images.mjs';
 import { writeJson } from './storage.mjs';
+import { describeCursorError } from './cursor-errors.mjs';
 
 export const CURSOR_RESPONSES_STATE_PREFIX = 'bifrost-cursor-live-v1:';
 export const CURSOR_RESPONSES_CAPABILITIES = Object.freeze({
@@ -31,17 +32,20 @@ class CursorError extends Error {
 }
 const invalid = message => { throw new CursorError(message); };
 const fresh = () => new CursorError('Cursor 会话状态已失效、已使用或与历史不匹配。请新建聊天。', 409, 'cursor_session_invalid');
-function safeError(error, credential) {
+function safeError(error) {
   if (error instanceof CursorError) return error;
   if (error instanceof ImageConversionError) return new CursorError(error.message.replaceAll('CodeBuddy', 'Cursor'), 400, 'cursor_image_invalid');
-  const raw = typeof error?.message === 'string' ? error.message : '';
-  if (/system.?prompt|permission.?denied|not.authorized|unauthorized|forbidden/i.test(raw)) {
-    return new CursorError('Cursor 拒绝自定义 systemPrompt 或当前账号没有此权限；未降级为普通用户提示。', 403, 'cursor_system_prompt_denied');
-  }
-  const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 502;
-  // Never echo SDK errors: they can embed the API key, URLs, local data, or prompts.
-  if (credential && raw.includes(credential)) return new CursorError('Cursor SDK 调用失败。', status, 'cursor_sdk_error');
-  return new CursorError('Cursor SDK 调用失败，请检查模型权限或重新授权。', status, 'cursor_sdk_error');
+  const description = describeCursorError(error);
+  return new CursorError(description.message, description.status, description.code);
+}
+function runError(error, reported) {
+  const terminal = safeError(error), status = reported ? safeError(reported) : null;
+  // Generic stream status text must not mask a structured terminal auth,
+  // quota or network error. A specific prompt-option rejection can still
+  // explain a generic invalid_argument returned at the end of the run.
+  if (status && status.code !== 'cursor_sdk_error' && (terminal.code === 'cursor_sdk_error'
+    || terminal.code === 'cursor_configuration_error' && status.code === 'cursor_system_prompt_denied')) return status;
+  return terminal;
 }
 function denied(error) {
   const status = error instanceof CursorError ? error.status : Number.isInteger(error?.status) ? error.status : 400;
@@ -142,20 +146,23 @@ class Queue {
 export class CursorResponsesProvider {
   #sessions = new Set(); #handles = new Map(); #closed = false; #sdk = null; #recentRuns = []; #epoch = 0; #ioTail = Promise.resolve();
   constructor({ cursorService, stateDir, sdkLoader = async () => import('@cursor/sdk'),
-    idleTimeoutMs = 10 * 60 * 1000, requestTimeoutMs = 120000, maxSessions = 32, checkpointRetentionMs = 7 * 24 * 60 * 60 * 1000 } = {}) {
+    idleTimeoutMs = 10 * 60 * 1000, requestTimeoutMs = 120000, maxSessions = 32, checkpointRetentionMs = 7 * 24 * 60 * 60 * 1000,
+    promptMode = 'system' } = {}) {
     if (typeof cursorService?.credential !== 'function' || typeof cursorService?.getModels !== 'function'
       || typeof cursorService?.status !== 'function' || typeof stateDir !== 'string' || !stateDir
       || typeof sdkLoader !== 'function' || !Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 1
       || !Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1 || !Number.isSafeInteger(maxSessions) || maxSessions < 1
-      || !Number.isSafeInteger(checkpointRetentionMs) || checkpointRetentionMs < 1) throw new TypeError('Invalid Cursor Responses settings.');
-    Object.assign(this, { cursorService, stateDir: resolve(stateDir), sdkLoader, idleTimeoutMs, requestTimeoutMs, maxSessions, checkpointRetentionMs });
+      || !Number.isSafeInteger(checkpointRetentionMs) || checkpointRetentionMs < 1
+      || !['system', 'project-rules'].includes(promptMode)) throw new TypeError('Invalid Cursor Responses settings.');
+    Object.assign(this, { cursorService, stateDir: resolve(stateDir), sdkLoader, idleTimeoutMs, requestTimeoutMs, maxSessions, checkpointRetentionMs, promptMode });
     this.marker = `bifrost-cursor-priority-${randomUUID()}`;
   }
   async status() {
     const status = await this.cursorService.status();
     return { authenticated: status.authReady === true, ready: !this.#closed && status.enabled === true && status.authReady === true,
       modelAvailable: status.catalog?.models?.length > 0, error: this.#closed ? 'Cursor 推理桥已停止。' : status.error ?? null,
-      transport: 'cursor-agent-sdk', responsesCapabilities: CURSOR_RESPONSES_CAPABILITIES,
+      transport: 'cursor-agent-sdk', responsesCapabilities: { ...CURSOR_RESPONSES_CAPABILITIES,
+        promptMode: this.promptMode, preservesSystemPromptPriority: this.promptMode === 'system' },
       activeRuns: this.activeRuns, recoverableSessions: [...this.#sessions].filter(record => record.checkpointFile).length,
       runUsageDiagnostics: structuredClone(this.#recentRuns) };
   }
@@ -203,6 +210,24 @@ export class CursorResponsesProvider {
     }
     return directory;
   }
+  async #instructionOptions(record, { create = false } = {}) {
+    if (record.promptMode === 'system') return { systemPrompt: record.system, settingSources: [] };
+    try {
+      const cwd = join(await this.#directory(record.storeSession), 'cwd'), file = join(cwd, 'AGENTS.md');
+      // Project settings are enabled only inside this bridge-owned workspace.
+      // Refuse unexpected files so project MCP servers, hooks and rules cannot
+      // enter a resumed session through the additional settings source.
+      if ((await readdir(cwd)).some(name => name !== 'AGENTS.md')) throw new Error();
+      if (create) await writeFile(file, record.system, { flag: 'wx', mode: 0o600 });
+      const info = await lstat(file);
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1
+        || info.size !== Buffer.byteLength(record.system) || relative(cwd, await realpath(file)) !== 'AGENTS.md'
+        || await readFile(file, 'utf8') !== record.system) throw new Error();
+      return { settingSources: ['project'] };
+    } catch {
+      throw new CursorError('Cursor 隔离项目指令文件缺失或已变更，请新建聊天。', 503, 'cursor_project_rules_invalid');
+    }
+  }
   async #removeDirectory(directory) {
     try {
       const root = await this.#stateRoot(), sessionId = relative(root, resolve(directory));
@@ -221,8 +246,11 @@ export class CursorResponsesProvider {
         if (!info.isFile() || info.isSymbolicLink() || info.size > 400000) throw fresh();
         const value = JSON.parse(await readFile(file, 'utf8'));
         const keys = ['version', 'handleHash', 'authHash', 'model', 'systemHash', 'historyHash', 'historyCount', 'storeSession', 'agentId', 'expiresAt', 'stateHashes', 'marker'];
+        if (value?.version === 2) keys.push('promptMode');
+        const promptMode = value?.version === 1 ? 'system' : value?.promptMode;
         if (!object(value) || Object.keys(value).length !== keys.length || Object.keys(value).some(key => !keys.includes(key))
-          || value.version !== 1 || value.handleHash !== digest(handle) || !HASH.test(value.authHash) || !HASH.test(value.systemHash) || !HASH.test(value.historyHash)
+          || ![1, 2].includes(value.version) || promptMode !== this.promptMode
+          || value.handleHash !== digest(handle) || !HASH.test(value.authHash) || !HASH.test(value.systemHash) || !HASH.test(value.historyHash)
           || !resolveCursorModel(value.model) || !Number.isSafeInteger(value.historyCount) || value.historyCount < 1 || value.historyCount > 100000
           || !UUID.test(value.storeSession) || typeof value.agentId !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(value.agentId) || value.agentId.startsWith('bc-')
           || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= Date.now() || !Array.isArray(value.stateHashes) || value.stateHashes.length > 4096
@@ -230,7 +258,7 @@ export class CursorResponsesProvider {
           || typeof value.marker !== 'string' || !value.marker.startsWith('bifrost-cursor-priority-') || !UUID.test(value.marker.slice('bifrost-cursor-priority-'.length))) throw fresh();
         this.#assertCurrent(epoch);
         await this.#directory(value.storeSession); this.#assertCurrent(epoch);
-        return { ...value, file };
+        return { ...value, promptMode, file };
       } catch (error) { if (error instanceof CursorError && error.code !== 'cursor_session_invalid') throw error; throw fresh(); }
     });
   }
@@ -242,7 +270,7 @@ export class CursorResponsesProvider {
       || resolve(document.cwd) !== resolve(record.directory, 'cwd') || checkpoint?.schemaVersion !== 1 || typeof checkpoint.rootBlobId !== 'string') return;
     const bytes = await record.store.checkpoints.get({ agentId: record.agent.agentId, blobId: checkpoint.rootBlobId });
     if (!(bytes instanceof Uint8Array) || !bytes.length) return;
-    const data = { version: 1, handleHash: digest(handle), authHash: record.auth, model: record.model, systemHash: digest(record.system),
+    const data = { version: 2, promptMode: record.promptMode, handleHash: digest(handle), authHash: record.auth, model: record.model, systemHash: digest(record.system),
       historyHash: lease.historyHash, historyCount: lease.historyCount, storeSession: record.storeSession,
       agentId: record.agent.agentId, expiresAt: Date.now() + this.checkpointRetentionMs, stateHashes: [...record.stateHashes], marker: record.marker };
     const file = this.#checkpointPath(handle);
@@ -295,7 +323,7 @@ export class CursorResponsesProvider {
     record.timer.unref?.();
   }
   async #stop(record, error = fresh(), { preserveCheckpoint = false } = {}) {
-    if (record.stopped) return;
+    if (record.stopped) return record.stopping;
     record.stopped = true; record.stopError = error; record.rejectStopped?.(error); clearTimeout(record.timer);
     for (const handle of record.handles) this.#handles.delete(handle);
     this.#sessions.delete(record);
@@ -304,13 +332,16 @@ export class CursorResponsesProvider {
     const jobs = [];
     try { if (!record.finished && record.run?.cancel) jobs.push(Promise.resolve(record.run.cancel())); } catch {}
     try { record.agent?.close(); } catch {}
-    let cancelTimer;
-    await Promise.race([Promise.allSettled(jobs), new Promise(resolveDone => { cancelTimer = setTimeout(resolveDone, 1000); })]);
-    clearTimeout(cancelTimer);
-    if (!preserveCheckpoint) {
-      if (record.checkpointFile) await this.#deleteCheckpoint(record.checkpointFile).catch(() => {});
-      if (record.directory) await this.#removeDirectory(record.directory);
-    }
+    record.stopping = (async () => {
+      let cancelTimer;
+      await Promise.race([Promise.allSettled(jobs), new Promise(resolveDone => { cancelTimer = setTimeout(resolveDone, 1000); })]);
+      clearTimeout(cancelTimer);
+      if (!preserveCheckpoint) {
+        if (record.checkpointFile) await this.#deleteCheckpoint(record.checkpointFile).catch(() => {});
+        if (record.directory) await this.#removeDirectory(record.directory);
+      }
+    })();
+    return record.stopping;
   }
   #callback(record, tool, args, context = {}) {
     if (record.stopped || this.#closed) return Promise.reject(fresh());
@@ -376,13 +407,13 @@ export class CursorResponsesProvider {
           } else if (event.type === 'usage') {
             const usage = usageOf(event.usage); record.reportedUsage.push(usage);
             record.queue.push({ type: 'usage', usage });
-          } else if (event.type === 'status' && event.status === 'ERROR') record.lastSDKError = safeError({ message: event.message }, record.apiKey);
+          } else if (event.type === 'status' && event.status === 'ERROR') record.lastSDKError = { message: event.message };
           else if (event.type === 'request') throw new CursorError('Cursor SDK 请求了原生交互，但公开 SDK 没有回应接口。请通过已声明的 Codex 客户端问答工具交互。', 501, 'cursor_native_interaction_unsupported');
           if (event.type === 'system' && modelMismatch(event.model, record.selection)) throw new CursorError('Cursor SDK 实际模型或参数与所选值不匹配。', 502, 'cursor_model_mismatch');
         }
         const result = await run.wait();
         if (record.stopped) return;
-        if (result.status !== 'finished') throw record.lastSDKError ?? safeError(result.error, record.apiKey);
+        if (result.status !== 'finished') throw runError(result.error, record.lastSDKError);
         if (modelMismatch(result.model, selection)) throw new CursorError('Cursor SDK 实际模型或参数与所选值不匹配。', 502, 'cursor_model_mismatch');
         if (record.pending.size) throw new CursorError('Cursor SDK 在客户端工具尚未返回时结束。', 502);
         const runUsage = usageOf(result.usage) ?? sumUsage(record.reportedUsage);
@@ -394,7 +425,7 @@ export class CursorResponsesProvider {
         record.finished = true; record.queue.push({ type: 'finished', usage: runUsage });
       } catch (error) {
         if (!record.stopped) {
-          const safe = safeError(error, record.apiKey);
+          const safe = safeError(error);
           try { record.queue.push({ type: 'error', error: safe }); } catch { await this.#stop(record, safe); }
         }
       }
@@ -451,7 +482,7 @@ export class CursorResponsesProvider {
         if (!record && checkpoint) {
           if (this.#sessions.size >= this.maxSessions) throw new CursorError('Cursor 活跃会话数量已达上限。', 409, 'cursor_session_limit');
           if (digest(system) !== checkpoint.systemHash) throw new CursorError('Cursor 会话的 systemPrompt 已变更，请新建聊天。', 409, 'cursor_system_prompt_changed');
-          record = { epoch, auth: checkpoint.authHash, model: checkpoint.model, apiKey: credential.apiKey, system, marker: checkpoint.marker,
+          record = { epoch, auth: checkpoint.authHash, model: checkpoint.model, apiKey: credential.apiKey, system, promptMode: checkpoint.promptMode, marker: checkpoint.marker,
             mapping: translated.tools, pending: new Map(), sdkCalls: new Map(), queue: new Queue(), handles: new Set([handle]), stateHashes: new Set(checkpoint.stateHashes),
             busy: false, stopped: false, finished: true, crossHttp: false, selection, toolsDisabled: parsed.tool_choice === 'none',
             storeSession: checkpoint.storeSession, resumeAgentId: checkpoint.agentId, checkpointFile: checkpoint.file };
@@ -461,6 +492,7 @@ export class CursorResponsesProvider {
           record.latest = lease;
         }
         if (!record || record.stopped || lease !== record.latest || lease.used || record.busy) throw fresh();
+        if (record.promptMode !== this.promptMode) throw fresh();
         if (record.auth !== auth || record.model !== model.id) throw new CursorError('Cursor 会话与当前账号或模型不匹配，请新建聊天。', 403, 'cursor_session_scope');
         if (digest(inputAtoms.slice(0, lease.historyCount)) !== lease.historyHash) throw fresh();
         const delta = inputAtoms.slice(lease.historyCount);
@@ -489,7 +521,7 @@ export class CursorResponsesProvider {
         clearTimeout(record.timer);
       } else {
         if (inputAtoms.some(atom => atom.role !== 'user') || this.#sessions.size >= this.maxSessions) throw new CursorError('Cursor 需要新建空白聊天，或活跃会话数量已达上限。', 409, 'cursor_session_limit');
-        record = { epoch, auth, model: model.id, apiKey: credential.apiKey, system, marker: this.marker, mapping: translated.tools, pending: new Map(), sdkCalls: new Map(),
+        record = { epoch, auth, model: model.id, apiKey: credential.apiKey, system, promptMode: this.promptMode, marker: this.marker, mapping: translated.tools, pending: new Map(), sdkCalls: new Map(),
           queue: new Queue(), handles: new Set(), stateHashes: new Set(), busy: true, stopped: false, finished: false, crossHttp: false,
           selection, toolsDisabled: parsed.tool_choice === 'none' };
         record.stoppedPromise = new Promise((_, reject) => { record.rejectStopped = reject; });
@@ -501,7 +533,7 @@ export class CursorResponsesProvider {
     let resolveUsage;
     const bridgeUsage = new Promise(resolveValue => { resolveUsage = resolveValue; });
     let finishedHttp = false, timeout;
-    const stop = () => { if (!finishedHttp) void this.#stop(record, new CursorError('Cursor 请求已取消。', 499, 'request_cancelled')); };
+    const stop = () => { if (!finishedHttp) return this.#stop(record, new CursorError('Cursor 请求已取消。', 499, 'request_cancelled')); };
     signal?.addEventListener('abort', stop, { once: true });
     if (signal?.aborted) stop();
     const cleanup = () => { clearTimeout(timeout); signal?.removeEventListener('abort', stop); };
@@ -531,9 +563,11 @@ export class CursorResponsesProvider {
           if (record.stopped) throw record.stopError ?? fresh();
           self.#assertCurrent(epoch, signal);
           record.store = new sdk.JsonlLocalAgentStore(join(directory, 'store'));
+          const instructions = await self.#instructionOptions(record, { create: !record.resumeAgentId });
           const options = { apiKey: credential.apiKey, ...(credential.teamId ? { teamId: credential.teamId } : {}), model: selection,
-            systemPrompt: system, tools: ['mcp'], mcpServers: {},
-            local: { cwd: join(directory, 'cwd'), store: record.store, settingSources: [], enableAgentRetries: false, customTools: self.#customTools(record) } };
+            ...(instructions.systemPrompt !== undefined ? { systemPrompt: instructions.systemPrompt } : {}), tools: ['mcp'], mcpServers: {},
+            local: { cwd: join(directory, 'cwd'), store: record.store, settingSources: instructions.settingSources,
+              enableAgentRetries: false, customTools: self.#customTools(record) } };
           if (record.resumeAgentId) {
             if (typeof sdk.Agent.resume !== 'function') throw new CursorError('当前 Cursor SDK 不能恢复已完成的会话，请新建聊天。', 501, 'cursor_checkpoint_unsupported');
             const document = await record.store.agents.get({ agentId: record.resumeAgentId });
@@ -549,23 +583,28 @@ export class CursorResponsesProvider {
           if (record.stopped) { record.agent.close(); throw fresh(); }
           self.#assertCurrent(epoch, signal);
           await self.#send(record, message, selection);
-        } else if (record.finished) {
-          await self.#send(record, sdkMessage(inputAtoms.slice(lease.historyCount).map(atom => atom.block)), selection);
         } else {
-          for (const atom of inputAtoms.slice(lease.historyCount)) {
+          await self.#instructionOptions(record);
+          if (record.finished) await self.#send(record, sdkMessage(inputAtoms.slice(lease.historyCount).map(atom => atom.block)), selection);
+          else for (const atom of inputAtoms.slice(lease.historyCount)) {
             const call = record.pending.get(atom.block.tool_use_id);
             if (!call?.returned) throw fresh();
             record.pending.delete(atom.block.tool_use_id); call.resolve(sdkResult(atom.block.content));
           }
         }
         if (record.stopped) throw fresh();
-        for (const event of sourceEvent({ type: 'message_start', message: { type: 'message', role: 'assistant', content: [] } })) yield event;
-        let callId = null;
+        let callId = null, started = false;
         while (!record.stopped) {
           const item = await record.queue.next();
           if (!item) throw record.stopError ?? fresh();
           if (item.type === 'error') throw item.error;
           if (item.type === 'usage') { reported.push(item.usage); continue; }
+          if (!started) {
+            // Wait for real output, a client tool, or a successful empty run.
+            // Startup failures must remain HTTP errors in gateway preflight.
+            for (const event of sourceEvent({ type: 'message_start', message: { type: 'message', role: 'assistant', content: [] } })) yield event;
+            started = true;
+          }
           if (item.type === 'text') {
             const block = { type: 'text', text: item.text }; emitted.push({ role: 'assistant', block });
             for (const event of sourceEvent({ type: 'content_block_start', index, content_block: block })) yield event;
@@ -605,7 +644,7 @@ export class CursorResponsesProvider {
         yield conversion.finish(usage);
       } catch (error) {
         resolveUsage(usage); await self.#stop(record, error);
-        const safe = safeError(error, credential.apiKey); terminalError = safe;
+        const safe = safeError(error); terminalError = safe;
         yield conversion.event('response.failed', { response: conversion.response('failed', null,
           { message: safe.message, type: safe.status >= 500 ? 'server_error' : 'invalid_request_error', code: safe.code, param: null }) });
       } finally { cleanup(); if (!finishedHttp) { resolveUsage(usage); await self.#stop(record); } }
@@ -617,12 +656,32 @@ export class CursorResponsesProvider {
       const response = complete?.status === 'failed' ? denied(terminalError) : Response.json(complete);
       response.bridgeUsage = bridgeUsage; response.bridgeModel = model.upstream; return response;
     }
+    let firstNext = null, firstConsumed = false, cancelled = false, preflight = null;
+    const first = () => firstNext ??= iterator.next();
     const stream = new ReadableStream({
-      async pull(controller) { const next = await iterator.next(); if (next.done) controller.close(); else controller.enqueue(encodeResponsesEvent(next.value)); },
-      cancel() { stop(); cleanup(); resolveUsage(null); void iterator.return().catch(() => {}); },
+      async pull(controller) {
+        const next = firstConsumed ? await iterator.next() : await first();
+        firstConsumed = true;
+        if (next.done) controller.close(); else controller.enqueue(encodeResponsesEvent(next.value));
+      },
+      async cancel() { cancelled = true; const stopping = stop(); cleanup(); resolveUsage(null); await stopping; await iterator.return().catch(() => {}); },
     }, { highWaterMark: 0 });
     const response = new Response(stream, { headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store' } });
-    response.bridgeUsage = bridgeUsage; response.bridgeModel = model.upstream; return response;
+    response.bridgeUsage = bridgeUsage; response.bridgeModel = model.upstream;
+    // The gateway calls this before committing HTTP headers. Direct callers
+    // retain lazy startup until they read the stream or explicitly preflight.
+    response.bridgePreflight = () => preflight ??= (async () => {
+      if (firstConsumed || response.bodyUsed || response.body.locked) return response;
+      const next = cancelled ? null : await first();
+      if (terminalError || cancelled || next?.done) {
+        const failure = denied(terminalError ?? new CursorError('Cursor 请求已取消。', 499, 'request_cancelled'));
+        failure.bridgeUsage = bridgeUsage; failure.bridgeModel = model.upstream;
+        if (!response.body.locked) await response.body.cancel();
+        return failure;
+      }
+      return response;
+    })();
+    return response;
   }
   async close() {
     this.#closed = true;

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import { createInterface } from 'node:readline';
 import { dirname, join, resolve } from 'node:path';
@@ -29,6 +29,8 @@ const argument = (flag, fallback) => {
 const binary = argument('--binary', process.env.CODEX_BINARY || 'codex');
 const requestedModel = argument('--model', CURSOR_MODELS[0].id);
 const syntheticInternalMetadata = process.argv.includes('--internal-metadata');
+const promptMode = argument('--prompt-mode', 'project-rules');
+if (!['project-rules', 'system'].includes(promptMode)) throw new Error('--prompt-mode must be project-rules or system.');
 const selectedModel = resolveCursorModel(requestedModel);
 if (!selectedModel) throw new Error('--model must name one of the two Cursor aliases.');
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -57,6 +59,7 @@ const metadataFixturePrefix = 'bifrost-cursor-offline-synthetic-internal-meta-ht
 const metadataInputTypes = new Set(['message', 'reasoning', 'function_call', 'custom_tool_call', 'tool_search_call',
   'function_call_output', 'custom_tool_call_output', 'tool_search_output']);
 const internalMetadataInjections = [], sdkMetadataLeakChecks = [];
+let nativeCodexInstructionTexts = [];
 let child, timer, nativeVersion = null, exitCode = null, selectedTool = null, callbackReturned = false;
 let adapterCalls = 0, originalInferenceCalls = 0, externalEndpointAttempts = 0;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -114,6 +117,44 @@ function assertNoInternalMetadata(value, phase) {
   };
   visit(value); sdkMetadataLeakChecks.push(phase);
 }
+function captureNativeCodexInstructions(options, requestIndex) {
+  if (requestIndex !== 0) return;
+  const body = JSON.parse(Buffer.from(options.body).toString('utf8'));
+  nativeCodexInstructionTexts = [body.instructions,
+    ...(Array.isArray(body.input) ? body.input : []).filter(item => ['system', 'developer'].includes(item?.role))
+      .flatMap(item => typeof item.content === 'string' ? [item.content]
+        : (Array.isArray(item.content) ? item.content : []).map(block => block?.text))]
+    .filter(value => typeof value === 'string' && value.trim().length > 0);
+  assert.ok(nativeCodexInstructionTexts.length > 0, 'The native Codex request must contain nonempty instructions.');
+}
+async function verifyPromptConfiguration(options) {
+  const projectRules = await readFile(join(options.local.cwd, 'AGENTS.md'), 'utf8').catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  const projectRulesMode = promptMode === 'project-rules';
+  assert.deepEqual(options.local.settingSources, projectRulesMode ? ['project'] : []);
+  let instructions;
+  if (projectRulesMode) {
+    assert.equal(Object.hasOwn(options, 'systemPrompt'), false,
+      'Project-rules compatibility mode must omit the privileged systemPrompt SDK option.');
+    assert.ok(typeof projectRules === 'string' && projectRules.trim().length > 0,
+      'The isolated SDK cwd must contain nonempty AGENTS.md rules.');
+    instructions = projectRules;
+    assertNoInternalMetadata(projectRules, 'sdk-project-rules');
+  } else {
+    assert.ok(typeof options.systemPrompt === 'string' && options.systemPrompt.trim().length > 0);
+    assert.equal(projectRules, null, 'System mode must not create a second project rules copy.');
+    instructions = options.systemPrompt;
+  }
+  assert.ok(nativeCodexInstructionTexts.every(text => instructions.includes(text)),
+    'All native Codex system and developer instruction text must reach the selected prompt source.');
+  return { promptMode, systemPromptProvided: Object.hasOwn(options, 'systemPrompt'),
+    preservesSystemPromptPriority: !projectRulesMode, codexInstructionsPresent: true,
+    nativeInstructionCount: nativeCodexInstructionTexts.length,
+    instructionHash: hash(instructions), projectRules: { exists: projectRules !== null,
+      nonempty: Boolean(projectRules?.trim()), hash: projectRules === null ? null : hash(projectRules) } };
+}
 function toolArguments(schema) {
   const properties = schema.properties ?? {};
   const command = `Get-Content -LiteralPath '${proofPath.replaceAll("'", "''")}' -Raw`;
@@ -152,10 +193,12 @@ const fakeSdk = {
     assert.equal(options.apiKey, sdkKey); assert.equal(options.teamId, 42);
     assert.deepEqual(options.model, { id: selectedModel.upstream });
     assert.deepEqual(options.tools, ['mcp']); assert.deepEqual(options.mcpServers, {});
-    assert.deepEqual(options.local.settingSources, []); assert.equal(options.local.enableAgentRetries, false);
+    assert.equal(options.local.enableAgentRetries, false);
     assert.ok(options.local.cwd.startsWith(work)); assert.ok(options.local.store.path.startsWith(work));
+    const promptEvidence = await verifyPromptConfiguration(options);
     assert.equal(sdkCreated.length, 0, 'A tool round must create exactly one SDK agent.');
-    sdkCreated.push({ model: options.model, tools: options.tools, settingsSources: options.local.settingSources, storeIsolated: true });
+    sdkCreated.push({ model: options.model, tools: options.tools, settingsSources: options.local.settingSources, storeIsolated: true,
+      ...promptEvidence });
     const agent = { agentId: 'cursor-offline-agent-one', close() { sdkClosed.push(agent.agentId); }, async send(message, sendOptions) {
       assertNoInternalMetadata({ message, sendOptions }, 'sdk-send-message-and-options');
       assert.equal(sdkSends.length, 0, 'The original SDK Run must resume; a second send is not allowed.');
@@ -205,10 +248,13 @@ const fakeSdk = {
     return agent;
   } },
 };
-const responses = new CursorResponsesProvider({ cursorService, stateDir: work, sdkLoader: async () => fakeSdk, requestTimeoutMs: 45000 });
+const responses = new CursorResponsesProvider({ cursorService, stateDir: work, sdkLoader: async () => fakeSdk,
+  requestTimeoutMs: 45000, promptMode });
 const requestResponses = responses.request.bind(responses);
 responses.request = async options => {
-  const requestIndex = adapterCalls++, response = await requestResponses(injectInternalMetadata(options, requestIndex));
+  const requestIndex = adapterCalls++;
+  captureNativeCodexInstructions(options, requestIndex);
+  const response = await requestResponses(injectInternalMetadata(options, requestIndex));
   responseReads.push(response.clone().text().then(body => {
     if (!response.ok) { errors.push({ phase: 'adapter', status: response.status, message: redact(body) }); return; }
     for (const frame of body.split(/\r?\n\r?\n/)) {
@@ -307,7 +353,8 @@ try {
       assert.equal(injection.count, requests[injection.requestIndex].input.filter(item => metadataInputTypes.has(item.type)).length,
         'Every supported native input item must receive synthetic metadata at the adapter boundary.');
     }
-    assert.deepEqual(sdkMetadataLeakChecks, ['sdk-create-options', 'sdk-send-message-and-options', 'sdk-client-tool-options',
+    assert.deepEqual(sdkMetadataLeakChecks, ['sdk-create-options', ...(promptMode === 'project-rules' ? ['sdk-project-rules'] : []),
+      'sdk-send-message-and-options', 'sdk-client-tool-options',
       'sdk-client-tool-result', 'sdk-client-tool-result']);
   }
   assert.equal(originalInferenceCalls, 0);
@@ -337,6 +384,7 @@ try {
   const runUsage = (await responses.status()).runUsageDiagnostics;
   assert.equal(runUsage.length, 1); assert.equal(runUsage[0].httpAttribution, 'unknown'); assert.equal(runUsage[0].usage.total_tokens, 80);
   const proof = { passed: true, nativeVersion, realInference: false, existingAuthLoaded: false, model: selectedModel.id,
+    promptMode, preservesSystemPromptPriority: promptMode === 'system',
     syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     internalMetadataInjections, sdkMetadataLeakChecks,
     fixtureDirectory: work, globalReasoningEffort: 'max', sdkReasoning: 'cursor-default',
@@ -349,11 +397,13 @@ try {
     selectedTool, requests, responseItems, terminalResponses, sdkCreated, sdkSends, usageRecords: usageEvents.length, errors };
   await writeFile(join(work, 'result.json'), JSON.stringify(proof, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify({ passed: true, nativeVersion, model: selectedModel.id, realInference: false, existingAuthLoaded: false,
+    promptMode, preservesSystemPromptPriority: promptMode === 'system',
     syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     localToolCalls: commands.length, sameSdkRunResumed: true, sdkSends: 1, httpUsageUnknown: true,
     inheritedMaxUsesCursorDefault: true, evidencePath: join(work, 'result.json') }, null, 2));
 } catch (error) {
   const proof = { passed: false, nativeVersion, realInference: false, existingAuthLoaded: false, model: selectedModel.id,
+    promptMode, preservesSystemPromptPriority: promptMode === 'system',
     syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     internalMetadataInjections, sdkMetadataLeakChecks,
     exitCode, failure: redact(error.message), callbackReturned, selectedTool, requests, responseItems, terminalResponses,

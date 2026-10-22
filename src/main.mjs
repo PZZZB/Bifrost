@@ -58,7 +58,7 @@ if (modelPolicy.snapshot().available) {
   } catch (error) { console.error(`Model settings: ${redact(error.message)}`); }
 }
 const cursorService = await startCursorService({ stateDir, getGatewayStatus: () => gateway?.cursorStatus() });
-cursorProvider = new CursorResponsesProvider({ cursorService, stateDir });
+cursorProvider = new CursorResponsesProvider({ cursorService, stateDir, promptMode: cursorService.promptMode ?? 'project-rules' });
 const codeBuddyService = await startCodeBuddyService({ stateDir,
   getGatewayStatus: () => {
     const messages = withService?.channelStatus('CodeBuddy');

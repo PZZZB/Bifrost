@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readdir, readFile, writeFile, rename, symlink, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readdir, readFile, writeFile, rename, symlink, unlink, link } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CursorResponsesProvider, CURSOR_RESPONSES_STATE_PREFIX } from '../src/cursor-responses.mjs';
@@ -203,6 +203,94 @@ test('backpressure starts no SDK agent before consumption; cancellation before r
   const response = await f.request({ ...base, stream: true });
   await tick(); assert.equal(f.created.length, 0);
   await response.body.cancel(); await tick(); assert.equal(f.created.length, 0); assert.equal(await response.bridgeUsage, null);
+});
+
+test('stream preflight exposes asynchronous SDK startup denial and authentication errors as JSON without replay', async t => {
+  for (const [error, status, code] of [
+    [{ message: "[invalid_argument] unknown option '--system-prompt'" }, 403, 'cursor_system_prompt_denied'],
+    [{ message: 'unauthorized', status: 401 }, 401, 'cursor_auth_rejected'],
+  ]) {
+    const f = await fixture(t, async context => {
+      await tick(); context.emit({ type: 'status', status: 'ERROR', message: error.message });
+      context.finish({ status: 'error', error });
+    });
+    const original = await f.request({ ...base, stream: true });
+    assert.equal(f.created.length, 0);
+    const response = await original.bridgePreflight();
+    assert.equal(response.status, status); assert.equal(response.headers.get('content-type'), 'application/json');
+    assert.equal((await response.json()).error.code, code); assert.equal(await response.bridgeUsage, null);
+    assert.equal(f.created.length, 1); assert.equal(f.sends.length, 1); assert.equal(f.provider.activeRuns, 0);
+    assert.equal(f.closed.length, 1); assert.equal((await original.body.getReader().read()).done, true);
+    assert.equal(await original.bridgePreflight(), response);
+  }
+});
+
+test('terminal SDK error codes take priority over generic or misleading status text', async t => {
+  for (const [message, error, status, code] of [
+    ['Request failed', { code: 'unauthenticated', message: 'token expired' }, 401, 'cursor_auth_rejected'],
+    ["unknown option '--system-prompt'", { code: 'unauthenticated', message: 'token expired' }, 401, 'cursor_auth_rejected'],
+    ['systemPrompt service is not available', { code: 'unavailable', message: 'offline' }, 503, 'cursor_upstream_unavailable'],
+    ["unknown option '--system-prompt'", { code: 'invalid_argument', message: 'Request failed' }, 403, 'cursor_system_prompt_denied'],
+  ]) {
+    const f = await fixture(t, async context => {
+      context.emit({ type: 'status', status: 'ERROR', message }); context.finish({ status: 'error', error });
+    });
+    const original = await f.request({ ...base, stream: true }), response = await original.bridgePreflight();
+    assert.equal(response.status, status); assert.equal((await response.json()).error.code, code);
+    assert.equal(f.sends.length, 1); assert.equal(f.provider.activeRuns, 0);
+  }
+});
+
+test('preflight waits through usage and preserves every normal SSE frame in order', async t => {
+  let release, started;
+  const ready = new Promise(resolveReady => { started = resolveReady; });
+  const gate = new Promise(resolveGate => { release = resolveGate; });
+  const f = await fixture(t, async context => {
+    context.usage(tokenUsage); started(); await gate; context.text('First.'); context.text('Second.'); context.finish();
+  });
+  const response = await f.request({ ...base, stream: true });
+  let primed = false;
+  const preflight = response.bridgePreflight().then(value => { primed = true; return value; });
+  await ready; await tick(); assert.equal(primed, false);
+  release(); assert.equal(await preflight, response);
+  assert.equal(response.bodyUsed, false);
+  const events = (await response.text()).split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
+  assert.deepEqual(events.slice(0, 2).map(event => event.type), ['response.created', 'response.in_progress']);
+  assert.deepEqual(events.map(event => event.sequence_number), events.map((_, index) => index));
+  assert.equal(events.filter(event => event.type === 'response.created').length, 1);
+  assert.deepEqual(events.filter(event => event.type === 'response.output_text.delta').map(event => event.delta), ['First.', 'Second.']);
+  assert.equal(events.at(-1).type, 'response.completed'); assert.equal(f.sends.length, 1);
+  assert.equal((await response.bridgeUsage).total_tokens, 20);
+});
+
+test('cancellation settles pending preflight and discards an unread preflighted run', async t => {
+  const f = await fixture(t, async () => {}), abort = new AbortController();
+  const response = await f.request({ ...base, stream: true }, abort.signal), preflight = response.bridgePreflight();
+  while (!f.sends.length) await tick();
+  abort.abort();
+  const failure = await preflight;
+  assert.equal(failure.status, 499); assert.equal((await failure.json()).error.code, 'request_cancelled');
+  assert.equal(await failure.bridgeUsage, null); assert.equal(f.provider.activeRuns, 0); assert.equal(f.cancelled.length, 1);
+
+  const unread = await fixture(t, async context => { context.text('First.'); });
+  const prepared = await unread.request({ ...base, stream: true });
+  assert.equal(await prepared.bridgePreflight(), prepared); assert.equal(unread.provider.activeRuns, 1);
+  await prepared.body.cancel(); await tick();
+  assert.equal(await prepared.bridgeUsage, null); assert.equal(unread.provider.activeRuns, 0); assert.equal(unread.cancelled.length, 1);
+});
+
+test('errors following text remain SSE failures after successful preflight and never replay the SDK run', async t => {
+  const f = await fixture(t, async context => {
+    context.text('Already started.'); context.emit({ type: 'status', status: 'ERROR', message: 'unauthorized' });
+    context.finish({ status: 'error', error: { message: 'unauthorized', status: 401 } });
+  });
+  const response = await f.request({ ...base, stream: true });
+  assert.equal(await response.bridgePreflight(), response); assert.equal(response.status, 200);
+  const events = (await response.text()).split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
+  assert.equal(events[0].type, 'response.created'); assert.equal(events.at(-1).type, 'response.failed');
+  assert.equal(events.at(-1).response.error.code, 'cursor_auth_rejected');
+  assert.equal(events.filter(event => event.type === 'response.output_text.delta')[0].delta, 'Already started.');
+  assert.equal(f.sends.length, 1); assert.equal(f.provider.activeRuns, 0);
 });
 
 test('cancelAll rejects hanging callbacks and allows a later fresh authenticated request; close is permanent', async t => {
@@ -479,4 +567,104 @@ test('a vanished persistent lease cannot be consumed after metadata was loaded',
   const response = await provider.request({ path: '/responses', body: { ...base, stream: true, input: history(first, [{ role: 'user', content: 'Next' }]) } });
   await unlink(join(root, (await readdir(root))[0]));
   const body = await response.text(); assert.match(body, /cursor_session_invalid/); assert.equal(f.resumed.length, 0);
+});
+
+test('project rules retain original instruction text without replacing the Cursor system prompt or loading other settings', async t => {
+  const f = await fixture(t, async context => { context.text('Compatible.'); context.finish(); }, { promptMode: 'project-rules' });
+  const body = { ...base, input: [{ role: 'system', content: 'Original system requirements.' },
+    { role: 'developer', content: 'Original developer requirements.' }, ...base.input] };
+  const response = await f.request(body); assert.equal(response.status, 200); await response.json();
+  const options = f.created[0], file = join(options.local.cwd, 'AGENTS.md'), rules = await readFile(file, 'utf8');
+  for (const instruction of [base.instructions, 'Original system requirements.', 'Original developer requirements.']) assert.ok(rules.includes(instruction));
+  assert.equal(rules.includes('Read the file.'), false);
+  assert.equal(Object.hasOwn(options, 'systemPrompt'), false);
+  assert.deepEqual(options.local.settingSources, ['project']); assert.deepEqual(options.tools, ['mcp']);
+  assert.deepEqual(options.mcpServers, {}); assert.equal(Object.hasOwn(options.local, 'dirs'), false);
+  assert.deepEqual(await readdir(options.local.cwd), ['AGENTS.md']);
+  const capabilities = (await f.provider.status()).responsesCapabilities;
+  assert.equal(capabilities.promptMode, 'project-rules'); assert.equal(capabilities.preservesSystemPromptPriority, false);
+});
+
+test('project rules keep client question callbacks in the original run and send a later user message only once', async t => {
+  const question = { ...fn, name: 'request_user_input', description: 'Ask the user for a decision.',
+    parameters: { type: 'object', properties: { question: { type: 'string' } }, required: ['question'] } };
+  let reply;
+  const f = await fixture(t, async context => {
+    if (!reply) reply = await context.call(calledTool(context, question.name), { question: 'Which file?' }, 'sdk-question');
+    context.text(reply.content[0].text); context.finish();
+  }, { promptMode: 'project-rules' });
+  const body = { ...base, tools: [question] }, first = await (await f.request(body)).json();
+  const call = first.output.find(item => item.type === 'function_call');
+  assert.equal(call.name, question.name); assert.equal(reply, undefined);
+  const input = history(first, [{ type: 'function_call_output', call_id: call.call_id, output: 'Use main.txt' }]);
+  const second = await (await f.request({ ...body, input })).json();
+  assert.equal(second.status, 'completed'); assert.equal(f.sends.length, 1); assert.equal(f.created.length, 1);
+  assert.deepEqual(reply, { content: [{ type: 'text', text: 'Use main.txt' }] });
+  const third = await f.request({ ...body, input: [...input, ...second.output, { role: 'user', content: 'Continue.' }] });
+  assert.equal(third.status, 200); await third.json();
+  assert.equal(f.sends.length, 2); assert.deepEqual(f.sends[1].message, { text: 'Continue.' });
+});
+
+test('project-rules checkpoints bind the mode and resume with the same verified rules file', async t => {
+  const f = await fixture(t, async context => { context.text('Done.'); context.finish(); }, { realCheckpoint: true, promptMode: 'project-rules' });
+  const first = await (await f.request()).json(), root = join(f.directory, 'cursor-sdk', 'resume');
+  const file = join(root, (await readdir(root))[0]), index = JSON.parse(await readFile(file, 'utf8'));
+  const cwd = f.created[0].local.cwd, rules = await readFile(join(cwd, 'AGENTS.md'), 'utf8');
+  assert.equal(index.version, 2); assert.equal(index.promptMode, 'project-rules'); await f.provider.close();
+  const input = history(first, [{ role: 'user', content: 'Next.' }]);
+  const strict = new CursorResponsesProvider({ cursorService: f.service, stateDir: f.directory, sdkLoader: async () => f.sdk });
+  const rejected = await strict.request({ path: '/responses', body: { ...base, input } });
+  assert.equal(rejected.status, 409); assert.equal(f.resumed.length, 0); await strict.close();
+  const next = new CursorResponsesProvider({ cursorService: f.service, stateDir: f.directory, sdkLoader: async () => f.sdk, promptMode: 'project-rules' });
+  t.after(() => next.close());
+  const response = await next.request({ path: '/responses', body: { ...base, input } });
+  assert.equal(response.status, 200); await response.json(); assert.equal(f.resumed.length, 1);
+  const options = f.resumed[0].options;
+  assert.equal(options.local.cwd, cwd); assert.deepEqual(options.local.settingSources, ['project']);
+  assert.equal(Object.hasOwn(options, 'systemPrompt'), false); assert.equal(await readFile(join(cwd, 'AGENTS.md'), 'utf8'), rules);
+  assert.deepEqual(f.sends.at(-1).message, { text: 'Next.' });
+});
+
+test('legacy system checkpoints never migrate silently into project rules', async t => {
+  const f = await fixture(t, async context => { context.text('Done.'); context.finish(); }, { realCheckpoint: true });
+  const first = await (await f.request()).json(), root = join(f.directory, 'cursor-sdk', 'resume');
+  const file = join(root, (await readdir(root))[0]), index = JSON.parse(await readFile(file, 'utf8'));
+  await f.provider.close(); delete index.promptMode; index.version = 1; await writeFile(file, JSON.stringify(index));
+  const body = { ...base, input: history(first, [{ role: 'user', content: 'Next.' }]) };
+  const compatible = new CursorResponsesProvider({ cursorService: f.service, stateDir: f.directory, sdkLoader: async () => f.sdk, promptMode: 'project-rules' });
+  const rejected = await compatible.request({ path: '/responses', body });
+  assert.equal(rejected.status, 409); assert.equal(f.resumed.length, 0); await compatible.close();
+  const strict = new CursorResponsesProvider({ cursorService: f.service, stateDir: f.directory, sdkLoader: async () => f.sdk });
+  t.after(() => strict.close()); const response = await strict.request({ path: '/responses', body });
+  assert.equal(response.status, 200); await response.json();
+  assert.equal(f.resumed[0].options.systemPrompt, base.instructions); assert.deepEqual(f.resumed[0].options.local.settingSources, []);
+});
+
+test('tampered, missing, linked or additional project settings cannot release a client callback', async t => {
+  for (const change of ['changed', 'missing', 'linked', 'settings']) {
+    const f = await fixture(t, async context => {
+      await context.call(calledTool(context), { path: 'x' }, 'sdk-pending'); context.text('Unexpected.'); context.finish();
+    }, { promptMode: 'project-rules' });
+    const first = await (await f.request()).json(), call = first.output.find(item => item.type === 'function_call');
+    const cwd = f.created[0].local.cwd, file = join(cwd, 'AGENTS.md'), outside = join(f.directory, 'outside-rules.md');
+    if (change === 'changed') await writeFile(file, 'Changed instructions.');
+    else if (change === 'missing') await unlink(file);
+    else if (change === 'settings') await mkdir(join(cwd, '.cursor'));
+    else { await writeFile(outside, base.instructions); await unlink(file); await link(outside, file); }
+    const response = await f.request({ ...base, input: history(first, [{ type: 'function_call_output', call_id: call.call_id, output: 'late answer' }]) });
+    assert.equal(response.status, 503); assert.equal((await response.json()).error.code, 'cursor_project_rules_invalid');
+    assert.equal(f.results.length, 0); assert.equal(f.sends.length, 1); assert.equal(f.provider.activeRuns, 0);
+    if (change === 'linked') assert.equal(await readFile(outside, 'utf8'), base.instructions);
+  }
+});
+
+test('project rule tampering rejects a completed checkpoint before SDK resume', async t => {
+  const f = await fixture(t, async context => { context.text('Done.'); context.finish(); }, { promptMode: 'project-rules', realCheckpoint: true });
+  const first = await (await f.request()).json(), cwd = f.created[0].local.cwd; await f.provider.close();
+  await writeFile(join(cwd, 'AGENTS.md'), 'Changed instructions.');
+  const next = new CursorResponsesProvider({ cursorService: f.service, stateDir: f.directory, sdkLoader: async () => f.sdk, promptMode: 'project-rules' });
+  t.after(() => next.close());
+  const response = await next.request({ path: '/responses', body: { ...base, input: history(first, [{ role: 'user', content: 'Next.' }]) } });
+  assert.equal(response.status, 503); assert.equal((await response.json()).error.code, 'cursor_project_rules_invalid');
+  assert.equal(f.resumed.length, 0); assert.equal(f.sends.length, 1);
 });

@@ -74,6 +74,9 @@ test('unconfigured Cursor stays offline and never reads native SDK credentials',
   const status = await f.service.status();
   assert.equal(status.authReady, false);
   assert.equal(status.profile, null);
+  assert.equal(f.service.promptMode, 'project-rules');
+  assert.equal(status.promptMode, 'project-rules');
+  assert.equal(status.preservesSystemPromptPriority, false);
   assert.deepEqual(status.plan, { declared: 'Teams', verified: false });
   assert.deepEqual(status.login, { state: 'not_started' });
   assert.equal(f.calls.sdk, 0);
@@ -103,12 +106,41 @@ test('official browser login mints only a bridge-owned credential without touchi
   assert.equal(f.saved().apiKey, SECRET);
   assert.deepEqual(await f.service.credential(), { apiKey: SECRET, apiKeyExpiresAtMs: EPOCH + 3600000 });
   const config = JSON.parse(await readFile(join(f.stateDir, 'cursor.json'), 'utf8'));
-  assert.deepEqual(config, { version: 1, enabled: true, declaredPlan: 'Teams' });
+  assert.deepEqual(config, { version: 1, enabled: true, declaredPlan: 'Teams', promptMode: 'project-rules' });
   assert.equal(JSON.stringify(config).includes(SECRET), false);
   const status = await f.service.status();
   assert.equal(status.authReady, true);
   assert.deepEqual(status.profile, { email: 'mock@example.test', name: 'Mock User', userId: 42 });
   assert.equal(JSON.stringify(status).includes(SECRET), false);
+});
+
+test('explicit Cursor prompt modes survive login and logout with their advertised priority', async t => {
+  for (const promptMode of ['project-rules', 'system']) {
+    const f = await fixture(t, { config: { enabled: true, promptMode } });
+    assert.equal(f.service.promptMode, promptMode);
+    const before = await f.service.status();
+    assert.equal(before.promptMode, promptMode); assert.equal(before.preservesSystemPromptPriority, promptMode === 'system');
+    await f.service.beginLogin(); await finishLogin(f); await f.service.logout();
+    assert.equal(JSON.parse(await readFile(join(f.stateDir, 'cursor.json'), 'utf8')).promptMode, promptMode);
+    const after = await f.service.status();
+    assert.equal(after.promptMode, promptMode); assert.equal(after.preservesSystemPromptPriority, promptMode === 'system');
+  }
+});
+
+test('invalid prompt modes disable Cursor and cannot be repaired implicitly by authorizing or logging out', async t => {
+  for (const promptMode of [null, 'SYSTEM', 'rules', true, 0, {}, [], SECRET]) {
+    const f = await fixture(t, { initial: credential(), config: { enabled: true, promptMode } });
+    assert.equal(f.service.enabled, false); assert.equal(f.service.promptMode, null);
+    assert.equal(await f.service.credential(), null);
+    await assert.rejects(f.service.getModels(), error => error.status === 503 && error.code === 'cursor_config_invalid');
+    await assert.rejects(f.service.beginLogin(), error => error.status === 503 && error.code === 'cursor_config_invalid');
+    const status = await f.service.status();
+    assert.equal(status.configured, false); assert.equal(status.authReady, false); assert.equal(status.promptMode, null);
+    assert.equal(status.preservesSystemPromptPriority, null); assert.match(status.error, /promptMode/);
+    assert.equal(JSON.stringify(status).includes(SECRET), false);
+    await f.service.logout(); assert.match((await f.service.status()).error, /promptMode/);
+    assert.equal(f.calls.sdk, 0); assert.equal(f.calls.save.length, 0);
+  }
 });
 
 test('metadata passes only this bridge user key and its explicit team context', async t => {

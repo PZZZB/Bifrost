@@ -2,15 +2,39 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Gateway } from '../src/gateway.mjs';
 import { CURSOR_MODELS } from '../src/cursor-service.mjs';
-import { CURSOR_RESPONSES_STATE_PREFIX } from '../src/cursor-responses.mjs';
+import { CursorResponsesProvider, CURSOR_RESPONSES_STATE_PREFIX } from '../src/cursor-responses.mjs';
 import { CODEBUDDY_RESPONSES_STATE_PREFIX } from '../src/codebuddy-responses.mjs';
 
 const key = 'local-cursor-fixture-key';
 const headers = { 'X-Account-Bridge-Key': key, Authorization: 'Bearer private-a-auth', 'ChatGPT-Account-ID': 'private-a-account',
   Cookie: 'private-a-session=secret', 'Content-Type': 'application/json' };
 const ready = { authenticated: true, ready: true, modelAvailable: true };
+async function sdkProvider(t, { events, result, gateAfterFirst = false } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'bifrost-cursor-gateway-'));
+  const counts = { created: 0, sends: 0, cancelled: 0, closed: 0 };
+  let release;
+  const gate = new Promise(resolveGate => { release = resolveGate; });
+  const provider = new CursorResponsesProvider({ stateDir: directory,
+    cursorService: { credential: async () => ({ apiKey: 'private-cursor-fixture-key', apiKeyExpiresAtMs: Date.now() + 60000 }),
+      getModels: async () => CURSOR_MODELS.map(model => ({ id: model.upstream })), status: async () => ready },
+    sdkLoader: async () => ({ JsonlLocalAgentStore: class {}, Agent: { async create() {
+      counts.created++;
+      return { agentId: 'fixture-agent', close() { counts.closed++; }, async send() {
+        counts.sends++;
+        return { async *stream() {
+          for (const event of events) { await new Promise(resolveTick => setImmediate(resolveTick)); yield event; if (gateAfterFirst) await gate; }
+        }, async wait() { return result; }, async cancel() { counts.cancelled++; release(); } };
+      } };
+    } } }) });
+  t.after(async () => { await provider.close(); await rm(directory, { recursive: true, force: true }); });
+  return { provider, counts };
+}
+
 async function fixture(t, { enabled = () => true, provider, sourceModels = CURSOR_MODELS.map(model => ({ id: model.upstream })) } = {}) {
   const calls = [], records = [];
   let nativeCalls = 0;
@@ -96,4 +120,54 @@ test('Cursor joins the catalog after the original A/B and CodeBuddy entries only
   const data = await response.json();
   assert.deepEqual(data.models.map(model => model.slug), ['a-model', 'B-gpt-6-astra', 'B-gpt-6.1-sol', 'claude-codebuddy-opus-5-5', CURSOR_MODELS[1].id]);
   assert.deepEqual(data.models[0].preserved, { data: true });
+});
+
+test('Cursor asynchronous SDK startup rejection reaches Codex as a terminal HTTP error before SSE headers', async t => {
+  for (const [message, status, code] of [
+    ["[invalid_argument] unknown option '--system-prompt'", 403, 'cursor_system_prompt_denied'],
+    ['unauthorized', 401, 'cursor_auth_rejected'],
+  ]) {
+    const { provider, counts } = await sdkProvider(t, { events: [{ type: 'status', status: 'ERROR', message }],
+      result: { status: 'error', error: { message, status } } });
+    const { url, records, gateway, nativeCalls, settle } = await fixture(t, { provider });
+    const response = await fetch(`${url}/responses`, { method: 'POST', headers,
+      body: JSON.stringify({ model: CURSOR_MODELS[0].id, instructions: 'Trusted fixture instruction.', input: 'fixture', stream: true }) });
+    assert.equal(response.status, status); assert.equal(response.headers.get('content-type'), 'application/json');
+    const text = await response.text(); assert.equal(JSON.parse(text).error.code, code); assert.equal(text.includes('response.created'), false);
+    await settle();
+    assert.deepEqual(counts, { created: 1, sends: 1, cancelled: 1, closed: 1 }); assert.equal(nativeCalls(), 0);
+    assert.equal(records.length, 1); assert.equal(records[0].httpStatus, status); assert.equal(records[0].status, 'failed');
+    assert.equal(records[0].usage, null); assert.equal(gateway.pendingRequests, 0); assert.equal(gateway.metrics.accounts.Cursor.active, 0);
+  }
+});
+
+test('a client disconnect after successful Cursor preflight cancels the SDK run and settles gateway accounting', { timeout: 3000 }, async t => {
+  const { provider, counts } = await sdkProvider(t, {
+    events: [{ type: 'assistant', message: { content: [{ type: 'text', text: 'Started.' }] } }],
+    result: { status: 'finished' }, gateAfterFirst: true,
+  });
+  const { url, records, gateway, settle } = await fixture(t, { provider }), abort = new AbortController();
+  const response = await fetch(`${url}/responses`, { method: 'POST', headers, signal: abort.signal,
+    body: JSON.stringify({ model: CURSOR_MODELS[0].id, input: 'fixture', stream: true }) });
+  assert.equal(response.status, 200);
+  const first = await response.body.getReader().read();
+  assert.match(new TextDecoder().decode(first.value), /response.created/); abort.abort();
+  await settle();
+  assert.equal(counts.sends, 1); assert.equal(counts.cancelled, 1); assert.equal(counts.closed, 1);
+  assert.equal(provider.activeRuns, 0); assert.equal(gateway.pendingRequests, 0);
+  assert.equal(records.length, 1); assert.equal(records[0].status, 'interrupted'); assert.equal(records[0].usage, null);
+});
+
+test('a client disconnect while Cursor preflight awaits first output closes the pending SDK run', { timeout: 3000 }, async t => {
+  const { provider, counts } = await sdkProvider(t, { events: [{ type: 'usage', usage: null }],
+    result: { status: 'finished' }, gateAfterFirst: true });
+  const { url, records, gateway, settle } = await fixture(t, { provider });
+  const request = http.request(`${url}/responses`, { method: 'POST', headers });
+  request.on('error', () => {});
+  request.end(JSON.stringify({ model: CURSOR_MODELS[0].id, input: 'fixture', stream: true }));
+  while (!counts.sends) await new Promise(resolveTick => setImmediate(resolveTick));
+  request.destroy(); await settle();
+  assert.equal(counts.sends, 1); assert.equal(counts.cancelled, 1); assert.equal(counts.closed, 1);
+  assert.equal(provider.activeRuns, 0); assert.equal(gateway.pendingRequests, 0);
+  assert.equal(records.length, 1); assert.equal(records[0].status, 'interrupted'); assert.equal(records[0].usage, null);
 });

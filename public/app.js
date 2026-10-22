@@ -38,7 +38,7 @@ const elements = Object.fromEntries([
   'model-settings-state', 'model-settings-list', 'model-settings-save-button', 'model-settings-reset-button', 'model-settings-refresh-button',
   'model-settings-message', 'model-settings-error',
   'cursor-state', 'cursor-login-button', 'cursor-logout-button', 'cursor-authorization-link', 'cursor-login-state',
-  'cursor-account', 'cursor-plan', 'cursor-gemini-state', 'cursor-grok-state',
+  'cursor-account', 'cursor-plan', 'cursor-prompt-mode', 'cursor-prompt-priority', 'cursor-prompt-note', 'cursor-gemini-state', 'cursor-grok-state',
   'cursor-requests', 'cursor-completed', 'cursor-failed', 'cursor-active', 'cursor-error'
 ].map((id) => [id, byId(id)]));
 
@@ -339,6 +339,16 @@ function renderCursor(data) {
   text('cursor-account', data.profile?.email || data.profile?.userEmail || data.profile?.name || (authenticated ? '已授权（未返回账号资料）' : '待授权'));
   const plan = data.plan?.name || data.plan?.declared;
   text('cursor-plan', plan ? `${plan}${data.plan?.verified === true ? '（已核实）' : '（待核实）'}` : '未返回');
+  const promptModes = {
+    'project-rules': { name: '项目规则兼容模式', note: '保留 Cursor 内置系统提示；Codex 指令写入本次隔离目录的 AGENTS.md，按项目规则读取，不能保证原 system/developer 优先级。' },
+    system: { name: '系统指令模式', note: 'Codex 指令通过 Cursor SDK systemPrompt 传入；需要 Cursor 开放这项权限。' },
+  };
+  const promptMode = Object.hasOwn(promptModes, data.promptMode) ? promptModes[data.promptMode] : null;
+  text('cursor-prompt-mode', promptMode?.name || (data.configured === false && data.error ? '配置无效，渠道已停用' : '未返回（待重启服务）'));
+  text('cursor-prompt-priority', data.preservesSystemPromptPriority === true ? 'SDK 系统提示优先级'
+    : data.preservesSystemPromptPriority === false ? '项目规则优先级' : '未返回（待重启服务）');
+  text('cursor-prompt-note', promptMode && typeof data.preservesSystemPromptPriority === 'boolean' ? promptMode.note
+    : '当前服务未返回完整接入模式；重启网关后查看实际模式与指令优先级。');
   const models = Array.isArray(catalog.models) ? catalog.models : Array.isArray(catalog.targetModels) ? catalog.targetModels : [];
   for (const [element, modelId] of [['cursor-gemini-state', 'gemini-4-argon'], ['cursor-grok-state', 'grok-4.7']]) {
     text(element, !authenticated ? '登录后确认' : models.some(model => model?.id === modelId) ? '账号目录已确认' : '账号目录未返回');
@@ -373,6 +383,9 @@ async function refreshCursor() {
     catch (error) {
       cursorStatus = null; pill('cursor-state', error.status === 404 ? '待更新服务' : '读取失败', error.status === 404 ? 'pending' : 'error');
       text('cursor-login-state', error.status === 404 ? '重启服务后可用。' : 'Cursor 状态暂时无法读取。');
+      text('cursor-prompt-mode', error.status === 404 ? '待重启服务' : '未返回');
+      text('cursor-prompt-priority', '未返回');
+      text('cursor-prompt-note', '当前服务未返回接入模式，请在服务更新后查看。');
       text('cursor-error', error.status === 404 ? '当前服务尚未提供 Cursor 授权接口。' : error.message || '请稍后重试。');
       elements['cursor-error'].hidden = false;
       elements['cursor-login-button'].disabled = true; elements['cursor-logout-button'].disabled = true;

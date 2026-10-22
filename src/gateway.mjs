@@ -352,6 +352,7 @@ export class Gateway {
             body: Buffer.from(JSON.stringify(data)), headers: new Headers({
               'content-type': 'application/json', ...(typeof req.headers.accept === 'string' ? { accept: req.headers.accept } : {}),
             }), signal: abort.signal });
+          if (cursor && typeof response?.bridgePreflight === 'function') response = await response.bridgePreflight();
           if (typeof response?.bridgeModel === 'string') route.upstreamModel = response.bridgeModel;
         } else {
           let body = originalBody;

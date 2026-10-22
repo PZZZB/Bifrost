@@ -98,12 +98,20 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
   loginTimeoutMs = 20 * 60 * 1000 } = {}) {
   const configPath = join(stateDir, 'cursor.json');
   const store = credentialStore || new CodeBuddyCredentialStore({ path: join(stateDir, 'cursor-auth.dpapi.json') });
-  let config, setupError = null, record = null;
+  let config, setupError = null, configurationError = null, record = null;
   try {
     const value = await readJson(configPath, {});
+    const promptMode = value?.promptMode === undefined ? 'project-rules'
+      : ['project-rules', 'system'].includes(value.promptMode) ? value.promptMode : null;
+    if (promptMode === null) configurationError = 'Cursor promptMode 配置无效；仅支持 project-rules 或 system，渠道已停用。';
     config = { version: 1, enabled: value?.enabled === true, declaredPlan: 'Teams',
+      promptMode,
       ...(Number.isSafeInteger(value?.teamId) && value.teamId > 0 ? { teamId: value.teamId } : {}) };
-  } catch { config = { version: 1, enabled: false, declaredPlan: 'Teams' }; setupError = 'Cursor 配置文件无法读取。'; }
+    if (configurationError) config.enabled = false;
+  } catch {
+    config = { version: 1, enabled: false, declaredPlan: 'Teams', promptMode: null };
+    configurationError = 'Cursor 配置文件无法读取，渠道已停用。';
+  }
   try {
     const value = await store.load();
     if (value != null) {
@@ -122,7 +130,8 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
     return next;
   };
   const assertOpen = () => { if (closed) throw new BridgeError('Cursor 服务已停止。', 503, 'cursor_closed'); };
-  const usable = () => !closed && !rejectedCredential && record && record.apiKeyExpiresAtMs > now();
+  const assertConfigured = () => { if (configurationError) throw new BridgeError(configurationError, 503, 'cursor_config_invalid'); };
+  const usable = () => !closed && !configurationError && !rejectedCredential && record && record.apiKeyExpiresAtMs > now();
   const invalidate = () => { metadataVersion++; cache = null; metadataPending = null; };
   const sdk = async () => {
     if (!sdkPromise) sdkPromise = Promise.resolve().then(sdkLoader).then(value => {
@@ -196,12 +205,13 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
 
   return {
     get enabled() { return config.enabled === true; },
+    get promptMode() { return config.promptMode; },
     async credential() {
       return usable() ? { apiKey: record.apiKey, apiKeyExpiresAtMs: record.apiKeyExpiresAtMs,
         ...(config.teamId ? { teamId: config.teamId } : {}) } : null;
     },
     async beginLogin() {
-      assertOpen();
+      assertOpen(); assertConfigured();
       generation++; cancelLogin();
       const currentGeneration = generation, abort = new AbortController();
       let resolveUrl, rejectUrl;
@@ -264,6 +274,7 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
       return urlPromise;
     },
     async getModels() {
+      assertConfigured();
       const result = await metadata();
       if (result?.error && result.models.length === 0) throw new BridgeError(result.error, rejectedCredential ? 401 : 502, 'cursor_metadata_unavailable');
       return structuredClone(result?.models || []);
@@ -272,13 +283,15 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
       let result = null;
       if (!closed) result = await metadata();
       const authReady = Boolean(usable());
-      return { configured: true, enabled: config.enabled === true, authReady,
+      return { configured: configurationError === null, enabled: config.enabled === true, authReady,
+        promptMode: config.promptMode,
+        preservesSystemPromptPriority: config.promptMode === null ? null : config.promptMode === 'system',
         profile: authReady ? structuredClone(result?.profile || safeProfile(null, record)) : null,
         plan: { declared: config.declaredPlan, verified: false },
         login: { ...publicLogin },
         catalog: { source: result?.source || null, checkedAt: result?.checkedAt ?? null,
           models: structuredClone(authReady ? result?.models || [] : []), liveVerified: authReady && result?.source === 'remote' },
-        gateway: gatewayStatus(), error: setupError || result?.error ||
+        gateway: gatewayStatus(), error: configurationError || setupError || result?.error ||
           (rejectedCredential ? 'Cursor 授权已失效，请重新登录。' :
             record && record.apiKeyExpiresAtMs <= now() ? 'Cursor 授权已过期，请重新登录。' : null), manualVerification: true };
     },

@@ -112,15 +112,19 @@ Token 统计合并 CodeBuddy 的 Codex 与 Claude 渠道，按真实上游 `usag
 
 授权后，网关只从实际返回的官方目录选择 `gemini-4-argon` 与 `grok-4.7`，在 Codex 原列表后追加 `Cursor Gemini 4` 和 `Cursor Grok 4.7`。内部 ID 分别为 `Cursor-gemini-4-argon`、`Cursor-grok-4.7`。未出现在当前目录中的模型不会发布；认证、目录或推理失败均不回退到其他账号。
 
-Cursor SDK 提供完整的 Agent 接口。适配器把 Codex 的指令、历史和工具定义交给隔离的 SDK 会话，通过自定义工具回调将工具调用返回当前 Codex；文件操作、终端和用户问答仍由当前 Codex 处理。SDK 会话使用独立目录和存储，关闭默认设置来源，只注册本次客户端提供的工具。等待工具结果时保留同一个 SDK Run，接收到结果后释放原来的回调；不会为每次工具结果重复发送用户消息。
+Cursor SDK 提供完整的 Agent 接口。适配器把 Codex 的指令、历史和工具定义交给隔离的 SDK 会话，通过自定义工具回调将工具调用返回当前 Codex；文件操作、终端和用户问答仍由当前 Codex 处理。SDK 会话使用独立目录和存储，只注册本次客户端提供的工具。等待工具结果时保留同一个 SDK Run，接收到结果后释放原来的回调；不会为每次工具结果重复发送用户消息。
 
-支持文本、内嵌图片或公开 HTTPS 图片引用，以及客户端函数、自定义工具与工具发现。未映射的媒体、服务端工具和参数返回明确错误；Cursor 自身要求的交互审批不能当成 Codex 的问答工具。模型支持的思考参数以官方目录为准；目录没有提供对应控制时，沿用 Cursor 默认思考，不将 Codex 的全局 high/max 提示宣称为已生效。SDK 不提供的输出长度或并行工具保证不会伪造。系统指令能力可能受 Cursor 账号权限限制：若上游拒绝 `systemPrompt`，会明确报错，不能用创建会话成功代替真实回合验收。
+默认采用项目规则兼容模式（`promptMode: "project-rules"`）：保留 Cursor 内置系统提示，将 Codex 原来的 system/developer 指令文本写入本次隔离工作目录的 `AGENTS.md`，仅启用 `settingSources: ['project']`。这是 Cursor 官方 [项目规则与 AGENTS.md](https://cursor.com/docs/rules) 和 [SDK 设置来源](https://cursor.com/docs/sdk/typescript) 提供的入口。指令正文会交给 Agent，但作为项目规则读取，不能保证具有 Codex 原来的 system/developer 优先级，也不能承诺行为与原模型相同。客户端工具执行与同 Run 续接机制仍然适用。
+
+需要直接传入系统提示时，可在私有数据目录的 `cursor.json` 显式设置 `"promptMode": "system"` 并重启网关。该模式使用 SDK `systemPrompt`，关闭设置来源，要求 Cursor 向当前账号开放这项能力；上游拒绝时明确报错，不自动改成项目规则或普通用户消息。Cursor 官方人员在 [2026-10-19 的说明](https://forum.cursor.com/t/how-do-i-get-access-to-systemprompt-in-cursor-sdk-unknown-option-system-prompt/175262/7)中指出，该能力目前尚未对外部账号开放，建议使用项目规则或 `AGENTS.md`。配置只接受 `project-rules` 和 `system`；缺少字段时默认兼容模式，非法值会停用 Cursor 渠道并返回配置错误。网页根据运行中的服务显示模式和指令优先级，旧服务未返回字段时显示待重启。
+
+支持文本、内嵌图片或公开 HTTPS 图片引用，以及客户端函数、自定义工具与工具发现。未映射的媒体、服务端工具和参数返回明确错误；Cursor 自身要求的交互审批不能当成 Codex 的问答工具。模型支持的思考参数以官方目录为准；目录没有提供对应控制时，沿用 Cursor 默认思考，不将 Codex 的全局 high/max 提示宣称为已生效。SDK 不提供的输出长度或并行工具保证不会伪造。创建会话成功不能代替真实回合验收。
 
 Cursor SDK 会话存储包含运行所需的历史和检查点，位于私有数据目录的 `cursor-sdk/`；它与只保存元数据的用量账本不同。跨渠道的加密状态不能混用，建议为 Cursor 模型新建 Codex 聊天。上游缓存由 Cursor 管理，不能承诺与原模型的缓存命中或行为相同。跨多次 HTTP 的工具回合可能只在整个 SDK Run 结束时报告用量，无法归属到单条 HTTP 的分项保持未知，不把合计放到最后一个请求。费用以 Cursor 的账单为准。
 
-已完成并写入有效 SDK 检查点的会话可在服务重启后恢复；恢复索引绑定账号、模型、系统指令与已展示历史，并在下次续聊前消费一次。检查点默认保留 7 天，历史索引最多保留 128 份。正在等待工具回调的 Run 只能在当前进程续接，强制重启或退出授权会使它失效；这也是网页重启会检查活跃 Run 的原因。注销会清除本网关的 Cursor 恢复索引。
+已完成并写入有效 SDK 检查点的会话可在服务重启后恢复；恢复索引绑定账号、模型、接入模式、指令正文与已展示历史，并在下次续聊前消费一次。切换接入模式后应新建聊天，不能把旧模式的检查点当成新模式续接。检查点默认保留 7 天，历史索引最多保留 128 份。正在等待工具回调的 Run 只能在当前进程续接，强制重启或退出授权会使它失效；这也是网页重启会检查活跃 Run 的原因。注销会清除本网关的 Cursor 恢复索引。
 
-`node scripts/verify-cursor-codex-offline.mjs` 使用实际 Codex CLI、本地模拟 SDK 和临时配置做工具回合验证，不加载现有授权或调用 Cursor 模型。增加 `--internal-metadata` 可在模拟 provider 边界注入内部元数据，检查字段兼容、跨 HTTP 续接和第三方数据隔离；报告会区分合成注入与原始客户端请求。
+`node scripts/verify-cursor-codex-offline.mjs --prompt-mode project-rules` 使用实际 Codex CLI、本地模拟 SDK 和临时配置验证兼容模式的工具回合；`--prompt-mode system` 验证直接系统提示模式。两种离线验证都不加载现有授权或调用 Cursor 模型。增加 `--internal-metadata` 可在模拟 provider 边界注入内部元数据，检查字段兼容、跨 HTTP 续接和第三方数据隔离；报告会区分合成注入与原始客户端请求。
 
 Cursor 的 API Key 按官方 [CLI 认证说明](https://cursor.com/docs/cli/reference/authentication) 归属授权用户；SDK 的套餐池与费用规则见官方 [SDK 文档](https://cursor.com/docs/sdk/typescript) 和 [套餐说明](https://cursor.com/docs/account/pricing/legacy-cursor-plans)。不同 Teams 计费版本有区别，不能据 Teams 标签承诺所有模型请求均包含在固定订阅内。当前接入不查询 Cursor 剩余额度，实时权限、模型质量及实际扣费由用户完成授权后验证。
 
