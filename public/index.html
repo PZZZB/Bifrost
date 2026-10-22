@@ -19,28 +19,52 @@
         <div class="connection"><span class="status-dot" id="connection-dot"></span><span id="connection-label">正在连接本机服务</span><span class="version" id="version"></span></div>
       </header>
 
-      <section class="intro">
-        <div class="eyebrow">CODEX / CLAUDE GATEWAY</div>
-        <h1>Codex 与 Claude，<br><span>按模型选择渠道。</span></h1>
-        <p class="intro-copy">Codex 原有模型使用账号 A，B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用账号 B，CodeBuddy Opus 5.5 使用 CodeBuddy 授权。Claude 可接入独立 CLI 订阅与 CodeBuddy。客户端继续执行工具并处理权限。</p>
-        <div class="identity-flow" aria-label="Codex 账号分工">
-          <div><span class="identity-letter">A</span><span><strong>原有模型</strong><small>账号 A 提供推理</small></span></div>
-          <span class="flow-line" aria-hidden="true"></span>
-          <div><span class="identity-letter identity-letter-b">B</span><span><strong>两个 B 模型</strong><small>账号 B 提供推理</small></span></div>
-        </div>
+      <section class="console-intro">
+        <div class="eyebrow">MODEL GATEWAY</div>
+        <h1>模型与账号管理</h1>
+        <p>选择模型、管理渠道授权，查看网关与额度状态。</p>
       </section>
 
       <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
 
-      <div class="dashboard">
+      <div class="management-grid">
+        <section class="panel service-panel" aria-labelledby="service-title">
+          <div class="panel-heading"><div><div class="eyebrow">SERVICE</div><h2 id="service-title">网关服务</h2></div><span class="pill pending" id="service-state">读取中</span></div>
+          <p class="panel-copy">重启服务以加载配置变更。重启前会检查正在运行的请求。</p>
+          <dl class="service-details">
+            <div><dt>服务状态</dt><dd id="service-ready">读取中</dd></div>
+            <div><dt>运行方式</dt><dd id="service-independent">读取中</dd></div>
+            <div><dt>进行中的请求</dt><dd id="service-active">—</dd></div>
+          </dl>
+          <button class="button secondary" id="service-restart-button" type="button" disabled>重启网关服务</button>
+          <p class="inline-status management-message" id="service-message" role="status" aria-live="polite"></p>
+          <div class="restart-confirmation" id="service-confirmation" hidden>
+            <p id="service-confirmation-message"></p>
+            <div class="button-row"><button class="button danger" id="service-confirm-button" type="button">允许中断并重启</button><button class="button quiet" id="service-cancel-button" type="button">取消</button></div>
+          </div>
+          <div class="gateway-error" id="service-error" role="status" hidden></div>
+        </section>
+
+        <section class="panel model-settings-panel" aria-labelledby="model-settings-title">
+          <div class="panel-heading"><div><div class="eyebrow">CODEX MODELS</div><h2 id="model-settings-title">模型选择</h2></div><span class="pill pending" id="model-settings-state">读取中</span></div>
+          <p class="panel-copy">勾选要在 Codex 中显示的模型。保存后刷新模型目录，或重开 Codex。</p>
+          <div class="model-settings-list" id="model-settings-list" aria-label="可用模型"><p class="model-settings-empty">正在读取模型目录…</p></div>
+          <div class="button-row model-settings-actions"><button class="button primary" id="model-settings-save-button" type="button" disabled>保存模型选择</button><button class="button quiet" id="model-settings-reset-button" type="button" disabled>恢复勾选</button><button class="button quiet" id="model-settings-refresh-button" type="button" disabled>刷新列表</button></div>
+          <p class="inline-status management-message" id="model-settings-message" role="status" aria-live="polite"></p>
+          <div class="gateway-error" id="model-settings-error" role="status" hidden></div>
+        </section>
+      </div>
+
+      <details class="account-management">
+        <summary>账号 B 与 Codex 接入<span>登录、绑定、验证与配置管理</span></summary>
+        <div class="dashboard">
         <section class="panel setup-panel" aria-labelledby="setup-title">
-          <div class="panel-heading"><div><div class="eyebrow">SETUP</div><h2 id="setup-title">接入订阅账号</h2></div><span class="pill" id="setup-state">准备中</span></div>
-          <ol class="steps">
-            <li class="step" id="step-login">
-              <div class="step-number">1</div>
+          <div class="panel-heading"><div><div class="eyebrow">ACCOUNT B</div><h2 id="setup-title">订阅账号 B</h2></div><span class="pill" id="setup-state">准备中</span></div>
+          <div class="account-actions">
+            <section class="step" id="step-login">
               <div class="step-body">
-                <h3>独立登录账号 B</h3>
-                <p>在官方授权页面登录提供订阅的账号。授权完成后，此处会更新账号信息。</p>
+                <h3>账号登录</h3>
+                <p>使用提供额度的账号 B 完成官方授权。</p>
                 <div class="button-row"><button class="button primary" id="login-button" type="button">浏览器登录</button><button class="button secondary" id="device-login-button" type="button">手机授权</button><a id="authorization-link" class="text-link" target="_blank" rel="noopener noreferrer" hidden>打开授权页面</a></div>
                 <p class="inline-status" id="login-state"></p>
                 <div class="device-authorization" id="device-authorization" hidden>
@@ -55,37 +79,38 @@
                   <button class="button quiet small" id="logout-button" type="button">退出 B</button>
                 </div>
               </div>
-            </li>
-            <li class="step" id="step-bind">
-              <div class="step-number">2</div>
+            </section>
+            <section class="step" id="step-bind">
               <div class="step-body">
-                <h3>核对并确认推理身份</h3>
+                <h3>推理身份</h3>
                 <p id="bind-description">核对上方邮箱，确认它就是你要使用订阅额度的账号 B。</p>
                 <button class="button secondary" id="bind-button" type="button" disabled>确认此账号为 B</button>
                 <p class="inline-status" id="bound-account"></p>
               </div>
-            </li>
-            <li class="step" id="step-verify">
-              <div class="step-number">3</div>
+            </section>
+            <section class="step" id="step-verify">
               <div class="step-body">
-                <h3>验证一次真实推理</h3>
-                <p>选择一个 B 模型，发送简短请求，确认账号 B 能完成推理。仅获取模型列表不算验证通过。</p>
+                <h3>连通性验证</h3>
+                <p>手动发送一次简短请求，验证所选 B 模型。</p>
                 <div class="verification-controls"><label class="sr-only" for="model-select">验证使用的 B 模型</label><select id="model-select" disabled><option value="">使用默认 B 模型</option></select><button class="button secondary" id="verify-button" type="button" disabled>验证推理</button></div>
                 <div class="verification-result" id="verification-result" hidden><span class="result-label" id="verification-label"></span><p id="verification-text"></p><small id="verification-meta"></small></div>
               </div>
-            </li>
-          </ol>
+            </section>
+          </div>
         </section>
 
         <aside class="side-column">
           <section class="panel" aria-labelledby="integration-title">
             <div class="panel-heading"><div><div class="eyebrow">INTEGRATION</div><h2 id="integration-title">接入当前 Codex</h2></div><span class="pill" id="integration-state">未接入</span></div>
-            <p class="panel-copy" id="integration-description">完成推理验证后，在 Codex 模型选择器中添加两个 B 模型，并按模型分配账号。</p>
+            <p class="panel-copy" id="integration-description">管理当前 Codex 的网关接入。</p>
             <div class="config-path"><span>配置文件</span><code id="config-path">读取中</code></div>
-            <p class="integration-note">原有模型使用账号 A；选择 B-GPT-6 Astra 或 B-GPT-6.1 Sol 时使用账号 B。保存当前工作，重启 Codex 后可在模型选择器中切换。</p>
+            <p class="integration-note">配置变更后，刷新 Codex 模型目录或重开 Codex。</p>
             <div class="stacked-buttons"><button class="button primary" id="install-button" type="button" disabled>接入本机 Codex</button><button class="button secondary" id="copy-button" type="button" disabled>复制接入配置</button><button class="button quiet" id="restore-button" type="button" hidden>恢复接入前配置</button></div>
             <p class="footnote">网关密钥仅在复制配置时读取，不在页面展示。</p>
           </section>
+        </aside>
+        </div>
+      </details>
 
           <section class="panel gateway-panel" aria-labelledby="gateway-title">
             <div class="panel-heading"><div><div class="eyebrow">GATEWAY</div><h2 id="gateway-title">运行状态</h2></div><span class="pill" id="gateway-state">等待连接</span></div>
@@ -106,8 +131,6 @@
             <div class="gateway-error" id="gateway-error" hidden></div>
             <p class="footnote">页面每 3 秒更新。原有模型使用 A；仅 B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用已确认的账号 B。</p>
           </section>
-        </aside>
-      </div>
       <section class="panel with-panel" aria-labelledby="with-title">
         <div class="panel-heading"><div><div class="eyebrow">WITH / VM</div><h2 id="with-title">With · Opus 5.5</h2></div><span class="pill" id="with-state">读取中</span></div>
         <p class="panel-copy">仅接入 Opus 5.5。真实聊天和工具回合由用户验收。</p>
@@ -151,14 +174,28 @@
         <p class="footnote">credits、promotion 是目录源元数据，不能据此推导员工 Token 倍率。</p>
         <details class="token-recent">
           <summary>图片、附件与思考的支持范围</summary>
-          <p class="footnote">图片支持 JPEG、PNG、GIF、WebP 的 base64 或公开 HTTPS 引用。嵌入图片解码后每张最多 5 MiB；每请求最多 100 张，包含历史、附件及工具结果。网关不下载远程图片，其实际大小由上游检查。</p>
-          <p class="footnote">附件支持纯文本 document 和预解析的 text/image 内容；tool_result 同样保留图文顺序。原始 PDF、Office、视频、音频及 file_id 返回 400，须先解析为文本或图片。</p>
-          <p class="footnote">思考使用 <code>adaptive</code>；<code>display=summarized</code> 显示摘要，默认 <code>omitted</code> 隐藏摘要。<code>effort</code> 支持 low、medium、high、xhigh，默认 high；enabled + budget、disabled 和 effort=max 返回 400。</p>
-          <p class="footnote">可见摘要来自 Chat 的 <code>reasoning_content</code>，使用空 signature 回放。默认 / omitted 返回空 thinking 块，其 signature 或 signature_delta 携带 <code>bridge-codebuddy-v1:</code> 前缀的 AES-GCM 加密接续标记，须由客户端原样回传。</p>
-          <p class="footnote">接续标记绑定登录账号和真实模型，属于本网关状态，不是厂商签名。同一 Windows 用户保留独立 DPAPI 密钥后可跨重启续接；原生非空签名及 redacted thinking 返回 400。真实客户端能否保留并回传标记仍待本人验收。</p>
+          <p class="footnote">图片支持 JPEG、PNG、GIF、WebP。嵌入图片每张最多 5 MiB，每次请求最多 100 张，包含历史及工具返回的图片。</p>
+          <p class="footnote">原始 PDF、Office、视频和音频须先解析为文本或图片。未支持的附件会明确报错。</p>
+          <p class="footnote">思考强度支持 low、medium、high、xhigh，默认 high。不支持关闭内部思考或指定精确预算。</p>
         </details>
         <div class="metrics with-metrics"><div><strong id="codebuddy-requests">—</strong><span>收到请求</span></div><div><strong id="codebuddy-completed">—</strong><span>完成</span></div><div><strong id="codebuddy-failed">—</strong><span>失败</span></div><div><strong id="codebuddy-active">—</strong><span>进行中</span></div></div>
         <div class="gateway-error" id="codebuddy-error" role="status" hidden></div>
+      </section>
+      <section class="panel cursor-panel" aria-labelledby="cursor-title">
+        <div class="panel-heading"><div><div class="eyebrow">CURSOR TEAMS</div><h2 id="cursor-title">Cursor Teams</h2></div><span class="pill pending" id="cursor-state">待配置</span></div>
+        <p class="panel-copy">Gemini 4 与 Grok 4.7。完成账号授权后，可在模型列表中选择。</p>
+        <div class="button-row"><button class="button primary" id="cursor-login-button" type="button" disabled>官方网页登录</button><a class="text-link" id="cursor-authorization-link" target="_blank" rel="noopener noreferrer" hidden>打开官方授权页面</a><button class="button quiet" id="cursor-logout-button" type="button" disabled>退出本网关会话</button></div>
+        <p class="footnote" id="cursor-login-state">授权入口准备中。</p>
+        <div class="with-details">
+          <div class="endpoint"><span>登录账号</span><code id="cursor-account">读取中</code></div>
+          <div class="endpoint"><span>套餐归属</span><code id="cursor-plan">待核实</code></div>
+          <div class="endpoint"><span>Gemini 4</span><code id="cursor-gemini-state">登录后确认</code></div>
+          <div class="endpoint"><span>Grok 4.7</span><code id="cursor-grok-state">登录后确认</code></div>
+        </div>
+        <div class="metrics with-metrics"><div><strong id="cursor-requests">—</strong><span>收到请求</span></div><div><strong id="cursor-completed">—</strong><span>完成</span></div><div><strong id="cursor-failed">—</strong><span>失败</span></div><div><strong id="cursor-active">—</strong><span>进行中</span></div></div>
+        <p class="footnote">请本人在 Cursor 官方页面授权。模型目录不代表已完成真实聊天或扣费验证。</p>
+          <p class="footnote">上游未提供思考强度控制时，使用 Cursor 默认思考。跨工具回合的单条请求 Token 用量可能未知，以 Cursor 账单为准。</p>
+        <div class="gateway-error" id="cursor-error" role="status" hidden></div>
       </section>
       <section class="panel quota-panel" aria-labelledby="quota-title">
         <div class="panel-heading"><div><div class="eyebrow">ACCOUNT QUOTAS</div><h2 id="quota-title">账号剩余额度</h2></div><button class="button secondary small" id="quota-refresh-button" type="button">刷新额度</button></div>

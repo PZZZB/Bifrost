@@ -79,6 +79,16 @@ test('arbitrary provider names and multiple models share account usage with exac
   assert.equal(gateway.status('Example').requests, 2);
 });
 
+test('shared Messages listener respects service draining without calling a provider or writing usage', async t => {
+  const provider = providerFixture();
+  const { gateway, send, records } = await gatewayFixture(t, [{ account: 'Example', model: firstModel, provider }], { isDraining: () => true });
+  const response = await send('/v1/messages', { model: firstModel.id, messages: [] });
+  assert.equal(response.status, 503); assert.equal(provider.calls.length, 0); assert.equal(records.length, 0);
+  assert.equal(gateway.pendingRequests, 0);
+  const unauthorized = await send('/v1/messages', {}, { headers: { ...requestHeaders, 'x-api-key': 'wrong-key' } });
+  assert.equal(unauthorized.status, 401);
+});
+
 test('provider receives original JSON bytes and only allowlisted business headers', async t => {
   const provider = providerFixture();
   const { send } = await gatewayFixture(t, [{ account: 'Native', model: firstModel, provider }]);

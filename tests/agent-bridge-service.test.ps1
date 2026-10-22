@@ -282,6 +282,35 @@ try {
         Expect-Failure { Assert-AgentBridgeNoExistingProcess $config $state }
         Assert-Test ((Get-FileHash -LiteralPath (Join-Path $state 'process.json')).Hash -ceq $before) 'Startup rewrote an alive orphan identity.'
     }
+    Test-Case 'valid web restart marker is bound to the held child and consumed once' {
+        $restartConfig = [pscustomobject]@{ OwnerId = ('A' * 64) }
+        $restartNode = [pscustomobject]@{ Id = 777; StartTime = [datetime]::UtcNow.AddMinutes(-1) }
+        $requestPath = Join-Path $state 'restart-request.json'
+        Write-AgentBridgeJson $requestPath ([ordered]@{ Product = 'Bifrost.Service.Restart'; Version = 1;
+            OwnerId = $restartConfig.OwnerId; NodePid = 777; Nonce = [guid]::NewGuid().ToString();
+            RequestedAt = [datetime]::UtcNow.ToString('o'); ExpiresAt = [datetime]::UtcNow.AddMinutes(1).ToString('o') })
+        Assert-Test (Get-AgentBridgeRestartRequest $restartConfig $state $restartNode) 'A valid requested child restart was rejected.'
+        Assert-Test (-not (Test-Path -LiteralPath $requestPath)) 'The consumed request was retained.'
+        Assert-Test (-not (Get-AgentBridgeRestartRequest $restartConfig $state $restartNode)) 'A request was replayed.'
+    }
+    Test-Case 'stale foreign and reused child restart markers cannot restart another process' {
+        $restartConfig = [pscustomobject]@{ OwnerId = ('A' * 64) }
+        $restartNode = [pscustomobject]@{ Id = 777; StartTime = [datetime]::UtcNow.AddMinutes(-1) }
+        foreach ($mode in @('foreign', 'pid', 'expired', 'old-start', 'future-expiry')) {
+            $record = [ordered]@{ Product = 'Bifrost.Service.Restart'; Version = 1; OwnerId = $restartConfig.OwnerId;
+                NodePid = 777; Nonce = [guid]::NewGuid().ToString(); RequestedAt = [datetime]::UtcNow.ToString('o');
+                ExpiresAt = [datetime]::UtcNow.AddMinutes(1).ToString('o') }
+            if ($mode -eq 'foreign') { $record.OwnerId = 'B' * 64 }
+            if ($mode -eq 'pid') { $record.NodePid = 778 }
+            if ($mode -eq 'expired') { $record.ExpiresAt = [datetime]::UtcNow.AddSeconds(-1).ToString('o') }
+            if ($mode -eq 'old-start') { $record.RequestedAt = [datetime]::UtcNow.AddMinutes(-2).ToString('o') }
+            if ($mode -eq 'future-expiry') { $record.ExpiresAt = [datetime]::UtcNow.AddHours(1).ToString('o') }
+            $requestPath = Join-Path $state 'restart-request.json'
+            Write-AgentBridgeJson $requestPath $record
+            Assert-Test (-not (Get-AgentBridgeRestartRequest $restartConfig $state $restartNode)) ('Rejected marker accepted: ' + $mode)
+            Assert-Test (-not (Test-Path -LiteralPath $requestPath)) 'A rejected marker was retained.'
+        }
+    }
     Write-Output ('Passed ' + $script:passed + ' AgentBridge service offline checks. No tasks registered or processes launched.')
 } finally {
     if ([IO.Path]::GetFullPath($fixtureRoot).StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase)) {

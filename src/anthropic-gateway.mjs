@@ -101,7 +101,7 @@ function emptyMetrics() {
 
 export class AnthropicGateway {
   constructor({ routes = [], gatewayKey, allowedHosts = [], allowedPeers = [],
-    onUsage = async () => {}, maxBodyBytes = 64 * 1024 * 1024 } = {}) {
+    onUsage = async () => {}, maxBodyBytes = 64 * 1024 * 1024, isDraining = () => false } = {}) {
     if (typeof gatewayKey !== 'string' || !gatewayKey) throw new TypeError('A dedicated gatewayKey is required.');
     if (!Array.isArray(routes)) throw new TypeError('Anthropic model routes must be an array.');
     if (!Array.isArray(allowedHosts) || !allowedHosts.every(host => typeof host === 'string' && host)) {
@@ -115,7 +115,9 @@ export class AnthropicGateway {
     this.allowedPeers = new Set([...allowedPeers].map(peerAddress));
     this.onUsage = onUsage;
     this.maxBodyBytes = maxBodyBytes;
+    this.isDraining = isDraining;
     this.metrics = emptyMetrics();
+    this.pendingRequests = 0;
     this.routes = new Map();
     this.accountMetrics = new Map();
     for (const route of routes) {
@@ -184,8 +186,15 @@ export class AnthropicGateway {
   }
 
   async handle(req, res) {
+    this.pendingRequests++;
+    try { return await this.dispatch(req, res); }
+    finally { this.pendingRequests--; }
+  }
+
+  async dispatch(req, res) {
     try {
       this.authorize(req);
+      if (this.isDraining()) throw this.gatewayError('gateway_restarting', 503, '网关正在重启，请稍后重试。');
       if (typeof req.url !== 'string' || !req.url.startsWith('/') || req.url.startsWith('//')) {
         throw this.gatewayError('invalid_target');
       }

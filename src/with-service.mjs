@@ -20,7 +20,8 @@ function listen(server, port, address) {
 
 /** Optional VM listener with independent With and CodeBuddy channel switches. */
 export async function startWithService({ stateDir, onUsage, codeBuddyProvider = null, codeBuddyModel = null,
-  codeBuddyEnabled = false, listenImpl = listen, daemon: injectedDaemon = null, provider: injectedProvider = null }) {
+  codeBuddyEnabled = false, listenImpl = listen, daemon: injectedDaemon = null, provider: injectedProvider = null,
+  isDraining = () => false }) {
   let config = null, configError = false;
   try { config = await readJson(join(stateDir, 'with.json'), null); }
   catch { configError = true; }
@@ -52,7 +53,7 @@ export async function startWithService({ stateDir, onUsage, codeBuddyProvider = 
         mcp = provider.mcpServer();
         await listenImpl(mcp, 43158, '127.0.0.1');
       }
-      server = createWithGatewayServer({ provider, withEnabled, gatewayKey: config.gatewayKey, onUsage,
+      server = createWithGatewayServer({ provider, withEnabled, gatewayKey: config.gatewayKey, onUsage, isDraining,
         allowedHosts: WITH_GATEWAY_ALLOWED_HOSTS, allowedPeers: [GUEST],
         additionalRoutes: codeBuddyEnabled === true
           ? [{ account: 'CodeBuddy', model: codeBuddyModel, provider: codeBuddyProvider }] : [] });
@@ -67,6 +68,7 @@ export async function startWithService({ stateDir, onUsage, codeBuddyProvider = 
     }
   }
   return {
+    get activeRequests() { return server?.gateway.pendingRequests ?? 0; },
     channelStatus(account) {
       const enabled = account === 'CodeBuddy' ? codeBuddyEnabled === true : account === 'With' && withEnabled;
       return { running: gatewayRunning && enabled, baseUrl: `http://${HOST}:${PORT}`, ...(server?.gateway.status(account) ?? {}),

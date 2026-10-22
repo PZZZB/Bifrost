@@ -17,7 +17,7 @@ function json(res, status, data) {
 
 export function createBridgeServer({ backend, gateway, integration, state, publicDir, baseUrl,
   usageLedger = null, accountQuotas = null,
-  codeBuddyService = null,
+  codeBuddyService = null, serviceControl = null, modelPolicy = null, cursorService = null, cursorProvider = null,
   getWithStatus = async () => ({ configured: false, running: false,
     model: { id: 'claude-opus-5-5', name: 'With · Opus 5.5' },
     gateway: { baseUrl: 'http://192.168.168.1:43157' },
@@ -125,6 +125,18 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       if (!url.pathname.startsWith('/api/')) throw new BridgeError('页面不存在。', 404);
       checkBrowser(req);
       if (req.method === 'GET') {
+        if (url.pathname === '/api/service/status') {
+          if (!serviceControl) throw new BridgeError('当前运行版本尚未启用网页服务控制。', 503);
+          json(res, 200, await serviceControl.status()); return;
+        }
+        if (url.pathname === '/api/model-settings') {
+          if (!modelPolicy) throw new BridgeError('当前运行版本尚未启用模型管理。', 503);
+          json(res, 200, modelPolicy.snapshot()); return;
+        }
+        if (url.pathname === '/api/cursor') {
+          if (!cursorService) throw new BridgeError('Cursor 渠道尚未配置。', 503);
+          json(res, 200, await cursorService.status()); return;
+        }
         if (url.pathname === '/api/status') {
           let backendError = null;
           try { await backend.readAccount(); } catch (error) { backendError = redact(error.message); }
@@ -179,6 +191,26 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       adminBusy = true;
       try {
         const body = await bodyJson(req);
+        if (url.pathname === '/api/service/restart') {
+          if (!serviceControl) throw new BridgeError('当前运行版本尚未启用网页服务控制。', 503);
+          const result = await serviceControl.request(body);
+          if (res.destroyed) { serviceControl.cancel(); return; }
+          res.once('close', () => { if (!res.writableFinished) serviceControl.cancel(); });
+          res.once('finish', () => { void serviceControl.activate(); });
+          json(res, 202, result); return;
+        }
+        if (url.pathname === '/api/model-settings') {
+          if (!modelPolicy) throw new BridgeError('当前运行版本尚未启用模型管理。', 503);
+          json(res, 200, await modelPolicy.update(body)); return;
+        }
+        if (url.pathname === '/api/cursor/login' || url.pathname === '/api/cursor/logout') {
+          if (!cursorService) throw new BridgeError('Cursor 渠道尚未配置。', 503);
+          // Invalidate credentials before waiting for any SDK cancellation.
+          const clearing = cursorService.logout();
+          await Promise.all([clearing, cursorProvider?.cancelAll()]);
+          const result = url.pathname.endsWith('/login') ? await cursorService.beginLogin() : { ok: true };
+          json(res, 200, result ?? { ok: true }); return;
+        }
         if (url.pathname === '/api/codebuddy/login' || url.pathname === '/api/codebuddy/logout') {
           if (!codeBuddyService) throw new BridgeError('CodeBuddy 通道尚未配置。', 503);
           if (url.pathname === '/api/codebuddy/login') {
@@ -226,7 +258,8 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       } finally { adminBusy = false; }
     } catch (error) {
       if (res.headersSent) { if (!res.writableEnded) res.destroy(); return; }
-      json(res, error.status ?? 500, { error: { message: redact(error.message), code: error.code ?? 'bridge_error' } });
+      json(res, error.status ?? 500, { error: { message: redact(error.message), code: error.code ?? 'bridge_error',
+        ...(error.code === 'gateway_busy' && Number.isSafeInteger(error.activeRequests) ? { activeRequests: error.activeRequests } : {}) } });
     }
   });
   server.requestTimeout = 300_000;

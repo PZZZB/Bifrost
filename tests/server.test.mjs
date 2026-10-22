@@ -42,6 +42,65 @@ test('CSRF and cross-origin requests cannot change login or configuration', asyn
   assert.equal(crossOrigin.status, 403);
 });
 
+test('service restart requires the management session and CSRF, and acknowledgement precedes activation', async t => {
+  let requested = 0, activated = 0;
+  const { url, cookie, status } = await fixture(t, { serviceControl: {
+    status: async () => ({ supported: true, activeRequests: 0 }),
+    request: async body => { assert.deepEqual(body, { allowInterrupt: false }); requested++; return { accepted: true }; },
+    activate: async () => { activated++; }, cancel: () => {},
+  } });
+  assert.equal((await fetch(`${url}/api/service/status`)).status, 401);
+  assert.equal((await fetch(`${url}/api/service/restart`, { method: 'POST', headers: { cookie }, body: '{"allowInterrupt":false}' })).status, 403);
+  assert.equal(requested, 0); assert.equal(activated, 0);
+  const response = await fetch(`${url}/api/service/restart`, { method: 'POST',
+    headers: { cookie, 'X-Bridge-CSRF': status.csrfToken }, body: '{"allowInterrupt":false}' });
+  assert.equal(response.status, 202); assert.equal((await response.json()).accepted, true);
+  assert.equal(requested, 1); assert.equal(activated, 1);
+});
+
+test('model settings and Cursor account mutations share local authentication and do not run inference', async t => {
+  let saved = 0, logins = 0;
+  const settings = { revision: 1, models: [{ id: 'a-model', name: 'A model', channel: 'A', enabled: true }] };
+  const { url, cookie, status } = await fixture(t, {
+    modelPolicy: { snapshot: () => settings, update: async body => { assert.deepEqual(body, { revision: 1, disabledModels: ['a-model'] }); saved++; return { ...settings, revision: 2 }; } },
+    cursorService: { status: async () => ({ authReady: false }), logout: async () => ({ ok: true }),
+      beginLogin: async () => { logins++; return { url: 'https://cursor.com/login' }; } },
+  });
+  for (const path of ['/api/model-settings', '/api/cursor']) assert.equal((await fetch(`${url}${path}`)).status, 401);
+  for (const path of ['/api/model-settings', '/api/cursor/login']) {
+    assert.equal((await fetch(`${url}${path}`, { method: 'POST', headers: { cookie }, body: '{}' })).status, 403);
+  }
+  assert.equal(saved + logins, 0);
+  assert.deepEqual(await (await fetch(`${url}/api/model-settings`, { headers: { cookie } })).json(), settings);
+  const auth = { cookie, 'X-Bridge-CSRF': status.csrfToken };
+  const savedResponse = await fetch(`${url}/api/model-settings`, { method: 'POST', headers: auth,
+    body: JSON.stringify({ revision: 1, disabledModels: ['a-model'] }) });
+  assert.equal(savedResponse.status, 200); assert.equal((await savedResponse.json()).revision, 2);
+  const loginResponse = await fetch(`${url}/api/cursor/login`, { method: 'POST', headers: auth, body: '{}' });
+  assert.equal(loginResponse.status, 200); assert.equal((await loginResponse.json()).url, 'https://cursor.com/login');
+  assert.equal(saved, 1); assert.equal(logins, 1);
+});
+
+test('a client disappearing before the restart acknowledgement cancels the prepared request', async t => {
+  let started, finishRequest, cancelled;
+  const began = new Promise(resolve => { started = resolve; });
+  const gate = new Promise(resolve => { finishRequest = resolve; });
+  const cancelDone = new Promise(resolve => { cancelled = resolve; });
+  let activated = 0;
+  const { url, cookie, status } = await fixture(t, { serviceControl: {
+    request: async () => { started(); await gate; return { accepted: true }; },
+    activate: async () => { activated++; }, cancel: () => { cancelled(); },
+  } });
+  const controller = new AbortController();
+  const sending = fetch(`${url}/api/service/restart`, { method: 'POST', signal: controller.signal,
+    headers: { cookie, 'X-Bridge-CSRF': status.csrfToken }, body: '{"allowInterrupt":false}' });
+  await began; controller.abort(); await assert.rejects(sending);
+  // Wait until the socket's close event is observed, then finish preparation.
+  await new Promise(resolve => setTimeout(resolve, 10)); finishRequest();
+  await Promise.race([cancelDone, new Promise((_, reject) => setTimeout(() => reject(new Error('Restart cancellation timed out.')), 1000).unref())]);
+  assert.equal(activated, 0);
+});
+
 test('unexpected Host headers are rejected before account operations', async (t) => {
   const { url } = await fixture(t);
   // Node's fetch normalizes Host; use the raw HTTP client to exercise rebinding.

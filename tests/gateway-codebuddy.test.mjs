@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once, EventEmitter } from 'node:events';
 import { gzipSync } from 'node:zlib';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Gateway } from '../src/gateway.mjs';
+import { ModelPolicy } from '../src/model-policy.mjs';
 import { CODEBUDDY_MODEL } from '../src/codebuddy-provider.mjs';
 import { CODEBUDDY_RESPONSES_STATE_PREFIX } from '../src/codebuddy-responses.mjs';
 
@@ -18,7 +22,7 @@ const aCatalog = { etag: 'native-a-metadata', models: [{ slug: 'a-model', priori
 const bCatalog = { models: [{ slug: 'gpt-6-astra' }, { slug: 'gpt-6.1-sol' }] };
 const terminal = response => `data: ${JSON.stringify({ type: 'response.completed', response })}\n\n`;
 
-async function fixture(t, { provider, enabled, fetchImpl, onUsage, catalogWaitMs = 50 } = {}) {
+async function fixture(t, { provider, enabled, fetchImpl, onUsage, catalogWaitMs = 50, modelPolicy = null } = {}) {
   const calls = { a: 0, b: 0, upstream: [], adapter: [] }, records = [];
   provider ??= {
     status: async () => ready,
@@ -27,7 +31,7 @@ async function fixture(t, { provider, enabled, fetchImpl, onUsage, catalogWaitMs
       return Response.json({ id: 'cb-response', status: 'completed', usage: { input_tokens: 6, output_tokens: 2 } });
     },
   };
-  const gateway = new Gateway({ gatewayKey: key, catalogWaitMs,
+  const gateway = new Gateway({ gatewayKey: key, catalogWaitMs, modelPolicy,
     backend: { credentials: async () => { calls.b++; return { value: 'private-b', accountId: 'workspace-b' }; } },
     getAProvider: async () => { calls.a++; return { config: { base_url: 'https://a.invalid/codex' } }; },
     codeBuddyProvider: provider, ...(enabled === undefined ? {} : { codeBuddyEnabled: enabled }),
@@ -240,4 +244,32 @@ test('active requests include the final token-ledger write so an idle check cann
   assert.equal(gateway.metrics.active, 1); assert.equal(gateway.codeBuddyStatus().active, 1);
   release(); await settle();
   assert.equal(gateway.metrics.active, 0); assert.equal(gateway.codeBuddyStatus().active, 0);
+});
+
+test('saved model switches filter the full native catalog and block disabled A/B/CodeBuddy routes before credentials', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'bifrost-model-routes-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const policy = await ModelPolicy.open({ path: join(stateDir, 'models.json') });
+  const { url, calls } = await fixture(t, { modelPolicy: policy });
+  const original = await (await fetch(`${url}/models`, { headers })).json();
+  assert.equal(original.models.length, 4);
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: ['a-model', 'B-gpt-6-astra', model] });
+  const filtered = await (await fetch(`${url}/models`, { headers })).json();
+  assert.deepEqual(filtered.models.map(row => row.slug), ['B-gpt-6.1-sol']);
+  calls.a = 0; calls.b = 0; calls.upstream.length = 0;
+  for (const requested of ['a-model', 'B-gpt-6-astra', model]) {
+    const response = await fetch(`${url}/responses`, { method: 'POST', headers, body: JSON.stringify({ model: requested }) });
+    assert.equal(response.status, 400); assert.equal((await response.json()).error.code, 'model_disabled');
+  }
+  assert.equal(calls.a + calls.b + calls.upstream.length + calls.adapter.length, 0);
+});
+
+test('gateway draining rejects new native and CodeBuddy work before reading upstream credentials', async t => {
+  const { url, gateway, calls } = await fixture(t); gateway.isDraining = () => true;
+  for (const requested of ['a-model', 'B-gpt-6.1-sol', model]) {
+    const response = await fetch(`${url}/responses`, { method: 'POST', headers, body: JSON.stringify({ model: requested }) });
+    assert.equal(response.status, 503); assert.equal((await response.json()).error.code, 'gateway_restarting');
+  }
+  assert.equal(calls.a + calls.b + calls.upstream.length + calls.adapter.length, 0);
+  assert.equal(gateway.pendingRequests, 0);
 });

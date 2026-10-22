@@ -255,3 +255,20 @@
 - 完整 JavaScript 离线测试 656/656、`npm run check` 与 diff 检查通过；独立审查通过。覆盖 A/B 回归、认证隔离、JSON/SSE、图片/自定义工具、延迟加载、空值、phase、截断、背压取消、跨渠道拒绝及真实 usage。取消或写出失败仍保留上游已报告的 token；active 计数覆盖最终账本落盘。
 - 管理页 CodeBuddy 计数合并 Codex 和 Messages 两种入口，用量账本只记一次真实上游 usage；未知用量不取协议占位零。增加可读的 Codex 入口字段，继续保留既有 Messages 地址。
 - 按用户此前要求等待通知再重启，当前运行中的宿主服务尚未加载本次更新；新菜单尚未在线生效。CodeBuddy 独立授权、目录均只读核对为就绪。未修改虚拟机、Claude 配置、原有账号认证、代理或 VPS 路由，也未启用先前暂缓的 Claude 菜单配置。真实 CodeBuddy 聊天、工具质量与计费由用户验收。
+
+## 网页控制台与 Cursor 接入（2026-10-22，洛杉矶）
+
+- 首页改为服务、模型和账号管理，移除步骤教学；B 的官方登录、身份确认、验证与接入操作保留在折叠区。A/B 额度继续仅在打开页面或本人点击刷新时查询，没有增加定时刷新。
+- 新增网页重启的两阶段接口：先检查当前 HTTP 与 Cursor 活跃 Run，返回确认后再写入与精确子进程、父进程和服务身份绑定的短时标记；现有独立 Windows supervisor 消费一次后启动新子进程。断连、写入失败、身份变化和无中断授权时出现新任务均取消重启；Codex 与 Messages 两个入口在准备重启期间暂停接收新模型请求。
+- 桌面 `Bifrost - Restart` 使用 `Start-Bridge.ps1 -Restart -Open`。当前运行的 supervisor 还没有新协议，需要用户先用该快捷方式手动更新一次；本轮没有执行此操作。PowerShell 5.1 与 7 的服务离线检查各 21 项通过，没有注册任务或启动测试进程。
+- 模型开关使用原子持久化与版本检查；保留原模型字段和顺序，在目录发布及模型请求入口同时执行禁用规则。目录只保存公开 ID、显示名和渠道，不保存系统指令、能力声明、账号或凭证。新发现模型默认开启，缺失目录不会清除既有禁用选择。
+- Cursor 使用固定版本官方 `@cursor/sdk@1.0.40`，浏览器授权采用 SDK 官方登录，凭证只存本网关独立的 DPAPI 文件。只接 `gemini-4-argon`、`grok-4.7` 两个真实来源 ID，授权后的实际目录决定是否发布。Teams 属于用户声明，未验证套餐类型、剩余额度或实际计费。
+- Cursor 的 Responses 转换复用经过参数化的消息和工具映射，隔离 SDK 工作目录、设置来源、存储与工具。SDK 自定义工具回调挂起，由当前 Codex 执行后返回，继续同一个 Run；原生 SDK 交互审批、强制工具选择、无法保证的输出长度明确拒绝。并发 SDK 工具回调保留原 Promise，排队交给 Codex 顺序执行。无官方 effort 参数时使用 Cursor 默认思考，兼容 Codex 继承的档位提示但不宣称已执行该档位。
+- Cursor 用量只在真实上游报告且能够归属到当前 HTTP 时记入同一个账本。跨 HTTP 工具 Run 的合计单独留作诊断，不归到最后一条请求；协议占位零不能代替未知用量。SDK 历史与检查点存储可能包含正文，已在 README 单独说明，不与元数据账本混淆。
+- 完成态通过实际官方 JsonlLocalAgentStore 写盘及模拟 Agent.resume 验证跨两次重启、增量用户消息、索引单次消费、账号/模型/系统指令/历史绑定、过期、注销清理与父目录 junction 拒绝。挂起工具回调不宣称可恢复，网页重启将其计为活跃 Run。Cursor 29 项专项、独立交叉审查 51 项通过。
+- 完整 JavaScript 离线测试 757/757、`npm run check` 及新增模块语法检查通过。全量检查发现既有 Claude 并发 fixture 在持有 worker 启动锁时等待竞争请求完成，导致测试自身死锁；只调整测试释放锁的时机，保留 `[200,409]` 和只创建一个恢复 worker 的断言。Claude 生产代码未因此更改，68 项专项与独立复核通过。
+- 既有 CodeBuddy 的实际 Codex 离线工具回合再次通过，当前本机 CLI 版本为 `0.163.0-alpha.10.2`。证据：`.state/codebuddy-codex-offline-1792658794996-c75737/result.json`。全量日志：`.state/web-cursor-final-tests.log`。
+- Cursor 使用实际 Codex `0.163.0-alpha.10.2`、临时空 `CODEX_HOME` 和模拟 SDK 完成三个 HTTP、两次本地文件读取、一个 Agent.create 与一个 send。两个同时发起的 SDK callback 分别在后续第二、三个 HTTP 取得对应结果，工具 ID 及 opaque 状态原样续接。目录的并行能力提示为 false，该版本客户端仍发送 true，适配器保持外部顺序执行，没有丢弃回调。全局 max 未映射为虚构的 SDK effort；单 HTTP 用量保持未知，整个 Run 的 80 token 仅作诊断。证据：`.state/cursor-codex-offline-1792659326390-442504/result.json`。
+- 上述隔离 CLI 检查捕获四次外部 CONNECT 尝试，目标为 chatgpt.com、github.com 和 api.github.com；均在回环代理返回 502，未建立隧道。来源未核实，没有将其标成已确认的遥测，也不宣称零外连尝试。模型请求只到本地模拟网关，未加载既有账号或发送真实模型推理。
+- UI 结构及行为用离线测试核对。隔离页面预览因 Cua 返回 `Browser is not available: iab` 未取得截图；临时预览已关闭，没有操作真实浏览器或调用真实管理 API。报告为 `.state/management-ui-visual-report.json`。
+- 本轮没有执行 Cursor 真实授权或模型推理，没有修改虚拟机、Claude、代理、VPS、账号 A/B 凭证或已安装的 Codex 路由，也没有启用暂缓的 Claude 模型配置。Cursor 的实时模型权限、自定义 systemPrompt 权限、缓存、质量和实际扣费仍需用户授权后验收。

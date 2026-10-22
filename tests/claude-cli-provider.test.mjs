@@ -294,12 +294,11 @@ test('concurrent requests cannot claim the same saved native session twice', asy
   const first = await completed(state);
   await state.restart();
   const body = continuation(input, first.message, 'Concurrent saved continuation.');
-  const received = [];
-  const pending = [state.request(body), state.request(body)].map(async request => {
-    const response = await request; received.push(response); return response;
-  });
+  const pending = [state.request(body), state.request(body)];
   try {
-    await until(() => state.workers.length >= 3 || received.some(response => response.status === 409));
+    // Starting a saved session holds the creation lock. Release its worker
+    // before waiting for the competing request to observe the claimed index.
+    await until(() => state.workers[1]?.starts === 1);
   } finally { releaseStart(); }
   await until(() => state.workers.slice(1).every(worker => worker.sends.length));
   for (const worker of state.workers.slice(1)) answer(worker);

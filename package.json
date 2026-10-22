@@ -3,8 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A multi-channel model gateway for Codex and Claude, with subscription account routing and CodeBuddy integration.",
-  "engines": { "node": ">=22.15" },
+  "description": "A multi-channel model gateway for Codex and Claude, with subscription account routing, CodeBuddy, and Cursor integration.",
+  "engines": {
+    "node": ">=22.15"
+  },
   "scripts": {
     "start": "node scripts/start.mjs",
     "start:foreground": "node src/main.mjs",
@@ -13,5 +15,8 @@
     "verify:codex": "node scripts/verify-codex.mjs",
     "check": "node --check src/main.mjs && node --check public/app.js"
   },
-  "dependencies": { "@anthropic-ai/claude-agent-sdk": "0.3.304" }
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.304",
+    "@cursor/sdk": "1.0.40"
+  }
 }

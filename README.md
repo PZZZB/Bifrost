@@ -1,6 +1,6 @@
 # Bifröst
 
-Bifröst 是面向 Codex 与 Claude 的多渠道模型网关。Codex 支持账号 A/B 订阅分流与 CodeBuddy；Claude 支持第三方网关接入，按模型路由到独立 Claude CLI 订阅或 CodeBuddy。
+Bifröst 是面向 Codex 与 Claude 的多渠道模型网关。Codex 支持账号 A/B 订阅分流、CodeBuddy 与 Cursor；Claude 支持第三方网关接入，按模型路由到独立 Claude CLI 订阅或 CodeBuddy。
 
 当前 Codex 保持账号 A 登录，模型选择器保留原有模型，追加两个使用账号 B 订阅的模型及已授权的 CodeBuddy Opus 5.5。文件操作、终端命令、用户问答和权限确认继续由当前 Codex 执行。
 
@@ -10,6 +10,8 @@ Bifröst 是面向 Codex 与 Claude 的多渠道模型网关。Codex 支持账�
 | `B-GPT-6 Astra` | B | `gpt-6-astra` |
 | `B-GPT-6.1 Sol` | B | `gpt-6.1-sol` |
 | `CodeBuddy Opus 5.5` | CodeBuddy 独立员工授权 | `claude-opus-5.5` |
+| `Cursor Gemini 4` | 本人授权的 Cursor 账号 | `gemini-4-argon` |
+| `Cursor Grok 4.7` | 本人授权的 Cursor 账号 | `grok-4.7` |
 
 两个新增模型的内部名称分别为 `B-gpt-6-astra`、`B-gpt-6.1-sol`。B 不可用时返回错误，不会改用 A。普通模型的请求不读取 B 的授权。
 
@@ -17,7 +19,7 @@ CodeBuddy 的内部名称为 `claude-codebuddy-opus-5-5`。启用并完成独立
 
 Bifröst 的名字取自北欧神话的桥，见《埃达》[Gylfaginning 第 13 章](https://heimskringla.no/wiki/Gylfaginning)。文件夹和 GitHub 仓库使用 ASCII 拼写 `Bifrost`。项目目录为 `D:\Bifrost`；运行数据继续使用 `~/.codex-account-bridge/`，账号授权仍保存在原位置。后台服务注册随项目路径更新，已有服务脚本文件名保持兼容。
 
-运行依赖 Node.js 22.15+；Codex 后端使用官方 Codex CLI，Claude 订阅后端使用官方 Claude Agent SDK 与官方 Claude CLI。
+运行依赖 Node.js 22.15+；Codex 后端使用官方 Codex CLI，Claude 订阅后端使用官方 Claude Agent SDK 与官方 Claude CLI，Cursor 后端使用固定版本的官方 `@cursor/sdk`。
 
 ## 启动
 
@@ -49,6 +51,14 @@ ssh -L 43155:127.0.0.1:43155 user@server
 ```
 
 保持 SSH 连接，在自己的电脑打开 <http://127.0.0.1:43155>。浏览器登录使用的 1455 回调端口也需要指向运行 B 后端的机器，例如增加 `-L 1455:127.0.0.1:1455`。当前先交付本机版本；内网部署仍需在目标机器完成登录与验证。
+
+## 网页管理
+
+管理入口为 <http://127.0.0.1:43155/>。首页显示服务状态、模型开关、渠道授权、额度和请求统计；账号 B 的登录、身份确认及接入操作收进可展开的账户管理区。
+
+首次升级到含网页重启功能的版本，先等当前任务结束，双击桌面的 **Bifrost - Restart**。它会同时加载新的服务程序和后台托管协议；以后可在网页点击“重启网关服务”。网页先检查尚未结束的请求和等待工具结果的 Cursor 回合，有任务时需要明确选择是否中断。确认后，已有独立后台进程重启自己的服务子进程，网页重新连接并取得新的管理会话。此功能不依赖 Codex 保持打开；无法核实独立托管身份的启动方式不开放网页重启。
+
+模型选择按 A、B、CodeBuddy、Cursor 分组，默认启用已发现的模型。取消勾选并保存后，网关立即拒绝该模型的新请求；Codex 的菜单需刷新目录或重开应用。原始模型的元数据及顺序保留，新增渠道追加在后。目录和开关保存在私有数据目录的 `model-policy.json`，重启后保留。目录中出现某模型只表示已发现或已配置，不证明当前账号有推理权限。此页目前控制 Codex 入口，不会修改虚拟机 Claude 的模型配置。
 
 ## 接入
 
@@ -92,6 +102,24 @@ Token 统计合并 CodeBuddy 的 Codex 与 Claude 渠道，按真实上游 `usag
 
 可运行 `node scripts/verify-codebuddy-codex-offline.mjs` 做独立本地协议检查：它使用空白 Codex 配置、本地模拟上游和临时文件，不使用真实账户或发送模型推理。真实质量、实时模型权限和扣费仍需用户验收。
 
+## Codex 使用 Cursor
+
+在管理页的 Cursor 卡点击“官方网页登录”，由本人在 Cursor 官方页面完成授权。授权通过官方 [TypeScript SDK](https://cursor.com/docs/sdk/typescript) 发起，本网关取得自己的 API Key，使用 Windows DPAPI CurrentUser 加密保存在 `cursor-auth.dpapi.json`；不会读取桌面 Cursor 的现有凭证。退出本网关会话会清除这份本地授权并取消本网关的 Cursor 回合。网页的 Teams 标签来自用户选择，未通过接口核实套餐类型或剩余额度。
+
+授权后，网关只从实际返回的官方目录选择 `gemini-4-argon` 与 `grok-4.7`，在 Codex 原列表后追加 `Cursor Gemini 4` 和 `Cursor Grok 4.7`。内部 ID 分别为 `Cursor-gemini-4-argon`、`Cursor-grok-4.7`。未出现在当前目录中的模型不会发布；认证、目录或推理失败均不回退到其他账号。
+
+Cursor SDK 提供完整的 Agent 接口。适配器把 Codex 的指令、历史和工具定义交给隔离的 SDK 会话，通过自定义工具回调将工具调用返回当前 Codex；文件操作、终端和用户问答仍由当前 Codex 处理。SDK 会话使用独立目录和存储，关闭默认设置来源，只注册本次客户端提供的工具。等待工具结果时保留同一个 SDK Run，接收到结果后释放原来的回调；不会为每次工具结果重复发送用户消息。
+
+支持文本、内嵌图片或公开 HTTPS 图片引用，以及客户端函数、自定义工具与工具发现。未映射的媒体、服务端工具和参数返回明确错误；Cursor 自身要求的交互审批不能当成 Codex 的问答工具。模型支持的思考参数以官方目录为准；目录没有提供对应控制时，沿用 Cursor 默认思考，不将 Codex 的全局 high/max 提示宣称为已生效。SDK 不提供的输出长度或并行工具保证不会伪造。系统指令能力可能受 Cursor 账号权限限制：若上游拒绝 `systemPrompt`，会明确报错，不能用创建会话成功代替真实回合验收。
+
+Cursor SDK 会话存储包含运行所需的历史和检查点，位于私有数据目录的 `cursor-sdk/`；它与只保存元数据的用量账本不同。跨渠道的加密状态不能混用，建议为 Cursor 模型新建 Codex 聊天。上游缓存由 Cursor 管理，不能承诺与原模型的缓存命中或行为相同。跨多次 HTTP 的工具回合可能只在整个 SDK Run 结束时报告用量，无法归属到单条 HTTP 的分项保持未知，不把合计放到最后一个请求。费用以 Cursor 的账单为准。
+
+已完成并写入有效 SDK 检查点的会话可在服务重启后恢复；恢复索引绑定账号、模型、系统指令与已展示历史，并在下次续聊前消费一次。检查点默认保留 7 天，历史索引最多保留 128 份。正在等待工具回调的 Run 只能在当前进程续接，强制重启或退出授权会使它失效；这也是网页重启会检查活跃 Run 的原因。注销会清除本网关的 Cursor 恢复索引。
+
+`node scripts/verify-cursor-codex-offline.mjs` 使用实际 Codex CLI、本地模拟 SDK 和临时配置做工具回合验证，不加载现有授权或调用 Cursor 模型。
+
+Cursor 的 API Key 按官方 [CLI 认证说明](https://cursor.com/docs/cli/reference/authentication) 归属授权用户；SDK 的套餐池与费用规则见官方 [SDK 文档](https://cursor.com/docs/sdk/typescript) 和 [套餐说明](https://cursor.com/docs/account/pricing/legacy-cursor-plans)。不同 Teams 计费版本有区别，不能据 Teams 标签承诺所有模型请求均包含在固定订阅内。当前接入不查询 Cursor 剩余额度，实时权限、模型质量及实际扣费由用户完成授权后验证。
+
 ## 账号剩余额度
 
 管理页并列显示 A、B 的官方剩余额度、重置时间、套餐、查询时间及可用的 Credits 余额。额度通过各自登录目录中的官方 `account/rateLimits/read` 查询，不发送模型请求；它包含该账号在其他设备的消耗，与本网关的请求历史和 Token 累计分开。
@@ -102,7 +130,7 @@ Token 统计合并 CodeBuddy 的 Codex 与 Claude 渠道，按真实上游 `usag
 
 ## Token 统计
 
-管理页显示输入、输出、总 token，以及 A/B/With/CodeBuddy 分项和最近请求。管理 API 另提供按模型汇总。缓存命中属于输入的一部分，思考 token 属于输出的一部分，均单独列出而不重复加总。统计读取上游返回的 `usage`；With 使用原生 AGUI 的 `token_usage`。缺失的字段保持未知，中断或失败的请求也只记录已经收到的用量。
+管理页显示输入、输出、总 token，以及各渠道分项和最近请求。管理 API 另提供按模型汇总。缓存命中属于输入的一部分，思考 token 属于输出的一部分，均单独列出而不重复加总。统计读取上游返回的 `usage`；With 使用原生 AGUI 的 `token_usage`。缺失的字段保持未知，中断或失败的请求也只记录已经收到的用量。
 
 用量逐条追加到 `~/.codex-account-bridge/usage.jsonl`，重启时重建汇总。文件只保存时间、账号、模型、会话/请求标识、状态和规范化的 token 数，不保存提示词、回复正文或凭证。管理接口 `GET /api/token-usage` 需要本机管理会话。页面时间使用 `America/Los_Angeles`，文件时间为 UTC。
 

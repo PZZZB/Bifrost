@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { B_MODELS, CODEBUDDY_CODEX_MODEL, appendCodeBuddyModel, mergeCatalog, resolveBModel, resolveCodeBuddyModel } from '../src/models.mjs';
+import { B_MODELS, CODEBUDDY_CODEX_MODEL, appendCodeBuddyModel, appendCursorModels, mergeCatalog, resolveBModel, resolveCodeBuddyModel } from '../src/models.mjs';
+import { CURSOR_MODELS } from '../src/cursor-service.mjs';
 import { BridgeError } from '../src/storage.mjs';
 import { CODEBUDDY_MODEL } from '../src/codebuddy-provider.mjs';
 import { CODEBUDDY_EFFORTS } from '../src/codebuddy-thinking.mjs';
@@ -236,4 +237,47 @@ test('CodeBuddy rejects invalid catalogs or an unrepresentable trailing priority
     assert.throws(() => appendCodeBuddyModel(data), error => error instanceof BridgeError && error.code === 'invalid_model_catalog');
     assert.deepEqual(data, before);
   }
+});
+
+test('Cursor appends only account-observed exact target models after A, B and CodeBuddy without sharing metadata', () => {
+  const { aData, bData } = fixture(), before = appendCodeBuddyModel(mergeCatalog(aData, bData));
+  const sources = [{ id: 'unrequested-model' }, { id: 'grok-4.7', displayName: 'Grok 4.7' }, { id: 'gemini-4-argon', displayName: 'Gemini 4 Argon' }];
+  const result = appendCursorModels(before, sources);
+  assert.deepEqual(result.models.slice(0, -2), before.models);
+  assert.deepEqual(result.models.slice(-2).map(item => item.slug), CURSOR_MODELS.map(item => item.id));
+  assert.deepEqual(result.models.slice(-2).map(item => item.priority), [13, 14]);
+  assert.deepEqual(appendCursorModels(before, [{ id: 'grok-4.7' }]).models.slice(-1).map(item => item.slug), ['Cursor-grok-4.7']);
+  assert.deepEqual(appendCursorModels(before, []), before);
+  result.models[0].model_messages.variables.push('new');
+  assert.deepEqual(before.models[0].model_messages.variables, ['original']);
+});
+
+test('Cursor independent catalog declares default SDK reasoning and serialized client tools honestly', () => {
+  const value = appendCursorModels(fixture().aData, [{ id: 'gemini-4-argon' }]).models.at(-1);
+  assert.deepEqual(value.supported_reasoning_levels, []); assert.equal(value.default_reasoning_level, null);
+  assert.match(value.description, /Cursor default reasoning/); assert.match(value.description, /Codex effort levels do not apply/);
+  assert.equal(value.supports_reasoning_summary_parameter, false); assert.equal(value.supports_parallel_tool_calls, false);
+  assert.equal(value.supports_search_tool, true); assert.equal(value.use_responses_lite, false);
+  assert.deepEqual(value.input_modalities, ['text', 'image']);
+  assert.equal(value.model_messages.instructions_template, value.base_instructions);
+  assert.match(value.base_instructions, /Native Cursor approval requests cannot be forwarded/);
+  assert.equal(JSON.stringify(value).includes('A instructions'), false);
+});
+
+test('Cursor exposes only actual SDK reasoning enum values and an advertised default variant', () => {
+  const source = { id: 'grok-4.7', parameters: [{ id: 'effort', values: [{ value: 'low' }, { value: 'high' }, { value: 'unknown-custom-value' }] }],
+    variants: [{ isDefault: true, params: [{ id: 'effort', value: 'low' }] }] };
+  const value = appendCursorModels({ models: [] }, [source]).models[0];
+  assert.deepEqual(value.supported_reasoning_levels.map(item => item.effort), ['low', 'high']);
+  assert.equal(value.default_reasoning_level, 'low');
+});
+
+test('Cursor rejects alias conflicts, duplicate sources and invalid trailing priorities without mutating catalog', () => {
+  for (const original of [{ models: [{ slug: 'Cursor-grok-4.7' }] }, { models: [{ id: 'Cursor-grok-4.7' }] },
+    { models: [{ slug: 'original', priority: 2147483647 }] }, { models: [{ slug: 'original', priority: 1.5 }] }]) {
+    const before = structuredClone(original);
+    assert.throws(() => appendCursorModels(original, [{ id: 'grok-4.7' }]), BridgeError); assert.deepEqual(original, before);
+  }
+  assert.throws(() => appendCursorModels({ models: [] }, [{ id: 'grok-4.7' }, { id: 'grok-4.7' }]), BridgeError);
+  assert.throws(() => appendCursorModels({ models: [] }, null), BridgeError);
 });

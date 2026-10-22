@@ -233,6 +233,27 @@ function Assert-AgentBridgeNoExistingProcess($Config, [string]$ServicePath) {
         Where-Object { $_.LocalAddress -eq '127.0.0.1' }).Count) { throw 'The management port is occupied; no process identity was overwritten.' }
 }
 
+function Get-AgentBridgeRestartRequest($Config, [string]$ServicePath, $Node) {
+    $requestPath = Join-Path $ServicePath 'restart-request.json'
+    if (-not (Test-Path -LiteralPath $requestPath -PathType Leaf)) { return $false }
+    try {
+        $request = Read-AgentBridgeJson $requestPath
+        if ($request.Product -cne 'Bifrost.Service.Restart' -or $request.Version -ne 1 -or
+            $request.OwnerId -cne $Config.OwnerId -or $request.NodePid -ne $Node.Id -or
+            $request.Nonce -cnotmatch '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$') { return $false }
+        $requestedAt = [datetimeoffset]::Parse([string]$request.RequestedAt).UtcDateTime
+        $expiresAt = [datetimeoffset]::Parse([string]$request.ExpiresAt).UtcDateTime
+        $currentTime = [datetime]::UtcNow
+        if ($requestedAt -lt $Node.StartTime.ToUniversalTime() -or $requestedAt -gt $currentTime.AddSeconds(5) -or
+            $expiresAt -le $currentTime -or $expiresAt -gt $requestedAt.AddMinutes(2)) { return $false }
+        return $true
+    } catch { return $false }
+    finally {
+        # Consume only this exact marker; a stale request cannot restart a later process.
+        if ([IO.File]::Exists($requestPath)) { [IO.File]::Delete($requestPath) }
+    }
+}
+
 if ($LibraryOnly) { return }
 if (-not $ConfigPath) { throw 'A service configuration path is required.' }
 $ConfigPath = Get-AgentBridgeAbsolutePath $ConfigPath
@@ -270,11 +291,12 @@ try {
     $logDirectory = Join-Path $configuration.ProjectDirectory '.state'
     [void][IO.Directory]::CreateDirectory($logDirectory)
     $entry = Join-Path $configuration.ProjectDirectory 'src\main.mjs'
+    do {
     $node = Start-Process -FilePath $configuration.NodeBinary -ArgumentList (ConvertTo-AgentBridgeArgument $entry) `
         -WorkingDirectory $configuration.ProjectDirectory -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $logDirectory 'server.log') -RedirectStandardError (Join-Path $logDirectory 'server-error.log')
     $null = $node.Handle
-    $identity = [ordered]@{ Product = 'AgentBridge.Service.Process'; OwnerId = $configuration.OwnerId;
+    $identity = [ordered]@{ Product = 'AgentBridge.Service.Process'; RestartProtocol = 1; OwnerId = $configuration.OwnerId;
         NodePid = $node.Id; RunnerPid = $PID; StartUtc = $node.StartTime.ToUniversalTime().ToString('o');
         NodeBinary = $configuration.NodeBinary; EntryScript = $entry;
         RunnerBinary = $supervisorIdentity.RunnerBinary; RunnerConfigPath = $supervisorIdentity.RunnerConfigPath;
@@ -284,6 +306,9 @@ try {
     $node.WaitForExit()
     $exitCode = $node.ExitCode
     if ($null -eq $exitCode) { $exitCode = 1 }
+    $restartRequested = Get-AgentBridgeRestartRequest $configuration $serviceDirectory $node
+    if ($restartRequested) { $node.Dispose(); $node = $null }
+    } while ($restartRequested)
 } catch {
     # Store a short lifecycle error; application stderr remains in server-error.log.
     [IO.File]::WriteAllText((Join-Path $serviceDirectory 'runner-error.log'), $_.Exception.Message)

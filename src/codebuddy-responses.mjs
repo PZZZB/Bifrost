@@ -188,7 +188,7 @@ class ToolMap {
   }
 }
 
-function translate(raw, instructionMarker) {
+function translate(raw, instructionMarker, profile = {}) {
   let body;
   try {
     body = typeof raw === 'string' || raw instanceof Uint8Array
@@ -197,7 +197,8 @@ function translate(raw, instructionMarker) {
   shape(body, ['model', 'instructions', 'input', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning', 'max_output_tokens',
     'stream', 'store', 'include', 'prompt_cache_key', 'client_metadata', 'metadata', 'text', 'service_tier', 'temperature',
     'top_p', 'truncation', 'background', 'stream_options', 'previous_response_id', 'conversation', 'context_management'], 'body');
-  if (body.model !== CODEBUDDY_MODEL.id) fail('未知的 CodeBuddy 模型。', 'model');
+  const expectedModel = profile.model ?? CODEBUDDY_MODEL.id;
+  if (body.model !== expectedModel) fail('未知的模型。', 'model');
   for (const field of ['previous_response_id', 'conversation', 'context_management']) if (body[field] != null) fail(`CodeBuddy 需要完整历史，不支持 ${field}。`, field);
   if (body.stream !== undefined && typeof body.stream !== 'boolean') fail('stream 必须是布尔值。', 'stream');
   if (body.store !== undefined && body.store !== false) fail('CodeBuddy 不支持 OpenAI 服务端会话存储。', 'store');
@@ -214,13 +215,13 @@ function translate(raw, instructionMarker) {
       key.length > 256 || !['string', 'number', 'boolean'].includes(typeof value) || typeof value === 'number' && !Number.isFinite(value) || typeof value === 'string' && value.length > 65536)) fail(`${field} 无效。`, field);
   }
   if (body.prompt_cache_key !== undefined) text(body.prompt_cache_key, 'prompt_cache_key', 256);
-  const upstream = { model: CODEBUDDY_MODEL.id, max_tokens: body.max_output_tokens ?? 32768,
+  const upstream = { model: expectedModel, max_tokens: body.max_output_tokens ?? 32768,
     stream: true, messages: [], thinking: { type: 'adaptive', display: 'omitted' } };
   if (!Number.isSafeInteger(upstream.max_tokens) || upstream.max_tokens < 1 || upstream.max_tokens > 32768) fail('max_output_tokens 必须介于 1 和 32768。', 'max_output_tokens');
   if (body.reasoning !== undefined && body.reasoning !== null) {
     shape(body.reasoning, ['effort', 'summary'], 'reasoning');
     if (body.reasoning.effort !== undefined) {
-      if (!['low', 'medium', 'high', 'xhigh'].includes(body.reasoning.effort)) fail('CodeBuddy 支持 low、medium、high、xhigh，不支持 max 或关闭思考。', 'reasoning.effort');
+      if (!(profile.allowedEfforts ?? ['low', 'medium', 'high', 'xhigh']).includes(body.reasoning.effort)) fail('当前模型不支持此思考参数。', 'reasoning.effort');
       upstream.output_config = { effort: body.reasoning.effort };
     }
     if (body.reasoning.summary !== undefined && !['auto', 'none'].includes(body.reasoning.summary)) fail('CodeBuddy Responses 当前支持 summary=auto 或 none；auto 可以返回空摘要。', 'reasoning.summary');
@@ -255,7 +256,7 @@ function translate(raw, instructionMarker) {
     // Codex appends this OpenAI-hosted declaration even for custom providers.
     // Exclude only these two declarations, and explicitly tell the model that
     // this capability is unavailable. Forced/used hosted tools still fail.
-    system.push('OpenAI hosted web search is unavailable on this CodeBuddy route. Use only the client tools declared in this request. Never claim to have searched the web without executing an available client tool.');
+    system.push(`OpenAI hosted web search is unavailable on this ${profile.label ?? 'CodeBuddy'} route. Use only the client tools declared in this request. Never claim to have searched the web without executing an available client tool.`);
   }
   const items = typeof body.input === 'string' ? [{ role: 'user', content: body.input }] : body.input;
   if (!Array.isArray(items) || !items.length) fail('input 必须包含完整历史。', 'input');
@@ -313,8 +314,8 @@ function translate(raw, instructionMarker) {
       }
       if (item.status != null && item.status !== 'completed') fail('思考历史尚未完成。', 'input.reasoning.status');
       if (item.encrypted_content == null) {
-        if (item.summary?.length || item.content?.length || String(item.id ?? '').startsWith('rs_bifrost_cb_')) fail('思考接续内容缺失或不属于 CodeBuddy，请新建会话。', 'input.reasoning');
-      } else assistantBlocks(openEnvelope(item.encrypted_content));
+        if (item.summary?.length || item.content?.length || String(item.id ?? '').startsWith(profile.reasoningIdPrefix ?? 'rs_bifrost_cb_')) fail('思考接续内容缺失或不属于当前渠道，请新建会话。', 'input.reasoning');
+      } else assistantBlocks((profile.openState ?? openEnvelope)(item.encrypted_content));
     } else if (['function_call', 'custom_tool_call', 'tool_search_call'].includes(type)) {
       shape(item, ['type', 'id', 'call_id', 'name', 'namespace', 'arguments', 'input', 'status', 'execution', 'encrypted_function_args'], 'input.tool_call');
       if (item.encrypted_function_args != null && item.encrypted_function_args !== false &&
@@ -399,15 +400,18 @@ class Conversion {
   stopReason = null;
   size = 0;
   pendingMessages = [];
-  constructor(request) { this.request = request; }
+  constructor(request, profile = {}) {
+    this.request = request; this.profile = profile;
+    if (profile.idPrefix) this.responseId = id(`resp_${profile.idPrefix}`);
+  }
   event(type, value = {}) { return { type, sequence_number: this.sequence++, ...value }; }
   response(status = 'in_progress', usage = null, error = null) {
     const body = this.request.original;
     return { id: this.responseId, object: 'response', created_at: this.createdAt, status,
       error, incomplete_details: status === 'incomplete' ? { reason: 'max_output_tokens' } : null,
       instructions: body.instructions ?? null, max_output_tokens: body.max_output_tokens ?? null,
-      model: CODEBUDDY_MODEL.id, output: clone(this.output), parallel_tool_calls: this.request.parallel,
-      tool_choice: body.tool_choice ?? 'auto', tools: this.request.effectiveTools, reasoning: body.reasoning ?? { effort: 'high', summary: 'auto' },
+      model: this.request.original.model, output: clone(this.output), parallel_tool_calls: this.request.parallel,
+      tool_choice: body.tool_choice ?? 'auto', tools: this.request.effectiveTools, reasoning: body.reasoning ?? this.profile.defaultReasoning ?? { effort: 'high', summary: 'auto' },
       store: false, text: body.text ?? { format: { type: 'text' } }, truncation: 'disabled',
       metadata: body.metadata ?? {}, usage };
   }
@@ -441,15 +445,15 @@ class Conversion {
       if (['text', 'tool_use'].includes(block.type)) result.push(...this.completeMessages('commentary'));
       let item;
       if (block.type === 'text' && typeof block.text === 'string') {
-        item = { type: 'message', id: id('msg_bifrost_cb'), status: 'in_progress', role: 'assistant', content: [] };
+        item = { type: 'message', id: id(`msg_${this.profile.idPrefix ?? 'bifrost_cb'}`), status: 'in_progress', role: 'assistant', content: [] };
       } else if (block.type === 'thinking' && typeof block.thinking === 'string' && typeof block.signature === 'string') {
-        item = { type: 'reasoning', id: id('rs_bifrost_cb'), summary: [] };
+        item = { type: 'reasoning', id: id(`rs_${this.profile.idPrefix ?? 'bifrost_cb'}`), summary: [] };
       } else if (block.type === 'tool_use' && typeof block.name === 'string' && object(block.input)) {
         const tool = this.request.tools.byAlias.get(block.name);
         if (!tool?.declared || typeof block.id !== 'string' || [...this.blocks.values()].some(entry => entry.block.type === 'tool_use' && entry.block.id === block.id)) protocol('CodeBuddy 返回了未声明或重复工具。');
         if (!/^[A-Za-z0-9_.:-]{1,256}$/.test(block.id)) protocol('CodeBuddy 工具 call_id 无效。');
         item = { type: tool.type === 'custom' ? 'custom_tool_call' : tool.type === 'tool_search' ? 'tool_search_call' : 'function_call',
-          id: id('fc_bifrost_cb'), call_id: block.id, status: 'in_progress',
+          id: id(`fc_${this.profile.idPrefix ?? 'bifrost_cb'}`), call_id: block.id, status: 'in_progress',
           ...(tool.type === 'tool_search' ? { execution: 'client', arguments: {} } : { name: tool.name,
             ...(tool.namespace !== null ? { namespace: tool.namespace } : {}), ...(tool.type === 'custom' ? { input: '' } : { arguments: '' }) }) };
       } else protocol('CodeBuddy 返回了无法映射的内容块。');
@@ -495,7 +499,7 @@ class Conversion {
         item.status = 'completed';
         result.push(this.event('response.output_text.done', { output_index: index, item_id: item.id, content_index: 0, text: item.content[0].text, logprobs: [] }),
           this.event('response.content_part.done', { output_index: index, item_id: item.id, content_index: 0, part: clone(item.content[0]) }));
-      } else if (block.type === 'thinking') item.encrypted_content = envelope(block);
+      } else if (block.type === 'thinking') item.encrypted_content = (this.profile.sealState ?? envelope)(block);
       else {
         let args;
         try { args = state.hadArguments ? JSON.parse(state.arguments) : block.input; } catch { protocol('CodeBuddy 工具参数 JSON 被截断。'); }
@@ -538,6 +542,10 @@ class Conversion {
     return this.event(status === 'incomplete' ? 'response.incomplete' : 'response.completed', { response: this.response(status, wireUsage(usage)) });
   }
 }
+
+// Shared protocol conversion only. Providers retain their own authentication,
+// execution, continuation state, usage accounting, and lifecycle semantics.
+export { translate as translateResponses, Conversion as ResponsesConversion, sse as encodeResponsesEvent };
 
 class SseParser {
   decoder = new TextDecoder('utf-8', { fatal: true });

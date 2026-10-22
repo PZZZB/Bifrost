@@ -166,14 +166,14 @@ export async function startMessagesService({ stateDir, codeBuddyProvider = null,
   codeBuddyEnabled = false, onUsage, listenImpl = listen, readConfigImpl = readJson,
   startLegacyImpl = startWithService, createServerImpl = createAnthropicGatewayServer,
   createHttpProvider = options => new AnthropicHttpProvider(options), startTcpForwarderImpl = startTcpForwarder,
-  reservedPorts = [], ...legacyOptions } = {}) {
+  reservedPorts = [], isDraining = () => false, ...legacyOptions } = {}) {
   const missing = Symbol('missing messages configuration');
   let config, setupError = null;
   try { config = await readConfigImpl(join(stateDir, 'messages-gateway.json'), missing); }
   catch { setupError = 'Messages 网关配置无法读取，请检查 messages-gateway.json。'; }
   if (config === missing) {
     return startLegacyImpl({ stateDir, codeBuddyProvider, codeBuddyModel, codeBuddyEnabled,
-      onUsage, listenImpl, ...legacyOptions });
+      onUsage, listenImpl, isDraining, ...legacyOptions });
   }
 
   let server = null, tcpForwarder = null, running = false, baseUrl = null, closeOperation = null;
@@ -217,7 +217,7 @@ export async function startMessagesService({ stateDir, codeBuddyProvider = null,
         }
         return { account: route.account, model, provider };
       });
-      server = createServerImpl({ routes, gatewayKey: config.gatewayKey,
+      server = createServerImpl({ routes, gatewayKey: config.gatewayKey, isDraining,
         allowedHosts: [...config.listener.allowedHosts], allowedPeers: [...config.listener.allowedPeers], onUsage });
       await listenImpl(server, config.listener.port, config.listener.address);
       running = true;
@@ -236,6 +236,7 @@ export async function startMessagesService({ stateDir, codeBuddyProvider = null,
   }
 
   return {
+    get activeRequests() { return server?.gateway.pendingRequests ?? 0; },
     channelStatus,
     async status() {
       return { deployment: 'generic', configured: false, running: false, manualVerification: true,
