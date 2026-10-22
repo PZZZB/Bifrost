@@ -27,6 +27,8 @@ Windows PowerShell：
 & D:\Bifrost\Start-Bridge.ps1 -Open
 ```
 
+启动器默认复用已有服务。更新代码后需要重启时，运行 `Start-Bridge.ps1 -Restart -Open`；桌面的 `Bifrost - Restart` 快捷方式使用此参数。等共用网关的当前任务结束后再重启。
+
 也可在项目目录执行 `npm start`。Windows 下这两个入口均由当前用户的 `Bifrost` 后台任务启动或复用服务；任务由 Windows 任务计划程序托管，关闭启动终端或 Codex 桌面应用后继续运行，登录 Windows 后自动启动。管理页面默认是 <http://127.0.0.1:43155>。
 
 首次运行会固定 Node 的绝对路径，并将官方 Codex CLI 二进制按 SHA-256 校验后保存在项目 `.state/runtime/codex/`；此处不保存账号凭证。原账号和网关配置继续使用已有目录。任务使用当前用户的登录身份，不保存登录密码；无限运行时限、异常退出后最多重启三次，间隔一分钟。后台配置位于运行数据目录的 `service/service.json`，日志仍为项目 `.state/server.log`、`.state/server-error.log`。

@@ -1,8 +1,9 @@
-param([switch]$Open)
+param([switch]$Open, [switch]$Restart)
 $ErrorActionPreference = 'Stop'
 $projectDirectory = $PSScriptRoot
 $stateDirectory = if ($env:BRIDGE_STATE_DIR) { [IO.Path]::GetFullPath($env:BRIDGE_STATE_DIR) } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex-account-bridge' }
 $serviceArguments = @{ Action = 'Start'; ProjectDirectory = $projectDirectory; StateDirectory = $stateDirectory }
+if ($Restart) { $serviceArguments.Action = 'Restart' }
 if ($env:BRIDGE_PORT) { $serviceArguments.Port = [int]$env:BRIDGE_PORT }
 if ($env:BRIDGE_CLIENT_CODEX_HOME) { $serviceArguments.CodexHome = $env:BRIDGE_CLIENT_CODEX_HOME }
 elseif ($env:CODEX_HOME) { $serviceArguments.CodexHome = $env:CODEX_HOME }
