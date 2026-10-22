@@ -87,6 +87,15 @@ test('the management status exposes a sanitized channel error and clears it when
   assert.equal(modelCalls(), 0);
 });
 
+test('the CodeBuddy management API exposes the optional Codex endpoint without changing the Messages endpoint', async t => {
+  const { service } = await fixture(t, {}, { running: true, baseUrl: 'http://192.168.168.1:43157',
+    codexBaseUrl: 'http://127.0.0.1:43155/backend-api/codex', requests: 4, completed: 3, failed: 1, active: 0 });
+  const status = await service.status();
+  assert.equal(status.gateway.baseUrl, 'http://192.168.168.1:43157');
+  assert.equal(status.gateway.codexBaseUrl, 'http://127.0.0.1:43155/backend-api/codex');
+  assert.equal(status.gateway.requests, 4);
+});
+
 test('the service lazily persists its own thinking key and restores hidden tool history after restart', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'codebuddy-service-state-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));

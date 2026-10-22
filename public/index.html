@@ -22,7 +22,7 @@
       <section class="intro">
         <div class="eyebrow">CODEX / CLAUDE GATEWAY</div>
         <h1>Codex 与 Claude，<br><span>按模型选择渠道。</span></h1>
-        <p class="intro-copy">Codex 原有模型使用账号 A，B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用账号 B。Claude 可接入独立 CLI 订阅与 CodeBuddy。客户端继续执行工具并处理权限。</p>
+        <p class="intro-copy">Codex 原有模型使用账号 A，B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用账号 B，CodeBuddy Opus 5.5 使用 CodeBuddy 授权。Claude 可接入独立 CLI 订阅与 CodeBuddy。客户端继续执行工具并处理权限。</p>
         <div class="identity-flow" aria-label="Codex 账号分工">
           <div><span class="identity-letter">A</span><span><strong>原有模型</strong><small>账号 A 提供推理</small></span></div>
           <span class="flow-line" aria-hidden="true"></span>
@@ -121,7 +121,7 @@
       </section>
       <section class="panel with-panel codebuddy-panel" aria-labelledby="codebuddy-title">
         <div class="panel-heading"><div><div class="eyebrow">CODEBUDDY</div><h2 id="codebuddy-title">CodeBuddy · Opus 5.5</h2></div><span class="pill" id="codebuddy-state">读取中</span></div>
-        <p class="panel-copy">独立 CodeBuddy 渠道，仅提供 Opus 5.5。真实聊天和工具回合由用户验收。</p>
+        <p class="panel-copy">Codex 与 Claude 共用独立 CodeBuddy 授权，仅提供 Opus 5.5。Codex 模型列表追加 CodeBuddy Opus 5.5；支持客户端工具，OpenAI 内置联网搜索不可用。真实聊天和工具回合由用户验收。</p>
         <p class="footnote">支持图片、预解析文本附件、工具图文结果及自适应思考。实际聊天、工具和扣费待本人实测。</p>
         <div class="button-row">
           <button class="button primary" id="codebuddy-login-button" type="button" disabled>官方网页登录</button>
@@ -135,6 +135,7 @@
           <div class="endpoint"><span>提供方登录</span><code id="codebuddy-authentication">读取中</code></div>
           <div class="endpoint"><span>模型可用性</span><code id="codebuddy-model-available">读取中</code></div>
           <div class="endpoint"><span>网关地址</span><code id="codebuddy-gateway-url">读取中</code></div>
+          <div class="endpoint"><span>Codex 入口</span><code id="codebuddy-codex-url">读取中</code></div>
           <div class="endpoint"><span>连接方式</span><code id="codebuddy-transport">读取中</code></div>
           <div class="endpoint"><span>员工 Token 倍率</span><code id="codebuddy-billing-multiplier">待服务端确认</code></div>
         </div>

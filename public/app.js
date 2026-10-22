@@ -23,7 +23,7 @@ const elements = Object.fromEntries([
   'token-with-input', 'token-with-output', 'token-with-cached', 'token-with-reasoning',
   'codebuddy-title', 'codebuddy-state', 'codebuddy-login-button', 'codebuddy-logout-button',
   'codebuddy-authorization-link', 'codebuddy-login-state', 'codebuddy-username',
-  'codebuddy-authentication', 'codebuddy-model-available', 'codebuddy-gateway-url',
+  'codebuddy-authentication', 'codebuddy-model-available', 'codebuddy-gateway-url', 'codebuddy-codex-url',
   'codebuddy-transport', 'codebuddy-billing-multiplier', 'codebuddy-source-credits',
   'codebuddy-catalog-source', 'codebuddy-catalog-saved-at', 'codebuddy-catalog-note',
   'codebuddy-source-promotion', 'codebuddy-requests', 'codebuddy-completed',
@@ -397,6 +397,7 @@ function renderCodeBuddy(data) {
     ? '展示本机目录原始保存时间。实际可用性与计费待本人实测。'
     : liveCatalog ? '已读取实时模型目录。真实聊天和工具回合仍由本人验收。' : '目录来源尚待确认。实际可用性与计费待本人实测。');
   text('codebuddy-gateway-url', gateway.baseUrl || '未配置');
+  text('codebuddy-codex-url', gateway.codexBaseUrl || '尚未启用');
   text('codebuddy-transport', provider.transport || '未返回');
   const multiplier = billing.employeeTokenMultiplier;
   text('codebuddy-billing-multiplier', billing.verified === true && typeof multiplier === 'number' && Number.isFinite(multiplier) && multiplier >= 0

@@ -2,7 +2,8 @@ import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import * as zlib from 'node:zlib';
 import { BridgeError, redact } from './storage.mjs';
-import { mergeCatalog, resolveBModel } from './models.mjs';
+import { mergeCatalog, resolveBModel, appendCodeBuddyModel, resolveCodeBuddyModel } from './models.mjs';
+import { CODEBUDDY_RESPONSES_STATE_PREFIX } from './codebuddy-responses.mjs';
 
 export function keyMatches(actual, expected) {
   if (typeof actual !== 'string' || typeof expected !== 'string' || !expected) return false;
@@ -91,8 +92,19 @@ function parseModel(body, headers) {
   }
   const alias = resolveBModel(data.model);
   if (!alias && /^b-/i.test(data.model)) throw new BridgeError('未知的 B 模型，已停止请求。', 400, 'unknown_b_model');
-  return { data, alias };
+  const codeBuddy = resolveCodeBuddyModel(data.model);
+  if (!codeBuddy && /^(?:claude-codebuddy-|codebuddy[-:/])/i.test(data.model)) {
+    throw new BridgeError('未知的 CodeBuddy 模型，已停止请求。', 400, 'unknown_codebuddy_model');
+  }
+  return { data, alias, codeBuddy };
 }
+
+function hasCodeBuddyState(data) {
+  return Array.isArray(data.input) && data.input.some(item =>
+    typeof item?.encrypted_content === 'string' && item.encrypted_content.startsWith(CODEBUDDY_RESPONSES_STATE_PREFIX));
+}
+
+function accountCounters() { return { requests: 0, completed: 0, failed: 0, active: 0, lastModel: null, lastError: null }; }
 
 function requestThreadId(headers) {
   return ['thread-id', 'x-codex-thread-id', 'conversation_id', 'session-id', 'session_id']
@@ -121,24 +133,32 @@ export class SseInspector {
 
 export class Gateway {
   constructor({ backend, gatewayKey, getAProvider, fetchImpl = fetch,
-    upstream = 'https://chatgpt.com/backend-api/codex', catalogWaitMs = 1200, onUsage = async () => {} }) {
+    upstream = 'https://chatgpt.com/backend-api/codex', catalogWaitMs = 1200, onUsage = async () => {},
+    codeBuddyProvider = null, codeBuddyEnabled = () => codeBuddyProvider !== null }) {
     if (typeof getAProvider !== 'function') throw new TypeError('getAProvider is required for account routing.');
-    Object.assign(this, { backend, gatewayKey, getAProvider, fetchImpl, upstream, catalogWaitMs, onUsage });
+    if (codeBuddyProvider !== null && (typeof codeBuddyProvider.status !== 'function' || typeof codeBuddyProvider.request !== 'function') ||
+        typeof codeBuddyEnabled !== 'function') throw new TypeError('Invalid CodeBuddy Responses provider.');
+    Object.assign(this, { backend, gatewayKey, getAProvider, fetchImpl, upstream, catalogWaitMs, onUsage,
+      codeBuddyProvider, codeBuddyEnabled });
     this.bCatalog = null; this.catalogRefresh = null;
     this.threadTraffic = new Map();
-    this.metrics = { requests: 0, completed: 0, failed: 0, lastError: null, lastUsage: null,
-      accounts: Object.fromEntries(['A', 'B'].map(account => [account,
-        { requests: 0, completed: 0, failed: 0, lastModel: null }])) };
+    this.metrics = { requests: 0, completed: 0, failed: 0, active: 0, lastError: null, lastUsage: null,
+      accounts: Object.fromEntries(['A', 'B', 'CodeBuddy'].map(account => [account, accountCounters()])) };
   }
 
   traffic(threadId) { return structuredClone(this.threadTraffic.get(threadId) ?? null); }
+
+  codeBuddyStatus() {
+    return { running: this.codeBuddyProvider !== null && this.codeBuddyEnabled() === true,
+      ...structuredClone(this.metrics.accounts.CodeBuddy) };
+  }
 
   recordThread(headers, account, model) {
     const threadId = requestThreadId(headers);
     if (!threadId) return null;
     if (!this.threadTraffic.has(threadId)) {
-      this.threadTraffic.set(threadId, { threadId, accounts: Object.fromEntries(['A', 'B'].map(name => [name,
-        { requests: 0, completed: 0, failed: 0, lastModel: null }])) });
+      this.threadTraffic.set(threadId, { threadId, accounts: Object.fromEntries(['A', 'B', 'CodeBuddy'].map(name => [name,
+        accountCounters()])) });
       if (this.threadTraffic.size > 256) this.threadTraffic.delete(this.threadTraffic.keys().next().value);
     }
     const counter = this.threadTraffic.get(threadId).accounts[account];
@@ -195,6 +215,8 @@ export class Gateway {
     const aCatalog = await response.json();
     if (!Array.isArray(aCatalog.models)) throw new BridgeError('账户 A 的完整模型目录格式无效。', 502);
     let data = aCatalog;
+    const codeBuddyMetadata = this.codeBuddyProvider !== null && this.codeBuddyEnabled() === true
+      ? Promise.resolve().then(() => this.codeBuddyProvider.status()).catch(() => null) : Promise.resolve(null);
     const refresh = this.readBCatalog(`/models${url.search}`, { signal: AbortSignal.timeout(10_000) });
     let timer;
     try {
@@ -212,6 +234,20 @@ export class Gateway {
       this.metrics.lastError = redact(error.message);
     }
     finally { clearTimeout(timer); void refresh.catch(() => {}); }
+    try {
+      const remaining = Math.max(0, Math.min(this.catalogWaitMs, 4000 - (Date.now() - started)));
+      const metadata = await Promise.race([codeBuddyMetadata,
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), remaining); })]);
+      if (metadata?.authenticated === true && metadata.ready === true && metadata.modelAvailable === true &&
+          this.codeBuddyEnabled() === true) {
+        data = appendCodeBuddyModel(data);
+        this.metrics.accounts.CodeBuddy.lastError = null;
+      }
+    } catch (error) {
+      // A CodeBuddy failure must not replace or prevent the original A/B catalog.
+      if (error.code === 'model_alias_conflict') throw error;
+      this.metrics.accounts.CodeBuddy.lastError = redact(error.message);
+    } finally { clearTimeout(timer); }
     res.writeHead(200, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
   }
@@ -227,11 +263,11 @@ export class Gateway {
     const inference = path === '/responses';
     const modelRequest = inference || path === '/responses/compact';
     const requestId = randomUUID();
-    if (inference) this.metrics.requests++;
+    if (inference) { this.metrics.requests++; this.metrics.active++; }
     const abort = new AbortController();
     res.on('close', () => { if (!res.writableEnded) abort.abort(); });
-    let complete = false, accountMetrics = null, threadMetrics = null;
-    let usage = null, responseId = null, httpStatus = null, route = null;
+    let complete = false, delivered = false, requestError = null, accountMetrics = null, threadMetrics = null;
+    let usage = null, responseId = null, httpStatus = null, route = null, response = null;
     let inspectJson = false, jsonBytes = 0;
     const jsonChunks = [];
     const readJsonUsage = (updateCompletion = false) => {
@@ -239,31 +275,48 @@ export class Gateway {
       try {
         const data = JSON.parse(Buffer.concat(jsonChunks).toString('utf8'));
         usage = data.usage ?? null; responseId = data.id ?? null;
+        if (typeof data.error?.message === 'string') requestError = redact(data.error.message);
         if (updateCompletion) complete = path === '/responses/compact'
           ? httpStatus >= 200 && httpStatus < 300 : data.status === 'completed';
-        this.metrics.lastUsage = usage;
+        if (!response?.bridgeUsage) this.metrics.lastUsage = usage;
       } catch { /* Incomplete JSON has unknown usage. Never estimate it. */ }
     };
     try {
       if (path === '/models') { await this.catalog(req, res, url, abort.signal); return; }
       const originalBody = await readBody(req);
-      let response;
       {
-        const { data, alias } = parseModel(originalBody, req.headers);
-        const account = alias ? 'B' : 'A';
+        const { data, alias, codeBuddy } = parseModel(originalBody, req.headers);
+        const account = codeBuddy ? 'CodeBuddy' : alias ? 'B' : 'A';
         route = { account, model: data.model, upstreamModel: alias?.upstream ?? data.model };
         accountMetrics = this.metrics.accounts[account];
         if (inference) {
-          accountMetrics.requests++; accountMetrics.lastModel = data.model;
+          accountMetrics.requests++; accountMetrics.active++; accountMetrics.lastModel = data.model;
           threadMetrics = this.recordThread(req.headers, account, data.model);
+          if (threadMetrics) threadMetrics.active++;
         }
-        let body = originalBody;
-        if (alias) { data.model = alias.upstream; body = Buffer.from(JSON.stringify(data)); }
-        const headers = { ...req.headers };
-        if (alias) { delete headers['content-encoding']; delete headers['content-length']; }
-        const options = { method: req.method, headers, body, signal: abort.signal };
-        response = alias ? await this.fetchUpstream(`${path}${url.search}`, options) :
-          await this.fetchAccountA(`${path}${url.search}`, options);
+        if (!codeBuddy && hasCodeBuddyState(data)) {
+          throw new BridgeError('此会话包含 CodeBuddy 专用接续状态，请继续使用 CodeBuddy 模型或新建会话。', 400, 'codebuddy_history_channel_mismatch');
+        }
+        if (codeBuddy) {
+          if (this.codeBuddyProvider === null || this.codeBuddyEnabled() !== true) {
+            throw new BridgeError('CodeBuddy Responses 通道尚未启用。', 503, 'codebuddy_unavailable');
+          }
+          // Only content negotiation reaches the adapter. Neither A/B auth nor
+          // the management key, cookies or native routing headers cross over.
+          response = await this.codeBuddyProvider.request({ path: `${path}${url.search}`,
+            body: Buffer.from(JSON.stringify(data)), headers: new Headers({
+              'content-type': 'application/json', ...(typeof req.headers.accept === 'string' ? { accept: req.headers.accept } : {}),
+            }), signal: abort.signal });
+          if (typeof response?.bridgeModel === 'string') route.upstreamModel = response.bridgeModel;
+        } else {
+          let body = originalBody;
+          if (alias) { data.model = alias.upstream; body = Buffer.from(JSON.stringify(data)); }
+          const headers = { ...req.headers };
+          if (alias) { delete headers['content-encoding']; delete headers['content-length']; }
+          const options = { method: req.method, headers, body, signal: abort.signal };
+          response = alias ? await this.fetchUpstream(`${path}${url.search}`, options) :
+            await this.fetchAccountA(`${path}${url.search}`, options);
+        }
       }
       httpStatus = response.status;
       const outputHeaders = { 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' };
@@ -276,10 +329,12 @@ export class Gateway {
         if (event.response?.id) responseId = event.response.id;
         if (event.response?.usage) usage = event.response.usage;
         if (event.type === 'response.completed' && event.response?.status === 'completed') {
-          complete = true; this.metrics.lastUsage = event.response.usage ?? null;
+          complete = true;
+          if (!response?.bridgeUsage) this.metrics.lastUsage = event.response.usage ?? null;
         }
         if (['error', 'response.failed'].includes(event.type)) {
-          this.metrics.lastError = redact(event.error?.message ?? event.response?.error?.message ?? '模型请求失败');
+          requestError = redact(event.error?.message ?? event.response?.error?.message ?? '模型请求失败');
+          this.metrics.lastError = requestError;
         }
       });
       inspectJson = modelRequest && (path === '/responses/compact' || response.headers.get('content-type')?.includes('application/json'));
@@ -296,31 +351,43 @@ export class Gateway {
       readJsonUsage(true);
       if (path === '/responses/compact') complete = response.ok;
       res.end();
+      delivered = true;
       if (inference) {
         if (complete) {
-          this.metrics.completed++; accountMetrics.completed++; if (threadMetrics) threadMetrics.completed++;
+          this.metrics.completed++; accountMetrics.completed++; accountMetrics.lastError = null;
+          if (threadMetrics) threadMetrics.completed++;
           this.metrics.lastError = null;
         } else {
           this.metrics.failed++; accountMetrics.failed++; if (threadMetrics) threadMetrics.failed++;
-          this.metrics.lastError ??= `上游请求未完成（HTTP ${response.status}）。`;
+          this.metrics.lastError = requestError ?? `上游请求未完成（HTTP ${response.status}）。`;
+          accountMetrics.lastError = this.metrics.lastError;
         }
       }
     } catch (error) {
       if (inference) {
         this.metrics.failed++; if (accountMetrics) accountMetrics.failed++; if (threadMetrics) threadMetrics.failed++;
         this.metrics.lastError = redact(error.message);
+        if (accountMetrics) accountMetrics.lastError = this.metrics.lastError;
       }
       throw error;
     } finally {
       if (modelRequest && route) {
         // A complete JSON chunk may already have arrived before downstream write failed.
         readJsonUsage();
+        if (response?.bridgeUsage) {
+          try { usage = await response.bridgeUsage; }
+          catch { usage = null; }
+          this.metrics.lastUsage = usage;
+        }
         try {
           await this.onUsage({ requestId, time: new Date().toISOString(), ...route,
             threadId: requestThreadId(req.headers), responseId, httpStatus,
-            status: complete ? 'completed' : abort.signal.aborted ? 'interrupted' : 'failed', usage });
+            status: complete && delivered ? 'completed' : abort.signal.aborted ? 'interrupted' : 'failed', usage });
           this.metrics.usageError = null;
         } catch (error) { this.metrics.usageError = redact(error.message); }
+      }
+      if (inference) {
+        this.metrics.active--; if (accountMetrics) accountMetrics.active--; if (threadMetrics) threadMetrics.active--;
       }
     }
   }

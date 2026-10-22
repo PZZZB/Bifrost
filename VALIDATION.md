@@ -244,3 +244,14 @@
 - 宿主正在运行 Hyper-V，VMware 日志明确记录 `Monitor Mode: ULM`。这说明不能仅打开来宾 Windows 功能就认定完整 Cowork 工作区可用；Workstation 的嵌套虚拟化还受宿主 Hyper-V/VBS 模式约束。没有更改系统功能、VMX、代理、VPS 路由或启动配置，也没有重启系统。
 - 官方文档区分 3p 的本地界面/会话与原账号云端会话，并单独提供 Chat、本地文件分析和 Cowork 控制。原账号普通聊天正常，不能证明来宾本地工作区可启动；这条提示本身也不能证明所有聊天和模型请求都失败。
 - 对本地公开 ASAR 拷贝完成定向 REA 静态检查；模型对象及 `desktopHome` 的 schema 可见。主 bundle 语义图因内存限制覆盖不完整，没有执行客户端或修改二进制。代码中存在但当前公开文档未列出的 `no-vm` 值没有应用，不能当作已验证的官方部署方案。
+
+## Codex 接入 CodeBuddy（2026-10-22，洛杉矶）
+
+- 原 A/B 目录及其透传方式保留；已授权且目录就绪时追加 `CodeBuddy Opus 5.5`，内部 ID 为 `claude-codebuddy-opus-5-5`。使用独立能力与中性指令，未复制 GPT 的提示或策略；声明 4 档思考、默认 high、200k 上下文、文本/图片及客户端工具发现。
+- 新增 Responses 适配，复用现有 CodeBuddy provider、员工授权和加密思考状态。映射 namespace、function、自定义工具完整输入及工具发现；工具在当前 Codex 执行。A/B 凭证、网关密钥、Cookie 及原生路由头不会交给 CodeBuddy。
+- CodeBuddy 的隐藏思考和扩展元数据通过自有 opaque 封套续接，真实状态仍经既有加密密钥、员工身份及模型校验；不伪造 OpenAI 加密状态。异渠道密文、未适配媒体、服务端压缩或存储、强制托管工具及 strict 输出保证均明确拒绝。
+- 实际 Codex 默认附带 OpenAI hosted `web_search` 声明。此声明不会触发其他账号的搜索：适配器排除未使用声明并明确告知模型能力缺失；模型说明、管理页和 README 同时标注。真实客户端目录关闭摘要参数声明，避免全局 detailed 摘要设置导致拒绝；保留 `include: reasoning.encrypted_content`。客户端工具发现继续启用，未加载工具不会占用 128 个活动工具上限。
+- 使用实际 Codex `0.162.0-alpha.17.2`、全新 `CODEX_HOME`、空账户、本地 HTTP 网关和模拟 CodeBuddy Chat SSE，完成两回合：读取随机本地文件、返回准确结果；思考密文的 ID/hash 原样回放，底层 reasoning 和 extra_fields 解密后逐项一致。默认 web 声明、全局 detailed 摘要及用户问答工具注册均已核对。未弹出真实用户问答界面，也未调用真实模型。证据：`.state/codebuddy-codex-offline-1792654900454-332fab/result.json`；脚本为 `scripts/verify-codebuddy-codex-offline.mjs`。
+- 完整 JavaScript 离线测试 656/656、`npm run check` 与 diff 检查通过；独立审查通过。覆盖 A/B 回归、认证隔离、JSON/SSE、图片/自定义工具、延迟加载、空值、phase、截断、背压取消、跨渠道拒绝及真实 usage。取消或写出失败仍保留上游已报告的 token；active 计数覆盖最终账本落盘。
+- 管理页 CodeBuddy 计数合并 Codex 和 Messages 两种入口，用量账本只记一次真实上游 usage；未知用量不取协议占位零。增加可读的 Codex 入口字段，继续保留既有 Messages 地址。
+- 按用户此前要求等待通知再重启，当前运行中的宿主服务尚未加载本次更新；新菜单尚未在线生效。CodeBuddy 独立授权、目录均只读核对为就绪。未修改虚拟机、Claude 配置、原有账号认证、代理或 VPS 路由，也未启用先前暂缓的 Claude 菜单配置。真实 CodeBuddy 聊天、工具质量与计费由用户验收。

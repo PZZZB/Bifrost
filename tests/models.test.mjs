@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { B_MODELS, mergeCatalog, resolveBModel } from '../src/models.mjs';
+import { B_MODELS, CODEBUDDY_CODEX_MODEL, appendCodeBuddyModel, mergeCatalog, resolveBModel, resolveCodeBuddyModel } from '../src/models.mjs';
 import { BridgeError } from '../src/storage.mjs';
+import { CODEBUDDY_MODEL } from '../src/codebuddy-provider.mjs';
+import { CODEBUDDY_EFFORTS } from '../src/codebuddy-thinking.mjs';
 
 function fixture() {
   const aData = {
@@ -131,5 +133,107 @@ test('invalid full catalogs fail with BridgeError', () => {
   for (const invalid of [null, [], {}, { models: null }, { models: {} }]) {
     assert.throws(() => mergeCatalog(invalid, bData), BridgeError);
     assert.throws(() => mergeCatalog(aData, invalid), BridgeError);
+  }
+});
+
+test('only the CodeBuddy wire id resolves to the external model', () => {
+  assert.equal(CODEBUDDY_CODEX_MODEL.id, CODEBUDDY_MODEL.id);
+  assert.equal(CODEBUDDY_CODEX_MODEL.name, 'CodeBuddy Opus 5.5');
+  assert.equal(resolveCodeBuddyModel(CODEBUDDY_MODEL.id), CODEBUDDY_CODEX_MODEL);
+  for (const model of ['claude-opus-5.5', 'CodeBuddy Opus 5.5', 'CLAUDE-CODEBUDDY-OPUS-5-5', 'gpt-6-astra', '', null, undefined]) {
+    assert.equal(resolveCodeBuddyModel(model), null);
+  }
+});
+
+test('CodeBuddy appends after original A models and B aliases without changing their metadata or order', () => {
+  const { aData, bData } = fixture();
+  const existing = mergeCatalog(aData, bData);
+  const before = structuredClone(existing);
+  const result = appendCodeBuddyModel(existing);
+  assert.deepEqual(result.models.slice(0, -1), existing.models);
+  assert.equal(result.models.at(-1).slug, CODEBUDDY_MODEL.id);
+  assert.equal(result.models.at(-1).display_name, 'CodeBuddy Opus 5.5');
+  assert.equal(result.models.at(-1).priority, 12);
+  assert.equal(result.catalog_version, existing.catalog_version);
+  assert.deepEqual(result.features, existing.features);
+  result.features.defaults.push('changed');
+  result.models[0].model_messages.variables.push('changed');
+  result.models.at(-2).model_messages.variables.tools.push('changed');
+  assert.deepEqual(existing, before);
+});
+
+test('CodeBuddy can append to A alone when B is unavailable or to an empty valid catalog', () => {
+  const { aData } = fixture();
+  const result = appendCodeBuddyModel(aData);
+  assert.deepEqual(result.models.slice(0, -1), aData.models);
+  assert.equal(result.models.at(-1).priority, 10);
+  assert.deepEqual(appendCodeBuddyModel({ models: [] }).models.map(model => [model.slug, model.priority]), [[CODEBUDDY_MODEL.id, 0]]);
+});
+
+test('CodeBuddy declares the adapter capabilities and does not inherit GPT-specific hints or policies', () => {
+  const { aData } = fixture();
+  Object.assign(aData.models[0], {
+    guardian: { shell: 'gpt-only-policy' },
+    experimental_supported_tools: ['gpt-only-tool'],
+    additional_speed_tiers: ['fast'],
+    comp_hash: 'gpt-only-compaction',
+    model_specialty: 'gpt-only-specialty',
+    multi_agent_version: 'v2',
+    auto_review_model_override: 'gpt-only-reviewer',
+  });
+  const model = appendCodeBuddyModel(aData).models.at(-1);
+  assert.deepEqual(model.supported_reasoning_levels.map(({ effort }) => effort), CODEBUDDY_EFFORTS);
+  assert.equal(model.default_reasoning_level, 'high');
+  assert.deepEqual(model.input_modalities, ['text', 'image']);
+  assert.equal(model.supports_parallel_tool_calls, true);
+  assert.equal(model.tool_mode, 'direct');
+  assert.equal(model.context_window, 200000);
+  assert.equal(model.max_context_window, 200000);
+  assert.equal(model.supports_search_tool, true);
+  assert.equal(model.supports_experimental_context, false);
+  assert.equal(model.supports_reasoning_effort_updates, false);
+  assert.equal(model.supports_reasoning_summary_parameter, false);
+  assert.equal(model.default_reasoning_summary, 'none');
+  assert.equal(model.support_verbosity, false);
+  assert.deepEqual(model.experimental_supported_tools, []);
+  assert.deepEqual(model.additional_speed_tiers, []);
+  assert.equal(model.multi_agent_version, null);
+  assert.equal(model.upgrade, null);
+  assert.equal(model.availability_nux, null);
+  for (const key of ['guardian', 'comp_hash', 'model_specialty', 'auto_review_model_override']) {
+    assert.equal(Object.hasOwn(model, key), false);
+  }
+  assert.equal(typeof model.base_instructions, 'string');
+  assert.ok(model.base_instructions.length > 0);
+  assert.equal(model.model_messages.instructions_template, model.base_instructions);
+  assert.match(model.description, /client tools/);
+  assert.match(model.description, /client tool discovery/);
+  assert.match(model.description, /OpenAI hosted web search is unavailable/);
+  assert.match(model.base_instructions, /OpenAI hosted web search is unavailable/);
+  assert.match(model.base_instructions, /Use only the client tools provided/);
+  assert.match(model.base_instructions, /Do not claim to have browsed the web/);
+  assert.equal(JSON.stringify(model).includes('gpt-only'), false);
+  assert.equal(model.base_instructions.includes('A instructions'), false);
+});
+
+test('a reserved CodeBuddy alias conflict leaves the existing catalog untouched', () => {
+  for (const field of ['slug', 'id']) {
+    const { aData } = fixture();
+    aData.models.push({ [field]: CODEBUDDY_MODEL.id, display_name: 'Existing model' });
+    const before = structuredClone(aData);
+    assert.throws(() => appendCodeBuddyModel(aData), error => (
+      error instanceof BridgeError && error.code === 'model_alias_conflict' && error.status === 409
+    ));
+    assert.deepEqual(aData, before);
+  }
+});
+
+test('CodeBuddy rejects invalid catalogs or an unrepresentable trailing priority before any mutation', () => {
+  for (const data of [null, [], {}, { models: null }, { models: {} },
+    { models: [{ slug: 'existing', priority: 2147483647 }] },
+    { models: [{ slug: 'existing', priority: 2.5 }] }]) {
+    const before = structuredClone(data);
+    assert.throws(() => appendCodeBuddyModel(data), error => error instanceof BridgeError && error.code === 'invalid_model_catalog');
+    assert.deepEqual(data, before);
   }
 });

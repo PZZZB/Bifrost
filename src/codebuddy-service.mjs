@@ -125,6 +125,7 @@ export async function startCodeBuddyService({ stateDir, getGatewayStatus = () =>
           catalog: publicCatalog(metadata.catalog),
           error: setupError || metadata.error || null },
         gateway: { baseUrl: gateway.baseUrl || 'http://192.168.168.1:43157',
+          codexBaseUrl: typeof gateway.codexBaseUrl === 'string' ? gateway.codexBaseUrl : null,
           requests: gateway.requests || 0, completed: gateway.completed || 0, failed: gateway.failed || 0, active: gateway.active || 0,
           lastError: lastError ? redact(lastError) : null },
         login: { ...publicLogin }, manualVerification: true };

@@ -15,6 +15,7 @@ import { UsageLedger } from './usage-ledger.mjs';
 import { AccountQuotas } from './account-quotas.mjs';
 import { startMessagesService } from './messages-service.mjs';
 import { startCodeBuddyService } from './codebuddy-service.mjs';
+import { CodeBuddyResponsesProvider } from './codebuddy-responses.mjs';
 import { createMagpieDelegationServer, loadMagpieDelegation } from './magpie-delegation.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -42,6 +43,19 @@ let usageLedger = null;
 try { usageLedger = await UsageLedger.open({ path: join(stateDir, 'usage.jsonl'), timeZone: 'America/Los_Angeles' }); }
 catch (error) { console.error(`Token statistics unavailable: ${redact(error.message)}`); }
 let backendRpc, configRpc, backend, integration, gateway, clientVersion, accountQuotas;
+let withService;
+const codeBuddyService = await startCodeBuddyService({ stateDir,
+  getGatewayStatus: () => {
+    const messages = withService?.channelStatus('CodeBuddy');
+    const codex = gateway?.codeBuddyStatus();
+    const channels = [messages, codex].filter(Boolean);
+    return { running: channels.some(channel => channel.running === true),
+      baseUrl: messages?.baseUrl || baseUrl,
+      codexBaseUrl: codex?.running ? baseUrl : null,
+      ...Object.fromEntries(['requests', 'completed', 'failed', 'active'].map(name => [name,
+        channels.reduce((total, channel) => total + (channel[name] || 0), 0)])),
+      lastError: channels.map(channel => channel.lastError).find(Boolean) ?? null };
+  } });
 if (!delegation) {
   const binary = process.env.CODEX_BINARY || 'codex';
   const { stdout: versionOutput } = await promisify(execFile)(binary, ['--version'], {
@@ -57,6 +71,8 @@ if (!delegation) {
     statePath: join(stateDir, 'integration.json'), baseUrl, gatewayKey: state.gatewayKey });
   gateway = new Gateway({ backend, gatewayKey: state.gatewayKey,
     getAProvider: () => integration.originalProvider(),
+    codeBuddyProvider: new CodeBuddyResponsesProvider({ provider: codeBuddyService.provider }),
+    codeBuddyEnabled: () => codeBuddyService.enabled,
     onUsage: record => {
       if (!usageLedger) throw new Error('Token 记录文件暂不可用，模型转发继续运行。');
       return usageLedger.record(record);
@@ -65,9 +81,6 @@ if (!delegation) {
   void gateway.readBCatalog(`/models?client_version=${encodeURIComponent(clientVersion)}`).catch(() => {});
 }
 const verificationPath = join(stateDir, 'verification.json');
-let withService;
-const codeBuddyService = await startCodeBuddyService({ stateDir,
-  getGatewayStatus: () => withService?.channelStatus('CodeBuddy') });
 withService = await startMessagesService({ stateDir, reservedPorts: [port],
   codeBuddyProvider: codeBuddyService.provider, codeBuddyModel: codeBuddyService.model, codeBuddyEnabled: codeBuddyService.enabled, onUsage: record => {
   if (!usageLedger) throw new Error('Token 记录文件暂不可用。');
