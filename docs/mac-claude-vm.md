@@ -73,6 +73,8 @@ Mac 使用系统 LaunchDaemon，并用 `UserName` 指定普通用户，`KeepAliv
 
 CodeBuddy 使用 `http://127.0.0.1:43157/v1/chat/completions` 和独立客户端密钥。模板中的密钥占位符不能直接使用；请在本机填入实际值，文件权限设为 0600。远程电脑接入需要另设认证通道，当前端口只面向同一台 Mac。
 
+公网客户端可通过独立的回环入口和 Tailscale Funnel 接入这台 Mac，使用单独密钥、会话身份和并发限制；不直接发布本机内部网关。配置和验证范围见 [公网接入](mac-external-access.md)。
+
 ## 登录与验证
 
 由本人打开 VM 的 `claude` 用户终端，执行：

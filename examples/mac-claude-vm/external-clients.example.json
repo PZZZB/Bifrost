@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "clients": [
+    {
+      "id": "client-01",
+      "keySha256": "REPLACE_WITH_SHA256_OF_A_SEPARATE_RANDOM_API_KEY",
+      "maxConcurrent": 2,
+      "requestsPerMinute": 30
+    }
+  ]
+}

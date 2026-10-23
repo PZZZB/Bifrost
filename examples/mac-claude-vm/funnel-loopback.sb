@@ -1,0 +1,6 @@
+(version 1)
+(allow default)
+; A userspace tailscaled can otherwise forward tailnet peers to localhost ports.
+; Funnel reaches only the external API adapter, never other Mac loopback services.
+(deny network-outbound (remote ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:43158"))

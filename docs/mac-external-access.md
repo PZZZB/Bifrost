@@ -1,0 +1,47 @@
+# 从公网访问这台 Mac 的 Claude 网关
+
+没有自有域名时，可以用 Tailscale Funnel 提供 `https://model-gateway.<tailnet>.ts.net`。
+网关和推理仍运行在原来的 Mac 与隔离 VM；外部客户端无需安装 Tailscale。公网入口由 Tailscale 转送到 Mac，不使用原 VPS 作为入站入口。VPS 继续承担 VM 的 Claude 出站流量。
+
+```text
+外部客户端 → HTTPS / Tailscale Funnel → Mac 127.0.0.1:43158
+          → Mac 127.0.0.1:43157 → 原固定 VM 通道 → Claude → VPS
+```
+
+## 访问边界
+
+新增入口仅提供 `/v1/models`、`/v1/chat/completions`、`/v1/messages` 和 `/v1/messages/count_tokens`。它接受独立外部 API key，替换为本机网关密钥后转发到固定回环目标。VM relay 密钥和 Claude OAuth 不交给外部客户端。
+
+每个客户端使用独立随机密钥，私有 `clients.json` 只存其 SHA-256。每个客户端默认最多 2 个并发请求、每分钟 30 次；入口总并发最多 4，请求正文最多 16 MiB，单次最长 10 分钟。新请求每次重新读取客户端列表；删除该项会拒绝后续请求，已在运行的流需要停止入口才能立即中断。请求数限制不是模型 token 或订阅费用限额。
+
+所有客户端会话标识由服务端按认证身份重新命名；相同的客户端 session header 不会跨密钥身份复用 VM 会话。客户端提供的 Cookie、代理头、agent/parent 标识和认证均不向内部透传。入口拒绝浏览器 Origin，不开放管理页、SSH、文件共享或任意目标代理；工具仍由各自客户端执行。
+
+两个 Mac HTTP 端口继续仅绑定 `127.0.0.1`。Tailscale 使用独立的用户态 daemon、私有 socket 和状态文件，关闭 DNS 接管、路由接受和 SSH。Funnel 与 shields-up 互斥；专用 daemon 通过 macOS 进程沙箱限制回环连接，仅能连接 43158，避免用户态转发开放其它本机服务。沙箱配置依赖 macOS 的 `sandbox-exec`，启动失败时应停止该 daemon，不移除此限制后重试。不能仅依据 `funnel status` 判定公网成功。VM 网卡、防火墙、DNS 与 VPS 出口策略保持原配置。
+
+## 配置
+
+先准备 `external-gateway.example.json`、`external-clients.example.json` 及独立会话密钥。配置和密钥的父目录为 0700，文件为 0600；客户端密钥应由至少 32 字节安全随机数生成并使用 base64url 编码，不能复用内部网关密钥。启动：
+
+```sh
+node scripts/run-external-claude-gateway.mjs /absolute/private/External/gateway.json
+```
+
+CLI-only Tailscale 的 daemon 启动参数见 `local.claude-vps.bifrost-funnel.example.plist`。不启用 SOCKS/HTTP 出站代理或 subnet/exit 路由。以专用 socket 完成官方网页登录：
+
+```sh
+tailscale --socket=/absolute/private/External/tailscaled.sock up \
+  --hostname=model-gateway --accept-dns=false --accept-routes=false \
+  --ssh=false --shields-up=false
+tailscale --socket=/absolute/private/External/tailscaled.sock funnel \
+  --bg --https=443 http://127.0.0.1:43158
+```
+
+首次需在官方网页完成账号授权和 Funnel 功能启用。取得完整 DNS 名称后，填入私有网关配置的 `publicHostname` 并重启外部入口。客户端 Base URL 为 `https://<实际 DNS 名称>/v1`，Authorization 为各自的 `Bearer <外部 API key>`。
+
+登录后的验收必须包括真实公网 HTTPS、无密钥 401、错误密钥拒绝、有效密钥的模型元数据、未提供的接口拒绝、SSE 首片段/取消和 daemon 重启恢复。可以通过仅允许专用一次性测试密钥的 loopback 模拟后端测试流式，避免请求真实模型。Claude 尚未登录时，模型列表为空、推理不可用；网络通道验收不代表真实推理已通过。
+
+关闭公网入口用 `tailscale --socket=... funnel reset`；停止专用 daemon 也会断开公网入口。本机 43157 入口和 VM 的 VPS 出站无需因此停止。
+
+该方案需要 Mac 保持开机、用户登录和联网。Funnel 的公网带宽由服务提供方限制；可用地址及连通性以现场验收为准。
+
+依据：[Funnel](https://tailscale.com/docs/features/tailscale-funnel)、[macOS 版本差异](https://tailscale.com/docs/concepts/macos-variants)、[用户态网络](https://tailscale.com/docs/concepts/userspace-networking)。Cloudflare 的免账号 Quick Tunnel 不支持 SSE，不适合作为这个流式 API 的入口：[限制](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/#limitations)。
