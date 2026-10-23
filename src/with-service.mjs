@@ -19,7 +19,7 @@ function listen(server, port, address) {
 }
 
 /** Optional VM listener with independent With and CodeBuddy channel switches. */
-export async function startWithService({ stateDir, onUsage, codeBuddyProvider = null, codeBuddyModel = null,
+export async function startWithService({ stateDir, onUsage, onDiagnostic, getAuthorizationVersion, codeBuddyProvider = null, codeBuddyModel = null,
   codeBuddyEnabled = false, listenImpl = listen, daemon: injectedDaemon = null, provider: injectedProvider = null,
   isDraining = () => false }) {
   let config = null, configError = false;
@@ -53,7 +53,7 @@ export async function startWithService({ stateDir, onUsage, codeBuddyProvider = 
         mcp = provider.mcpServer();
         await listenImpl(mcp, 43158, '127.0.0.1');
       }
-      server = createWithGatewayServer({ provider, withEnabled, gatewayKey: config.gatewayKey, onUsage, isDraining,
+      server = createWithGatewayServer({ provider, withEnabled, gatewayKey: config.gatewayKey, onUsage, onDiagnostic, getAuthorizationVersion, isDraining,
         allowedHosts: WITH_GATEWAY_ALLOWED_HOSTS, allowedPeers: [GUEST],
         additionalRoutes: codeBuddyEnabled === true
           ? [{ account: 'CodeBuddy', model: codeBuddyModel, provider: codeBuddyProvider }] : [] });

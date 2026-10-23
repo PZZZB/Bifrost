@@ -108,3 +108,22 @@ test('a channel that changes during the other policy commit loses its ready coun
   assert.equal(result.models.filter(model => model.channel === 'CodeBuddy').every(model => model.available === false), true);
   assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
 });
+
+test('discovery forwards safe source capabilities and the actual Cursor prompt mode without proving inference', async t => {
+  const { discovery, cb, cu, path } = await fixture(t);
+  cb.getModels = async () => [{ id: legacyCB, name: 'CodeBuddy Opus', upstream: 'opus-source', available: true,
+    slug: 'Cursor-must-not-be-registered',
+    source: 'native-cache', inputModalities: ['text', 'image'], supportsReasoning: true, efforts: ['high', 'xhigh'], defaultEffort: 'high', contextWindow: 300000,
+    apiKey: 'PRIVATE_KEY', model_messages: { instructions_template: 'PRIVATE_PROMPT' } }];
+  cu.promptMode = 'project-rules';
+  cu.getModels = async () => [{ id: 'gemini-4-argon', displayName: 'SDK model', supportsImages: false, contextWindow: 500000,
+    parameters: [{ id: 'effort', values: [{ value: 'medium' }, { value: 'high' }] }] }];
+  const snapshot = await discovery.refresh(), codeBuddy = snapshot.models.find(model => model.id === legacyCB), cursor = snapshot.models.find(model => model.id === legacyCU);
+  assert.equal(codeBuddy.capabilities.contextWindow.tokens, 300000); assert.deepEqual(codeBuddy.capabilities.reasoning.efforts, ['high', 'xhigh']);
+  assert.equal(cursor.capabilities.images.support, false); assert.equal(cursor.capabilities.contextWindow.tokens, 500000);
+  assert.deepEqual(cursor.capabilities.reasoning.efforts, ['medium', 'high']); assert.equal(cursor.compatibility.mode, 'project-rules');
+  assert.equal(cursor.verification.state, 'unverified'); assert.equal(codeBuddy.verification.state, 'unverified');
+  assert.equal(snapshot.models.some(model => model.id === 'Cursor-must-not-be-registered'), false);
+  assert.equal(JSON.stringify(snapshot).includes('PRIVATE'), false);
+  const raw = await readFile(path, 'utf8'); assert.equal(raw.includes('capabilities'), false); assert.equal(raw.includes('verification'), false);
+});

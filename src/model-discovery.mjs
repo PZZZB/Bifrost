@@ -42,11 +42,13 @@ export class ModelDiscovery {
         const name = channel === 'Cursor' && text(source.displayName) ? `Cursor ${source.displayName}`
           : text(source.name) ? source.name : fallback;
         const availability = channel === 'Cursor' ? cursorModelAvailability(source) : { available: source.available !== false, reason: source.reason };
-        return { id: alias.id, name, available: availability.available,
+        const { slug: _sourceSlug, ...metadata } = source;
+        return { ...metadata, id: alias.id, name, available: availability.available,
           ...(!availability.available ? { reason: text(availability.reason) ? availability.reason : '此模型暂未适配当前客户端。' } : {}),
           source: sources.has(source.source) ? source.source : 'account-catalog' };
       });
-      return { channel, models, state: 'ready', authorizationVersion };
+      return { channel, models, state: 'ready', authorizationVersion,
+        ...(channel === 'Cursor' ? { promptMode: service.promptMode } : {}) };
     } catch { return { channel, models: [], state: 'error', message }; }
     finally { clearTimeout(timer); this.#active.delete(abort); }
   }
@@ -62,7 +64,7 @@ export class ModelDiscovery {
         if (stale()) Object.assign(result, { models: [], state: 'error', message: `${result.channel} 授权已变化，请重新刷新账号目录。` });
         await this.modelPolicy.observe({ models: result.models }, result.channel, { defaultEnabled: false, complete: true,
           unavailableReason: result.message ?? '当前账号目录未返回此模型，请刷新目录后重试。',
-          authorizationVersion: result.authorizationVersion ?? service?.authorizationVersion });
+          authorizationVersion: result.authorizationVersion ?? service?.authorizationVersion, promptMode: result.promptMode });
         if (stale()) {
           Object.assign(result, { models: [], state: 'error', message: `${result.channel} 授权已变化，请重新刷新账号目录。` });
           await this.modelPolicy.observe({ models: [] }, result.channel, { defaultEnabled: false, complete: true,

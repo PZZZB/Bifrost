@@ -163,7 +163,7 @@ function listenerUrl(listener) {
 }
 
 export async function startMessagesService({ stateDir, codeBuddyProvider = null, codeBuddyModel = null,
-  codeBuddyEnabled = false, onUsage, listenImpl = listen, readConfigImpl = readJson,
+  codeBuddyEnabled = false, onUsage, onDiagnostic, getAuthorizationVersion, listenImpl = listen, readConfigImpl = readJson,
   startLegacyImpl = startWithService, createServerImpl = createAnthropicGatewayServer,
   createHttpProvider = options => new AnthropicHttpProvider(options), startTcpForwarderImpl = startTcpForwarder,
   reservedPorts = [], isDraining = () => false, ...legacyOptions } = {}) {
@@ -173,7 +173,7 @@ export async function startMessagesService({ stateDir, codeBuddyProvider = null,
   catch { setupError = 'Messages 网关配置无法读取，请检查 messages-gateway.json。'; }
   if (config === missing) {
     return startLegacyImpl({ stateDir, codeBuddyProvider, codeBuddyModel, codeBuddyEnabled,
-      onUsage, listenImpl, isDraining, ...legacyOptions });
+      onUsage, onDiagnostic, getAuthorizationVersion, listenImpl, isDraining, ...legacyOptions });
   }
 
   let server = null, tcpForwarder = null, running = false, baseUrl = null, closeOperation = null;
@@ -218,7 +218,7 @@ export async function startMessagesService({ stateDir, codeBuddyProvider = null,
         return { account: route.account, model, provider };
       });
       server = createServerImpl({ routes, gatewayKey: config.gatewayKey, isDraining,
-        allowedHosts: [...config.listener.allowedHosts], allowedPeers: [...config.listener.allowedPeers], onUsage });
+        allowedHosts: [...config.listener.allowedHosts], allowedPeers: [...config.listener.allowedPeers], onUsage, onDiagnostic, getAuthorizationVersion });
       await listenImpl(server, config.listener.port, config.listener.address);
       running = true;
     } catch (error) {

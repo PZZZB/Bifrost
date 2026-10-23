@@ -67,7 +67,9 @@ function harness(overrides = {}) {
     authReady: false, profile: null, plan: { declared: 'Teams', verified: false }, login: { state: 'not_started' }, catalog: { models: [] }, gateway: {} };
   let backend = overrides.backend ?? { running: true, login: {} }, codebuddy = overrides.codebuddy ?? { configured: false };
   let quotas = overrides.quotas ?? { accounts: { A: { status: 'ok', windows: [] }, B: { status: 'ok', windows: [] } } };
-  const control = { supported: true, platform: 'win32', pending: false, activeRequests: 0, ready: true, independentOfCodex: true };
+  let diagnostics = overrides.diagnostics ?? { recent: [] };
+  const control = { supported: true, platform: 'win32', pending: false, activeRequests: 0, ready: true, independentOfCodex: true,
+    ...overrides.control };
   const document = { hidden: false, body: new Element('body'), activeElement: null,
     getElementById(id) { return elements.get(id) ?? null; },
     createElement(tag) { const element = new Element(tag); element.ownerDocument = document; return element; },
@@ -99,6 +101,7 @@ function harness(overrides = {}) {
     if (path === '/api/with') return json({ configured: false });
     if (path === '/api/codebuddy') return json(codebuddy);
     if (path === '/api/token-usage') return json({ accounts: {}, totals: {}, recent: [] });
+    if (path === '/api/request-diagnostics?limit=10') return json(diagnostics);
     if (path === '/api/account-quotas') return json(quotas);
     throw new Error(`Unexpected fixture endpoint: ${path}`);
   };
@@ -109,6 +112,7 @@ function harness(overrides = {}) {
     set backend(value) { backend = value; }, get backend() { return backend; },
     set codebuddy(value) { codebuddy = value; }, get codebuddy() { return codebuddy; },
     set quotas(value) { quotas = value; }, get quotas() { return quotas; },
+    set diagnostics(value) { diagnostics = value; }, get diagnostics() { return diagnostics; },
     changeHash(value) { location.hash = value; windowListeners.get('hashchange')?.({ type: 'hashchange' }); },
     get elapsed() { return clock; } };
   class Clock extends Date { static now() { return clock; } }
@@ -862,4 +866,290 @@ for (const [account, label] of [['b', 'account B'], ['codebuddy', 'CodeBuddy'], 
 
 test('account B logout clears its identity before a fresh status response even without an older in-flight read', async () => {
   await verifyLogoutRefreshIsolation('b', { oldRequest: false });
+});
+
+const modernControl = () => ({ capabilities: { whenIdle: true, cancelQueued: true }, restart: null,
+  version: { state: 'outdated', updatePending: true,
+    running: { revision: '1111111111111111111111111111111111111111', startedAt: '2026-10-23T00:00:00.000Z' },
+    installed: { revision: '2222222222222222222222222222222222222222', dirty: true } } });
+const modernPage = (fetch, options = {}) => harness({ models: completeModels(), control: modernControl(), fetch, ...options });
+const evidenceFor = (page, id) => page.elements.get('model-settings-list').querySelectorAll('details')
+  .filter(element => element.className === 'model-evidence')[modelInputs(page).findIndex(input => input.value === id)];
+function detailFields(element) {
+  const fields = element.tagName === 'DL' ? element : element.querySelectorAll('dl')[0];
+  return Object.fromEntries(fields.children.map(row => [row.children[0].textContent, row.children[1].textContent]));
+}
+const diagnosticRecord = (requestId = 'request_fixture', extra = {}) => ({ requestId, time: '2026-10-23T00:00:00.000Z',
+  account: 'CodeBuddy', model: 'CodeBuddy-fixture', upstreamModel: 'fixture', status: 'completed', httpStatus: 200,
+  durationMs: 1234.5, firstResponseMs: 50, usage: { inputTokens: 10, outputTokens: 20 }, ...extra });
+
+test('service version panel distinguishes installed changes from the running process without restarting automatically', async () => {
+  const page = modernPage(); await settle();
+  assert.match(page.elements.get('service-running-version').textContent, /111111111111/);
+  assert.match(page.elements.get('service-installed-version').textContent, /222222222222.*未提交/);
+  assert.doesNotMatch(page.elements.get('service-started-at').textContent, /未返回/);
+  assert.equal(page.elements.get('service-update-state').textContent, '有更新，重启网关后生效');
+  assert.equal(page.elements.get('service-state').textContent, '有待生效更新');
+  assert.equal(page.elements.get('service-idle-restart-button').disabled, false);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+  page.control.version = { ...modernControl().version, updatePending: false, state: 'current' };
+  await page.run('refreshServiceStatus()');
+  assert.equal(page.elements.get('service-update-state').textContent, '后台代码已生效');
+});
+
+test('old backends leave version, idle restart and diagnostics unavailable while preserving model editing and native statistics', async () => {
+  const page = harness({ fetch(call) {
+    if (call.path === '/api/request-diagnostics?limit=10') return json({ error: { message: 'not installed' } }, 404);
+  } }); await settle();
+  assert.match(page.elements.get('service-running-version').textContent, /未返回/);
+  assert.match(page.elements.get('service-update-state').textContent, /未取得/);
+  assert.equal(page.elements.get('service-idle-restart-button').disabled, true);
+  assert.equal(page.elements.get('service-idle-cancel-button').hidden, true);
+  assert.equal(page.elements.get('diagnostics-state').textContent, '待更新后台');
+  assert.match(page.elements.get('diagnostics-error').textContent, /历史请求不会补造/);
+  const input = modelInputs(page)[0]; input.checked = false; input.trigger('change');
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  assert.equal(page.elements.get('metric-a-requests').textContent, '7');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('failed service reads disable cached idle controls until a fresh service status succeeds', async () => {
+  for (const errorStatus of [404, 503]) for (const queued of [false, true]) {
+    let failed = false;
+    const page = modernPage(call => {
+      if (failed && call.path === '/api/service/status') return json({ error: { message: 'Fixture service unreadable' } }, errorStatus);
+    }, { control: { ...modernControl(), pending: queued,
+      restart: queued ? { mode: 'when-idle', state: 'queued' } : null } });
+    await settle();
+    assert.equal(page.elements.get(queued ? 'service-idle-cancel-button' : 'service-idle-restart-button').disabled, false);
+    failed = true; await page.run('refreshServiceStatus()'); await settle();
+    assert.equal(page.elements.get('service-idle-restart-button').disabled, true);
+    assert.equal(page.elements.get('service-idle-cancel-button').disabled, true);
+    await page.run('queueServiceRestart()'); await page.run('cancelQueuedRestart()');
+    assert.equal(page.calls.some(call => call.method === 'POST'), false, 'Cached capabilities cannot authorize controls after a failed status read.');
+    failed = false; await page.run('refreshServiceStatus()'); await settle();
+    assert.equal(page.elements.get(queued ? 'service-idle-cancel-button' : 'service-idle-restart-button').disabled, false);
+  }
+});
+
+test('marker cleanup failures expose a retry cancellation for both immediate and idle restarts', async () => {
+  for (const mode of ['immediate', 'when-idle']) {
+    const page = modernPage((call, api) => {
+      if (call.path === '/api/service/restart/cancel' && call.method === 'POST') {
+        api.control.pending = false; api.control.draining = false; api.control.restart = null; api.control.error = null;
+        return json({ cancelled: true });
+      }
+    }, { control: { ...modernControl(), pending: true, draining: true,
+      restart: { mode, state: 'cleanup_failed' }, error: 'Fixture marker cleanup failed' } });
+    await settle();
+    assert.equal(page.elements.get('service-state').textContent, '清理失败');
+    const cancel = page.elements.get('service-idle-cancel-button');
+    assert.equal(cancel.hidden, false); assert.equal(cancel.disabled, false); assert.equal(cancel.textContent, '重试取消');
+    assert.match(page.elements.get('service-queue-message').textContent, /清理失败.*重试取消/);
+    assert.equal(page.elements.get('service-restart-button').disabled, true);
+    assert.equal(page.elements.get('service-idle-restart-button').disabled, true);
+    cancel.trigger('click'); await settle();
+    assert.deepEqual(page.calls.filter(call => call.method === 'POST').map(call => call.path), ['/api/service/restart/cancel']);
+    assert.equal(cancel.hidden, true); assert.equal(page.elements.get('service-idle-restart-button').disabled, false);
+  }
+});
+
+test('idle restart queues exactly one noninterrupting request and leaves current model drafts editable', async () => {
+  const page = modernPage((call, api) => {
+    if (call.path === '/api/service/restart' && call.method === 'POST') {
+      api.control.pending = true; api.control.restart = { mode: 'when-idle', state: 'queued' };
+      return json({ accepted: true }, 202);
+    }
+  }); page.control.activeRequests = 4; await settle();
+  page.elements.get('service-idle-restart-button').trigger('click'); await settle();
+  assert.deepEqual(page.calls.filter(call => call.method === 'POST').map(call => [call.path, call.body]),
+    [['/api/service/restart', { mode: 'when-idle' }]]);
+  assert.equal(page.elements.get('service-state').textContent, '等待空闲重启');
+  assert.match(page.elements.get('service-queue-message').textContent, /当前进行中 4 项/);
+  assert.equal(page.elements.get('service-idle-cancel-button').hidden, false);
+  assert.equal(page.run('restartInProgress'), false);
+  const input = inputFor(page, 'cb-other'); assert.equal(input.disabled, false); input.checked = true; input.trigger('change');
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  page.elements.get('service-idle-restart-button').trigger('click'); await settle();
+  assert.equal(page.calls.filter(call => call.path === '/api/service/restart').length, 1);
+});
+
+test('cancelling an idle queue sends only its cancellation and restores the restart controls', async () => {
+  const page = modernPage((call, api) => {
+    if (call.path === '/api/service/restart/cancel' && call.method === 'POST') {
+      api.control.pending = false; api.control.restart = null; return json({ ok: true });
+    }
+  }, { control: { ...modernControl(), pending: true, restart: { mode: 'when-idle', state: 'queued' } } });
+  await settle(); assert.equal(page.elements.get('service-idle-cancel-button').hidden, false);
+  page.elements.get('service-idle-cancel-button').trigger('click'); await settle();
+  assert.deepEqual(page.calls.filter(call => call.method === 'POST').map(call => call.path), ['/api/service/restart/cancel']);
+  assert.equal(page.elements.get('service-idle-cancel-button').hidden, true);
+  assert.equal(page.elements.get('service-idle-restart-button').disabled, false);
+  assert.match(page.elements.get('service-message').textContent, /已取消排队重启/);
+  assert.equal(page.run('queuedRestartToken'), null);
+});
+
+test('queued restart is completed only after a new CSRF token arrives and later saves use that token', async () => {
+  const page = modernPage((call, api) => {
+    if (call.path === '/api/service/restart' && call.method === 'POST') {
+      api.control.pending = true; api.control.restart = { mode: 'when-idle', state: 'queued' };
+      return json({ accepted: true }, 202);
+    }
+  }); await settle(); await page.run('queueServiceRestart()'); await settle();
+  await page.run('refreshStatus()'); await settle();
+  assert.doesNotMatch(page.elements.get('service-message').textContent, /已完成重启/);
+  page.token = 'queued-restart-fresh-csrf'; page.control.pending = false; page.control.restart = null;
+  page.control.version = { ...modernControl().version, updatePending: false, state: 'current' };
+  await page.run('refreshStatus()'); await settle();
+  assert.match(page.elements.get('service-message').textContent, /已完成重启/);
+  assert.equal(page.run('queuedRestartToken'), null);
+  await page.run("post('/api/model-settings', { revision: 7, disabledModels: [] })");
+  assert.equal(page.calls.findLast(call => call.method === 'POST').headers['X-Bridge-CSRF'], 'queued-restart-fresh-csrf');
+  assert.equal(page.calls.filter(call => call.path === '/api/service/restart').length, 1);
+});
+
+test('a new service token discards old catalog reads and their cleanup while preserving model drafts', async () => {
+  for (const oldFails of [false, true]) {
+    const oldRead = deferred(), freshRead = deferred();
+    let phase = 'initial';
+    const page = modernPage(call => {
+      if (call.path === '/api/model-settings' && call.method === 'GET') {
+        if (phase === 'old') return oldRead.promise;
+        if (phase === 'fresh') return freshRead.promise;
+      }
+    });
+    await settle();
+    const draft = inputFor(page, 'cb-other'); draft.checked = true; draft.trigger('change');
+    phase = 'old'; const oldPending = page.run('refreshModelSettings()'); await settle();
+    const before = page.calls.filter(call => call.path === '/api/model-settings').length;
+    phase = 'fresh'; page.token = 'replacement-service-csrf';
+    await page.run('refreshStatus()'); await settle();
+    assert.equal(page.calls.filter(call => call.path === '/api/model-settings').length, before + 1, 'The new service must start its own catalog read without waiting for the old one.');
+    oldRead.resolve(oldFails ? json({ error: { message: 'Fixture stale catalog error' } }, 503) : json({ revision: 1, models: [] }));
+    await oldPending; await settle();
+    assert.equal(page.run('modelSettingsLoaded'), false);
+    assert.equal(page.run('modelSettingsRequest !== null'), true, 'An old finally block must not clear the current catalog request.');
+    assert.equal(page.elements.get('model-settings-error').hidden, true);
+    assert.equal(inputFor(page, 'cb-other').checked, true);
+    const currentPending = page.run('refreshModelSettings()');
+    assert.equal(page.calls.filter(call => call.path === '/api/model-settings').length, before + 1);
+    const fresh = completeModels(); fresh.revision = 8;
+    fresh.models.push({ id: 'CodeBuddy-after-restart', name: 'New model', channel: 'CodeBuddy', enabled: false, available: true });
+    freshRead.resolve(json(fresh)); await currentPending; await settle();
+    assert.equal(inputFor(page, 'CodeBuddy-after-restart').checked, false);
+    assert.equal(inputFor(page, 'cb-other').checked, true);
+    assert.equal(page.run('modelSettings.revision'), 7, 'Unsaved choices retain their original revision for conflict protection.');
+    assert.equal(page.run('modelSettingsLoaded'), true);
+    assert.equal(page.run('modelSettingsRequest'), null);
+    assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+    assert.equal(page.calls.some(call => call.method === 'POST'), false);
+  }
+});
+
+test('a rejected idle restart remains an explicit failed action and never falls back to interrupting work', async () => {
+  const page = modernPage(call => {
+    if (call.path === '/api/service/restart' && call.method === 'POST') return json({ error: { message: 'Fixture queue unavailable' } }, 503);
+  }); await settle(); await page.run('queueServiceRestart()'); await settle();
+  assert.match(page.elements.get('notice').textContent, /Fixture queue unavailable/);
+  assert.equal(page.run('queuedRestartToken'), null); assert.equal(page.run('restartInProgress'), false);
+  assert.equal(page.elements.get('service-idle-restart-button').disabled, false);
+  assert.deepEqual(page.calls.filter(call => call.method === 'POST').map(call => call.body), [{ mode: 'when-idle' }]);
+});
+
+test('missing model capability and validation metadata never become support or a successful real test', async () => {
+  const page = catalogPage(); await settle();
+  const evidence = evidenceFor(page, 'cb-opus'), fields = detailFields(evidence);
+  for (const key of ['图片', '客户端工具', '思考', '缓存', '上下文']) assert.equal(fields[key], '未确认');
+  assert.equal(fields['调用验证'], '尚未验证'); assert.equal(fields['指令处理'], '尚未取得接入方式');
+  assert.match(listText(evidence), /未知能力不会标成支持/);
+  assert.equal(inputFor(page, 'cb-opus').checked, true);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('model capability detail separates explicit support, precise effort levels and compatibility from a completed call', async () => {
+  const models = completeModels(), target = models.models.find(model => model.id === 'cb-opus');
+  target.capabilities = { images: { support: false, source: 'remote', note: '目录不支持图片' }, tools: { support: true, source: 'remote' },
+    reasoning: { support: true, efforts: ['medium', 'xhigh'], source: 'remote' }, cache: { support: null, source: 'unknown' },
+    contextWindow: { tokens: 300000, support: true, source: 'remote' } };
+  target.compatibility = { mode: 'protocol-adapter', label: '协议适配', note: '只保证已适配的协议字段。' };
+  target.verification = { state: 'passed', checkedAt: '2026-10-23T01:00:00.000Z', reason: '完成一次真实调用。' };
+  const page = catalogPage(models); await settle();
+  const evidence = evidenceFor(page, 'cb-opus'), fields = detailFields(evidence);
+  assert.match(fields['图片'], /^不支持/); assert.equal(fields['客户端工具'], '支持');
+  assert.match(fields['思考'], /medium、xhigh/); assert.equal(fields['缓存'], '未确认');
+  assert.equal(fields['上下文'], '300,000 Token'); assert.equal(fields['指令处理'], '协议适配');
+  assert.equal(fields['调用验证'], '已完成真实调用'); assert.ok(fields['验证时间']);
+  assert.match(listText(evidence), /一次调用完成不代表图片、工具和缓存均已验证/);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('a failed network call preserves declared model capability and all evidence strings remain inert text', async () => {
+  const models = completeModels(), target = models.models.find(model => model.id === 'cb-opus');
+  target.capabilities = { tools: { support: true, note: '<img src=x onerror=fixture>' }, cache: { support: null }, contextWindow: { tokens: -1 } };
+  target.compatibility = { label: '项目规则兼容模式', note: '<script>fixture</script>' };
+  target.verification = { state: 'failed', reason: '网络错误，不代表模型不支持工具。' };
+  const page = catalogPage(models); await settle();
+  const evidence = evidenceFor(page, 'cb-opus'), fields = detailFields(evidence);
+  assert.match(fields['客户端工具'], /^支持.*<img/); assert.equal(fields['上下文'], '未确认');
+  assert.equal(fields['调用验证'], '最近调用失败'); assert.match(fields['验证说明'], /网络错误/);
+  assert.equal(evidence.querySelectorAll('img').length + evidence.querySelectorAll('script').length, 0);
+  assert.equal(fields['兼容说明'], '<script>fixture</script>');
+});
+
+test('request diagnostics poll read-only, limit visible records and export only the selected same-origin report', async () => {
+  const records = Array.from({ length: 12 }, (_, index) => diagnosticRecord(`request_${index}`, { model: `<img data-fixture=${index}>` }));
+  const page = modernPage(call => {
+    if (call.path === '/api/request-diagnostics/request_0') return json({ request: { ...records[0], exportUrl: 'https://evil.invalid/private' } });
+  }, { diagnostics: { recent: records } }); await settle();
+  assert.equal(page.elements.get('diagnostics-recent-body').children.length, 10);
+  const before = page.calls.filter(call => call.path === '/api/request-diagnostics?limit=10').length;
+  for (const interval of page.intervals) interval.callback(); await settle();
+  assert.ok(page.calls.filter(call => call.path === '/api/request-diagnostics?limit=10').length > before);
+  page.elements.get('diagnostics-recent-body').querySelectorAll('button')[0].trigger('click'); await settle();
+  const fields = detailFields(page.elements.get('diagnostics-fields'));
+  assert.equal(fields['请求 ID'], 'request_0'); assert.equal(fields['使用渠道'], 'CodeBuddy');
+  assert.equal(fields['所选模型'], '<img data-fixture=0>'); assert.equal(fields['总耗时'], '1,234.5 ms');
+  assert.equal(fields['首响应耗时'], '50 ms'); assert.equal(fields['缓存命中 Token'], '未返回');
+  assert.equal(page.elements.get('diagnostics-fields').querySelectorAll('img').length, 0);
+  const link = page.elements.get('diagnostics-export-link');
+  assert.equal(link.hidden, false); assert.equal(link.href, '/api/request-diagnostics/request_0/export');
+  assert.equal(new URL(link.href, page.location).origin, page.location.origin);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('invalid IDs, missing reports and mismatched records never produce a diagnostic export link', async () => {
+  const page = modernPage(call => {
+    if (call.path === '/api/request-diagnostics/valid') return json({ request: diagnosticRecord('valid') });
+    if (call.path === '/api/request-diagnostics/missing') return json({ error: { message: 'not found' } }, 404);
+    if (call.path === '/api/request-diagnostics/mismatch') return json({ request: diagnosticRecord('different') });
+  }, { diagnostics: { recent: [diagnosticRecord('../private')] } }); await settle();
+  assert.equal(page.elements.get('diagnostics-recent-body').querySelectorAll('button')[0].disabled, true);
+  const count = page.calls.length;
+  await page.run("loadRequestDiagnostic('../private')"); assert.equal(page.calls.length, count);
+  await page.run("loadRequestDiagnostic('valid')");
+  assert.equal(page.elements.get('diagnostics-export-link').href, '/api/request-diagnostics/valid/export');
+  await page.run("loadRequestDiagnostic('missing')");
+  assert.match(page.elements.get('diagnostics-detail-note').textContent, /超出保留范围/);
+  assert.equal(page.elements.get('diagnostics-export-link').hidden, true);
+  assert.equal(page.elements.get('diagnostics-export-link').href, undefined, 'A missing report must clear the prior selected export.');
+  await page.run("loadRequestDiagnostic('mismatch')");
+  assert.match(page.elements.get('diagnostics-detail-note').textContent, /不一致/);
+  assert.equal(page.elements.get('diagnostics-export-link').hidden, true);
+  assert.equal(page.elements.get('diagnostics-export-link').hasAttribute('href'), false);
+});
+
+test('late diagnostic successes and failures cannot replace the newer selected report', async () => {
+  for (const staleResponse of [json({ request: diagnosticRecord('older') }), json({ error: { message: 'Fixture stale failure' } }, 503)]) {
+    const waiting = deferred();
+    const page = modernPage(call => {
+      if (call.path === '/api/request-diagnostics/older') return waiting.promise;
+      if (call.path === '/api/request-diagnostics/newer') return json({ request: diagnosticRecord('newer') });
+    }); await settle();
+    const old = page.run("loadRequestDiagnostic('older')"); await settle();
+    await page.run("loadRequestDiagnostic('newer')"); waiting.resolve(staleResponse); await old; await settle();
+    assert.equal(detailFields(page.elements.get('diagnostics-fields'))['请求 ID'], 'newer');
+    assert.equal(page.elements.get('diagnostics-detail-title').textContent, '请求详情');
+    assert.equal(page.elements.get('diagnostics-export-link').href, '/api/request-diagnostics/newer/export');
+    assert.doesNotMatch(page.elements.get('diagnostics-detail-note').textContent, /Fixture stale failure/);
+  }
 });

@@ -16,7 +16,7 @@ function json(res, status, data) {
 }
 
 export function createBridgeServer({ backend, gateway, integration, state, publicDir, baseUrl,
-  usageLedger = null, accountQuotas = null, providerQuotas = null,
+  usageLedger = null, accountQuotas = null, providerQuotas = null, requestDiagnostics = null,
   codeBuddyService = null, serviceControl = null, modelPolicy = null, modelDiscovery = null, cursorService = null, cursorProvider = null,
   getWithStatus = async () => ({ configured: false, running: false,
     model: { id: 'claude-opus-5-5', name: 'With · Opus 5.5' },
@@ -32,6 +32,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
   let verification = initialVerification;
   let verifying = null;
   let adminBusy = false;
+  let adminOperation = null;
 
   function checkBrowser(req) {
     const cookie = req.headers.cookie?.split(';').map((part) => part.trim())
@@ -125,6 +126,20 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       if (!url.pathname.startsWith('/api/')) throw new BridgeError('页面不存在。', 404);
       checkBrowser(req);
       if (req.method === 'GET') {
+        if (url.pathname === '/api/request-diagnostics' || url.pathname.startsWith('/api/request-diagnostics/')) {
+          if (!requestDiagnostics) throw new BridgeError('当前后台尚未启用请求诊断。', 503, 'diagnostics_unavailable');
+          if (url.pathname === '/api/request-diagnostics') {
+            const rawLimit = url.searchParams.get('limit');
+            if (rawLimit !== null && !/^(?:[1-9]|[1-9][0-9]|100)$/.test(rawLimit)) throw new BridgeError('诊断记录数量必须介于 1 和 100。', 400);
+            json(res, 200, await requestDiagnostics.snapshot({ limit: rawLimit === null ? 10 : Number(rawLimit) })); return;
+          }
+          const match = /^\/api\/request-diagnostics\/([A-Za-z0-9_-]{1,128})(\/export)?$/.exec(url.pathname);
+          if (!match) throw new BridgeError('诊断记录不存在。', 404, 'diagnostic_not_found');
+          const record = await (match[2] ? requestDiagnostics.exportReport(match[1]) : requestDiagnostics.detail(match[1]));
+          if (!record) throw new BridgeError('诊断记录尚未保存或已超出保留范围。', 404, 'diagnostic_not_found');
+          if (match[2]) res.setHeader('Content-Disposition', `attachment; filename="bifrost-request-${match[1]}.json"`);
+          json(res, 200, match[2] ? record : { request: record }); return;
+        }
         if (url.pathname === '/api/service/status') {
           if (!serviceControl) throw new BridgeError('当前运行版本尚未启用网页服务控制。', 503);
           json(res, 200, await serviceControl.status()); return;
@@ -198,15 +213,26 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
         throw new BridgeError('管理接口不存在。', 404);
       }
       if (req.method !== 'POST') throw new BridgeError('请求方法不支持。', 405);
+      if (serviceControl?.draining && url.pathname !== '/api/service/restart/cancel') {
+        throw new BridgeError('网关正在重启，请恢复连接后再操作。', 503, 'gateway_restarting');
+      }
       if (adminBusy) throw new BridgeError('另一个管理操作正在执行。', 409);
       adminBusy = true;
+      adminOperation = url.pathname;
       try {
         const body = await bodyJson(req, url.pathname === '/api/model-settings' ? 1024 * 1024 : 64 * 1024);
+        if (url.pathname === '/api/service/restart/cancel') {
+          if (!serviceControl) throw new BridgeError('当前运行版本尚未启用网页服务控制。', 503);
+          if (body === null || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) throw new BridgeError('取消排队只接受空对象。', 400);
+          const cancelled = await serviceControl.cancel();
+          if (!cancelled) throw new BridgeError('重启已开始，无法取消。', 409, 'restart_committed');
+          json(res, 200, { cancelled: true }); return;
+        }
         if (url.pathname === '/api/service/restart') {
           if (!serviceControl) throw new BridgeError('当前运行版本尚未启用网页服务控制。', 503);
           const result = await serviceControl.request(body);
-          if (res.destroyed) { serviceControl.cancel(); return; }
-          res.once('close', () => { if (!res.writableFinished) serviceControl.cancel(); });
+          if (res.destroyed) { await serviceControl.cancel(); return; }
+          res.once('close', () => { if (!res.writableFinished) void Promise.resolve(serviceControl.cancel()).catch(() => {}); });
           res.once('finish', () => { void serviceControl.activate(); });
           json(res, 202, result); return;
         }
@@ -266,13 +292,15 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
           await integration.restore(); json(res, 200, await integration.inspect()); return;
         }
         throw new BridgeError('管理接口不存在。', 404);
-      } finally { adminBusy = false; }
+      } finally { adminBusy = false; adminOperation = null; }
     } catch (error) {
       if (res.headersSent) { if (!res.writableEnded) res.destroy(); return; }
       json(res, error.status ?? 500, { error: { message: redact(error.message), code: error.code ?? 'bridge_error',
         ...(error.code === 'gateway_busy' && Number.isSafeInteger(error.activeRequests) ? { activeRequests: error.activeRequests } : {}) } });
     }
   });
+  Object.defineProperty(server, 'activeAdminOperations', { get: () =>
+    (adminBusy && !adminOperation?.startsWith('/api/service/') ? 1 : 0) + (verifying ? 1 : 0) });
   server.requestTimeout = 300_000;
   server.headersTimeout = 20_000;
   server.once('listening', () => {

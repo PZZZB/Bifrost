@@ -6,6 +6,7 @@ import { mergeCatalog, resolveBModel, appendCodeBuddyModel, appendCodeBuddyModel
 import { CODEBUDDY_RESPONSES_STATE_PREFIX } from './codebuddy-responses.mjs';
 import { resolveCursorModel, cursorModelAvailability } from './cursor-service.mjs';
 import { CURSOR_RESPONSES_STATE_PREFIX } from './cursor-responses.mjs';
+import { classifyDiagnosticFailure, normalizeDiagnosticRecord, responsesTerminalEvidence } from './request-diagnostics.mjs';
 
 export function keyMatches(actual, expected) {
   if (typeof actual !== 'string' || typeof expected !== 'string' || !expected) return false;
@@ -141,16 +142,20 @@ export class Gateway {
     codeBuddyProvider = null, codeBuddyEnabled = () => codeBuddyProvider !== null, modelPolicy = null,
     isDraining = () => false, cursorProvider = null, cursorEnabled = () => cursorProvider !== null,
     getCursorModels = async () => [], getCodeBuddyModels = null,
-    getCursorAuthorizationVersion = () => null, getCodeBuddyAuthorizationVersion = () => null }) {
+    getCursorAuthorizationVersion = () => null, getCodeBuddyAuthorizationVersion = () => null,
+    onDiagnostic = () => {}, getAuthorizationVersion = null }) {
     if (typeof getAProvider !== 'function') throw new TypeError('getAProvider is required for account routing.');
     if (codeBuddyProvider !== null && (typeof codeBuddyProvider.status !== 'function' || typeof codeBuddyProvider.request !== 'function') ||
         typeof codeBuddyEnabled !== 'function' || getCodeBuddyModels !== null && typeof getCodeBuddyModels !== 'function') throw new TypeError('Invalid CodeBuddy Responses provider.');
     if (cursorProvider !== null && (typeof cursorProvider.status !== 'function' || typeof cursorProvider.request !== 'function') ||
         typeof cursorEnabled !== 'function' || typeof getCursorModels !== 'function') throw new TypeError('Invalid Cursor Responses provider.');
     if (typeof getCursorAuthorizationVersion !== 'function' || typeof getCodeBuddyAuthorizationVersion !== 'function') throw new TypeError('Invalid account catalog version getters.');
+    if (typeof onDiagnostic !== 'function' || getAuthorizationVersion !== null && typeof getAuthorizationVersion !== 'function') throw new TypeError('Invalid request diagnostic hooks.');
     Object.assign(this, { backend, gatewayKey, getAProvider, fetchImpl, upstream, catalogWaitMs, onUsage,
       codeBuddyProvider, codeBuddyEnabled, modelPolicy, isDraining, cursorProvider, cursorEnabled, getCursorModels, getCodeBuddyModels,
-      getCursorAuthorizationVersion, getCodeBuddyAuthorizationVersion });
+      getCursorAuthorizationVersion, getCodeBuddyAuthorizationVersion, onDiagnostic });
+    this.getAuthorizationVersion = getAuthorizationVersion ?? (account => account === 'Cursor' ? getCursorAuthorizationVersion()
+      : account === 'CodeBuddy' ? getCodeBuddyAuthorizationVersion() : null);
     this.pendingRequests = 0;
     this.bCatalog = null; this.catalogRefresh = null;
     this.threadTraffic = new Map();
@@ -311,13 +316,41 @@ export class Gateway {
 
   async proxy(req, res, url) {
     this.pendingRequests++;
-    try { return await this.forward(req, res, url); }
-    finally { this.pendingRequests--; }
+    const path = backendPath(url.pathname);
+    const diagnostic = ['/responses', '/responses/compact'].includes(path) ? {
+      requestId: randomUUID(), time: new Date().toISOString(), started: performance.now(), stage: 'authentication',
+      account: null, model: null, upstreamModel: null, httpStatus: null, firstResponseMs: null,
+      complete: false, delivered: false, terminalVerified: false, authorizationVersion: null,
+    } : null;
+    try { return await this.forward(req, res, url, diagnostic); }
+    catch (error) {
+      if (diagnostic) {
+        if (!diagnostic.failure) diagnostic.failure = classifyDiagnosticFailure(error, { stage: diagnostic.stage,
+          httpStatus: diagnostic.httpStatus, interrupted: diagnostic.interrupted });
+        diagnostic.httpStatus ??= Number.isInteger(error?.status) ? error.status : null;
+      }
+      throw error;
+    } finally {
+      if (diagnostic) {
+        const complete = diagnostic.complete && diagnostic.delivered && diagnostic.httpStatus >= 200 && diagnostic.httpStatus < 300 && !diagnostic.failure;
+        const status = diagnostic.interrupted ? 'interrupted' : diagnostic.failure ? 'failed'
+          : complete && diagnostic.toolPending ? 'tool_pending' : complete ? 'completed' : 'incomplete';
+        const record = normalizeDiagnosticRecord({ ...diagnostic, status, usage: diagnostic.usage,
+          durationMs: diagnostic.durationMs ?? performance.now() - diagnostic.started,
+          ...(diagnostic.failure ?? { errorCode: 'incomplete_response', failureStage: 'upstream_response' }) });
+        if (record) {
+          try { Promise.resolve(this.onDiagnostic({ ...record, terminalVerified: status === 'completed' && diagnostic.terminalVerified === true,
+            authorizationVersion: diagnostic.authorizationVersion })).catch(() => {}); } catch { /* Diagnostics must never change forwarding. */ }
+        }
+      }
+      this.pendingRequests--;
+    }
   }
 
-  async forward(req, res, url) {
+  async forward(req, res, url, diagnostic = null) {
     const key = req.headers['x-account-bridge-key'] ?? req.headers.authorization?.replace(/^Bearer\s+/i, '');
     if (!keyMatches(key, this.gatewayKey)) throw new BridgeError('网关认证失败。', 401, 'invalid_gateway_key');
+    if (diagnostic) diagnostic.stage = 'routing';
     if (this.isDraining()) throw new BridgeError('网关正在重启，请稍后重试。', 503, 'gateway_restarting');
     const path = backendPath(url.pathname);
     if (!path) throw new BridgeError('未实现该模型接口。', 404);
@@ -326,7 +359,7 @@ export class Gateway {
     }
     const inference = path === '/responses';
     const modelRequest = inference || path === '/responses/compact';
-    const requestId = randomUUID();
+    const requestId = diagnostic?.requestId ?? randomUUID();
     if (inference) { this.metrics.requests++; this.metrics.active++; }
     const abort = new AbortController();
     res.on('close', () => { if (!res.writableEnded) abort.abort(); });
@@ -340,16 +373,26 @@ export class Gateway {
         const data = JSON.parse(Buffer.concat(jsonChunks).toString('utf8'));
         usage = data.usage ?? null; responseId = data.id ?? null;
         if (typeof data.error?.message === 'string') requestError = redact(data.error.message);
+        if (diagnostic && data.error) diagnostic.failure = classifyDiagnosticFailure({ code: data.error.code ?? data.error.type },
+          { httpStatus, stage: 'upstream_response' });
         if (updateCompletion) complete = path === '/responses/compact'
           ? httpStatus >= 200 && httpStatus < 300 : data.status === 'completed';
+        if (diagnostic && updateCompletion && path === '/responses') Object.assign(diagnostic, responsesTerminalEvidence(data));
         if (!response?.bridgeUsage) this.metrics.lastUsage = usage;
       } catch { /* Incomplete JSON has unknown usage. Never estimate it. */ }
     };
     try {
       if (path === '/models') { await this.catalog(req, res, url, abort.signal); return; }
+      if (diagnostic) diagnostic.stage = 'validation';
       const originalBody = await readBody(req);
       {
         const { data, alias, codeBuddy, cursor } = parseModel(originalBody, req.headers);
+        if (diagnostic) {
+          diagnostic.account = cursor ? 'Cursor' : codeBuddy ? 'CodeBuddy' : alias ? 'B' : 'A';
+          diagnostic.model = data.model; diagnostic.upstreamModel = cursor?.upstream ?? alias?.upstream ?? data.model;
+          diagnostic.stage = 'routing';
+          try { diagnostic.authorizationVersion = this.getAuthorizationVersion(diagnostic.account); } catch { /* Unknown authorization generation is not guessed. */ }
+        }
         this.modelPolicy?.assertEnabled(data.model);
         const account = cursor ? 'Cursor' : codeBuddy ? 'CodeBuddy' : alias ? 'B' : 'A';
         route = { account, model: data.model, upstreamModel: cursor?.upstream ?? alias?.upstream ?? data.model };
@@ -370,6 +413,7 @@ export class Gateway {
           if (provider === null || (cursor ? this.cursorEnabled() : this.codeBuddyEnabled()) !== true) {
             throw new BridgeError(`${cursor ? 'Cursor' : 'CodeBuddy'} Responses 通道尚未启用。`, 503, cursor ? 'cursor_unavailable' : 'codebuddy_unavailable');
           }
+          if (diagnostic) diagnostic.stage = 'upstream_request';
           // Only content negotiation reaches the adapter. Neither A/B auth nor
           // the management key, cookies or native routing headers cross over.
           response = await provider.request({ path: `${path}${url.search}`,
@@ -384,11 +428,16 @@ export class Gateway {
           const headers = { ...req.headers };
           if (alias) { delete headers['content-encoding']; delete headers['content-length']; }
           const options = { method: req.method, headers, body, signal: abort.signal };
+          if (diagnostic) diagnostic.stage = 'upstream_request';
           response = alias ? await this.fetchUpstream(`${path}${url.search}`, options) :
             await this.fetchAccountA(`${path}${url.search}`, options);
         }
       }
       httpStatus = response.status;
+      if (diagnostic) {
+        diagnostic.httpStatus = httpStatus; diagnostic.upstreamModel = route.upstreamModel; diagnostic.stage = 'upstream_response';
+        if (!response.ok) diagnostic.failure = classifyDiagnosticFailure(null, { httpStatus, stage: 'upstream_response' });
+      }
       const outputHeaders = { 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' };
       for (const [name, value] of response.headers) {
         if (['content-type', 'retry-after', 'x-request-id'].includes(name) ||
@@ -400,9 +449,12 @@ export class Gateway {
         if (event.response?.usage) usage = event.response.usage;
         if (event.type === 'response.completed' && event.response?.status === 'completed') {
           complete = true;
+          if (diagnostic) Object.assign(diagnostic, responsesTerminalEvidence(event.response));
           if (!response?.bridgeUsage) this.metrics.lastUsage = event.response.usage ?? null;
         }
         if (['error', 'response.failed'].includes(event.type)) {
+          if (diagnostic) diagnostic.failure = classifyDiagnosticFailure({ code: event.error?.code ?? event.error?.type ?? event.response?.error?.code },
+            { httpStatus, stage: 'stream' });
           requestError = redact(event.error?.message ?? event.response?.error?.message ?? '模型请求失败');
           this.metrics.lastError = requestError;
         }
@@ -410,12 +462,18 @@ export class Gateway {
       inspectJson = modelRequest && (path === '/responses/compact' || response.headers.get('content-type')?.includes('application/json'));
       if (response.body) {
         for await (const bytes of response.body) {
+          if (diagnostic) {
+            if (diagnostic.firstResponseMs === null && bytes.byteLength) diagnostic.firstResponseMs = performance.now() - diagnostic.started;
+            diagnostic.stage = 'stream';
+          }
           if (inference && !inspectJson) sse.push(bytes);
           if (inspectJson) {
             jsonBytes += bytes.length;
             if (jsonBytes <= 8 * 1024 * 1024) jsonChunks.push(bytes);
           }
+          if (diagnostic) diagnostic.stage = 'downstream';
           if (!res.write(bytes)) await once(res, 'drain', { signal: abort.signal });
+          if (diagnostic) diagnostic.stage = 'stream';
         }
       }
       readJsonUsage(true);
@@ -441,6 +499,8 @@ export class Gateway {
       }
       throw error;
     } finally {
+      if (diagnostic) Object.assign(diagnostic, { complete, delivered, httpStatus, usage,
+        interrupted: abort.signal.aborted, durationMs: performance.now() - diagnostic.started });
       if (modelRequest && route) {
         // A complete JSON chunk may already have arrived before downstream write failed.
         readJsonUsage();
@@ -449,6 +509,7 @@ export class Gateway {
           catch { usage = null; }
           this.metrics.lastUsage = usage;
         }
+        if (diagnostic) diagnostic.usage = usage;
         try {
           await this.onUsage({ requestId, time: new Date().toISOString(), ...route,
             threadId: requestThreadId(req.headers), responseId, httpStatus,

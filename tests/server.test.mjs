@@ -21,7 +21,7 @@ async function fixture(t, extra = {}) {
   const cookie = root.headers.get('set-cookie').split(';')[0];
   const statusResponse = await fetch(`${url}/api/status`, { headers: { cookie } });
   const status = await statusResponse.json();
-  return { url, cookie, status, root, backend };
+  return { url, cookie, status, root, backend, server };
 }
 
 test('management requires an HttpOnly session and does not publish gateway credentials in status', async (t) => {
@@ -31,6 +31,84 @@ test('management requires an HttpOnly session and does not publish gateway crede
   assert.equal((await fetch(`${url}/api/status`)).status, 401);
   assert.equal(status.ready, true);
   assert.ok(!JSON.stringify(status).includes('private-gateway-key-test'));
+});
+
+test('diagnostic history, detail and download require the local session and validate identifiers', async t => {
+  const id = 'e053b2e4-d1a6-4b0e-b3ef-5df7c434aa34';
+  const record = { requestId: id, account: 'CodeBuddy', model: 'safe-model', upstreamModel: 'actual-model',
+    status: 'failed', httpStatus: 502, failureStage: 'upstream_request', errorCode: 'network_failed' };
+  const reads = [];
+  const { url, cookie } = await fixture(t, { requestDiagnostics: {
+    snapshot: ({ limit }) => { reads.push(['list', limit]); return { recent: [record] }; },
+    detail: value => { reads.push(['detail', value]); return value === id ? record : null; },
+    exportReport: value => { reads.push(['export', value]); return value === id ? { version: 1, request: record } : null; },
+  } });
+  for (const path of ['/api/request-diagnostics', `/api/request-diagnostics/${id}`, `/api/request-diagnostics/${id}/export`]) {
+    assert.equal((await fetch(url + path)).status, 401);
+  }
+  assert.deepEqual(reads, []);
+  const headers = { cookie };
+  assert.deepEqual((await (await fetch(`${url}/api/request-diagnostics?limit=7`, { headers })).json()).recent, [record]);
+  assert.deepEqual(await (await fetch(`${url}/api/request-diagnostics/${id}`, { headers })).json(), { request: record });
+  const exported = await fetch(`${url}/api/request-diagnostics/${id}/export`, { headers });
+  assert.equal(exported.status, 200); assert.equal(exported.headers.get('content-type'), 'application/json; charset=utf-8');
+  assert.equal(exported.headers.get('content-disposition'), `attachment; filename="bifrost-request-${id}.json"`);
+  assert.deepEqual((await exported.json()).request, record);
+  const before = reads.length;
+  for (const suffix of ['?limit=0', '?limit=101', '?limit=1.5', '?limit=bad']) {
+    assert.equal((await fetch(`${url}/api/request-diagnostics${suffix}`, { headers })).status, 400);
+  }
+  assert.equal(reads.length, before);
+  assert.equal((await fetch(`${url}/api/request-diagnostics/not-saved`, { headers })).status, 404);
+  assert.equal((await fetch(`${url}/api/request-diagnostics/${id}/extra/path`, { headers })).status, 404);
+});
+
+test('queued restart cancellation is authenticated, does not activate restart, and reports committed transitions', async t => {
+  let cancelled = 0, activated = 0, canCancel = true;
+  const { url, cookie, status } = await fixture(t, { serviceControl: {
+    cancel: async () => { cancelled++; return canCancel; }, activate: () => { activated++; },
+  } });
+  const path = `${url}/api/service/restart/cancel`;
+  assert.equal((await fetch(path, { method: 'POST', body: '{}' })).status, 401);
+  assert.equal((await fetch(path, { method: 'POST', headers: { cookie }, body: '{}' })).status, 403);
+  const headers = { cookie, 'X-Bridge-CSRF': status.csrfToken };
+  assert.equal((await fetch(path, { method: 'POST', headers, body: '{"command":"untrusted"}' })).status, 400);
+  for (const body of ['null', '[]', '0', 'false']) assert.equal((await fetch(path, { method: 'POST', headers, body })).status, 400);
+  assert.equal(cancelled, 0);
+  assert.deepEqual(await (await fetch(path, { method: 'POST', headers, body: '{}' })).json(), { cancelled: true });
+  assert.equal(cancelled, 1); assert.equal(activated, 0);
+  canCancel = false;
+  const committed = await fetch(path, { method: 'POST', headers, body: '{}' });
+  assert.equal(committed.status, 409); assert.equal((await committed.json()).error.code, 'restart_committed');
+});
+
+test('draining blocks new account mutations while queued restart can still be cancelled', async t => {
+  let logins = 0;
+  const { url, cookie, status, server } = await fixture(t, { backend: { rpc: { running: true }, account: null, login: {},
+    readAccount: async () => null, publicBinding: () => null, beginLogin: () => { logins++; } },
+    serviceControl: { draining: true, cancel: async () => true } });
+  const headers = { cookie, 'X-Bridge-CSRF': status.csrfToken };
+  const blocked = await fetch(`${url}/api/login`, { method: 'POST', headers, body: '{}' });
+  assert.equal(blocked.status, 503); assert.equal((await blocked.json()).error.code, 'gateway_restarting');
+  assert.equal(logins, 0); assert.equal(server.activeAdminOperations, 0);
+  assert.equal((await fetch(`${url}/api/service/restart/cancel`, { method: 'POST', headers, body: '{}' })).status, 200);
+});
+
+test('idle accounting includes account writes but excludes the service control acknowledgement itself', async t => {
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  let managedServer;
+  const page = await fixture(t, { backend: { rpc: { running: true }, account: null, login: {},
+    readAccount: async () => null, publicBinding: () => null, beginLogin: async () => { entered(); await gate; return { url: 'https://auth.openai.com/' }; } },
+    serviceControl: { request: async body => { assert.deepEqual(body, { mode: 'when-idle' }); assert.equal(managedServer.activeAdminOperations, 0); return { accepted: true }; },
+      activate: async () => {} } });
+  managedServer = page.server;
+  const headers = { cookie: page.cookie, 'X-Bridge-CSRF': page.status.csrfToken };
+  const login = fetch(`${page.url}/api/login`, { method: 'POST', headers, body: '{}' }); await started;
+  assert.equal(page.server.activeAdminOperations, 1);
+  release(); assert.equal((await login).status, 200); assert.equal(page.server.activeAdminOperations, 0);
+  const queued = await fetch(`${page.url}/api/service/restart`, { method: 'POST', headers, body: '{"mode":"when-idle"}' });
+  assert.equal(queued.status, 202); assert.equal(page.server.activeAdminOperations, 0);
 });
 
 test('CSRF and cross-origin requests cannot change login or configuration', async (t) => {

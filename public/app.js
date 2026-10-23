@@ -37,6 +37,10 @@ const elements = Object.fromEntries([
     ['plan', 'state', 'identity', 'source', 'windows', 'credits', 'error', 'updated', 'notice', 'usage-link'].map(field => `quota-${account}-${field}`)),
   'service-state', 'service-ready', 'service-independent', 'service-active', 'service-restart-button',
   'service-message', 'service-error', 'service-confirmation', 'service-confirmation-message', 'service-confirm-button', 'service-cancel-button',
+  'service-running-version', 'service-installed-version', 'service-started-at', 'service-update-state',
+  'service-idle-restart-button', 'service-idle-cancel-button', 'service-queue-message',
+  'diagnostics-state', 'diagnostics-recent-body', 'diagnostics-error', 'diagnostics-detail',
+  'diagnostics-detail-title', 'diagnostics-export-link', 'diagnostics-fields', 'diagnostics-detail-note',
   'model-settings-state', 'model-settings-list', 'model-settings-save-button', 'model-settings-reset-button', 'model-settings-refresh-button',
   'model-settings-message', 'model-settings-error', 'model-settings-search', 'model-settings-summary', 'model-settings-discovery',
   'cursor-state', 'cursor-login-button', 'cursor-logout-button', 'cursor-authorization-link', 'cursor-login-state',
@@ -69,9 +73,14 @@ let serviceError = '';
 let restartInProgress = false;
 let restartConfirmation = false;
 let restartActiveRequests = 0;
+let queuedRestartToken = null;
+let diagnosticsRequest = null;
+let diagnosticsData = null;
+let diagnosticDetailGeneration = 0;
 let modelSettings = null;
 let modelCatalogModels = null;
 let modelSettingsRequest = null;
+let modelSettingsGeneration = 0;
 let modelSettingsUnavailable = false;
 let modelSettingsError = '';
 let modelDraft = new Map();
@@ -227,16 +236,37 @@ function renderServiceControl() {
   const data = serviceStatus;
   const reportedError = serviceError || (typeof data?.error === 'string' ? data.error : data?.error?.message || '');
   const idle = managementConnected && !busyAction && !restartInProgress;
+  const readable = !serviceUnavailable && serviceError === '';
+  const cleanupFailed = data?.restart?.state === 'cleanup_failed';
   text('service-ready', data ? data.ready === true ? '已就绪' : '尚未就绪' : '未取得状态');
   text('service-independent', data ? data.independentOfCodex === true ? '独立运行，关闭 Codex 后继续服务' : '尚未确认独立运行' : '未取得状态');
   text('service-active', Number.isSafeInteger(data?.activeRequests) && data.activeRequests >= 0 ? data.activeRequests.toLocaleString('zh-CN') : '未返回');
+  const version = data?.version;
+  const versionLabel = value => value ? `${typeof value.revision === 'string' ? value.revision.slice(0, 12)
+    : typeof value.fingerprint === 'string' ? value.fingerprint.slice(0, 12) : '未取得版本'}${typeof value.revision === 'string' && typeof value.fingerprint === 'string' ? ` · ${value.fingerprint.slice(0, 8)}` : ''}${value.dirty === true ? '（含未提交改动）' : ''}` : '未返回（需更新后台）';
+  text('service-running-version', versionLabel(version?.running));
+  text('service-installed-version', versionLabel(version?.installed));
+  text('service-started-at', version?.running?.startedAt ? tokenTime(version.running.startedAt, 'America/Los_Angeles') : '未返回');
+  text('service-update-state', version?.updatePending === true ? '有更新，重启网关后生效'
+    : version?.state === 'current' ? '后台代码已生效' : '尚未取得版本状态');
   if (restartInProgress) pill('service-state', '正在重启', 'pending');
   else if (serviceUnavailable) pill('service-state', '待更新服务', 'pending');
+  else if (cleanupFailed && readable) pill('service-state', '清理失败', 'error');
   else if (reportedError) pill('service-state', '状态需检查', 'error');
+  else if (data?.restart?.state === 'queued' || data?.restart?.state === 'prepared' && data.restart.mode === 'when-idle') pill('service-state', '等待空闲重启', 'pending');
   else if (data?.pending) pill('service-state', '等待重启', 'pending');
+  else if (version?.updatePending === true) pill('service-state', '有待生效更新', 'pending');
   else pill('service-state', data?.ready ? '已就绪' : '尚未就绪', data?.ready ? 'success' : 'pending');
   elements['service-restart-button'].disabled = !idle || serviceUnavailable || serviceError !== '' || data?.supported !== true || data?.pending === true || restartConfirmation;
-  text('service-restart-button', restartInProgress || data?.pending ? '正在重启…' : '重启网关服务');
+  text('service-restart-button', restartInProgress || data?.draining ? '正在重启…' : '立即重启');
+  const queued = data?.restart?.mode === 'when-idle' && ['prepared', 'queued'].includes(data.restart.state);
+  elements['service-idle-restart-button'].disabled = !idle || !readable || data?.supported !== true || data?.capabilities?.whenIdle !== true || Boolean(data?.pending) || restartConfirmation;
+  elements['service-idle-cancel-button'].hidden = !queued && !cleanupFailed;
+  elements['service-idle-cancel-button'].disabled = !idle || !readable || data?.capabilities?.cancelQueued !== true;
+  text('service-idle-cancel-button', cleanupFailed ? '重试取消' : '取消排队');
+  text('service-queue-message', cleanupFailed ? '重启请求文件清理失败，网关仍暂停接收新请求。请重试取消，清理成功后恢复服务。'
+    : queued ? `已排队，等待网关请求与受管理的工具回合空闲后重启。${data.activeRequests ? `当前进行中 ${data.activeRequests} 项。` : '正在确认空闲状态。'}可随时取消排队。`
+    : data && data.capabilities?.whenIdle !== true ? '空闲重启与版本信息需在更新后台后可用。' : '等待网关请求与 Cursor 工具回合；客户端本地任务继续由客户端管理。');
   elements['service-confirmation'].hidden = !restartConfirmation;
   text('service-confirmation-message', restartActiveRequests > 0
     ? `当前仍有 ${restartActiveRequests.toLocaleString('zh-CN')} 个请求进行中。现在重启会中断这些请求，是否继续？`
@@ -248,6 +278,29 @@ function renderServiceControl() {
   elements['service-error'].hidden = !serviceUnavailable && !reportedError;
   if (!restartInProgress && !restartConfirmation && !serviceUnavailable && !serviceError && data?.message) text('service-message', data.message);
   else if (!restartInProgress && !restartConfirmation && !serviceUnavailable && !serviceError && data?.supported === false) text('service-message', '当前运行方式暂不支持网页重启，请按部署方式手动重启服务；Windows 可在项目目录运行 .\\Start-Bridge.ps1 -Restart -Open。');
+}
+
+async function queueServiceRestart() {
+  if (!managementConnected || busyAction || restartInProgress || serviceUnavailable || serviceError !== ''
+    || serviceStatus?.supported !== true || serviceStatus?.pending || serviceStatus?.capabilities?.whenIdle !== true) return;
+  await action('service-queue', async () => {
+    const previousToken = status.csrfToken;
+    await post('/api/service/restart', { mode: 'when-idle' });
+    queuedRestartToken = previousToken;
+    await refreshServiceStatus();
+    text('service-message', '已安排空闲后重启，当前回合可以继续。');
+  });
+}
+
+async function cancelQueuedRestart() {
+  if (!managementConnected || busyAction || restartInProgress || serviceUnavailable || serviceError !== ''
+    || serviceStatus?.capabilities?.cancelQueued !== true) return;
+  await action('service-queue-cancel', async () => {
+    await post('/api/service/restart/cancel');
+    queuedRestartToken = null;
+    await refreshServiceStatus();
+    text('service-message', '已取消排队重启。');
+  });
 }
 
 async function refreshServiceStatus() {
@@ -323,6 +376,38 @@ function renderModelSettingsControls() {
   elements['model-settings-error'].hidden = !modelSettingsUnavailable && !modelSettingsError;
 }
 
+function modelEvidenceDetails(model) {
+  const details = document.createElement('details'); details.className = 'model-evidence';
+  const verification = model.verification;
+  const verificationLabel = verification?.state === 'passed' ? '已完成真实调用'
+    : verification?.state === 'failed' ? '最近调用失败' : '尚未验证';
+  const summary = document.createElement('summary'); summary.textContent = `能力与验证 · ${verificationLabel}`;
+  const fields = document.createElement('dl'); fields.className = 'model-capabilities';
+  const appendField = (name, value) => {
+    const row = document.createElement('div'), label = document.createElement('dt'), content = document.createElement('dd');
+    label.textContent = name; content.textContent = value; row.append(label, content); fields.append(row);
+  };
+  const capabilities = model.capabilities;
+  const support = value => value?.support === true ? '支持' : value?.support === false ? '不支持' : '未确认';
+  for (const [key, label] of [['images', '图片'], ['tools', '客户端工具'], ['reasoning', '思考'], ['cache', '缓存']]) {
+    const value = capabilities?.[key];
+    const efforts = key === 'reasoning' && Array.isArray(value?.efforts) ? value.efforts.filter(effort => typeof effort === 'string').join('、') : '';
+    appendField(label, `${support(value)}${efforts ? `（${efforts}）` : ''}${typeof value?.note === 'string' && value.note ? ` · ${value.note}` : ''}`);
+  }
+  const context = capabilities?.contextWindow;
+  appendField('上下文', Number.isSafeInteger(context?.tokens) && context.tokens > 0 ? `${context.tokens.toLocaleString('zh-CN')} Token` : '未确认');
+  appendField('指令处理', model.compatibility?.label || '尚未取得接入方式');
+  if (typeof model.compatibility?.note === 'string') appendField('兼容说明', model.compatibility.note);
+  appendField('调用验证', verificationLabel);
+  if (verification?.checkedAt) appendField('验证时间', tokenTime(verification.checkedAt, 'America/Los_Angeles'));
+  if (typeof verification?.reason === 'string' && verification.reason) appendField('验证说明', verification.reason);
+  const note = document.createElement('p'); note.className = 'footnote';
+  note.textContent = capabilities ? '目录能力与实际调用验证分别展示；一次调用完成不代表图片、工具和缓存均已验证。刷新账号目录可更新调用验证状态。'
+    : '当前后台未提供模型能力信息；更新并重启网关后查看，未知能力不会标成支持。';
+  details.append(summary, fields, note);
+  return details;
+}
+
 function renderModelSettingsList() {
   const groups = new Map();
   for (const model of filteredModels()) {
@@ -366,7 +451,7 @@ function renderModelSettingsList() {
         reason.textContent = model.reason || '源端当前不可用或尚未适配。';
         details.append(reason);
       }
-      label.append(checkbox, details); group.append(label);
+      label.append(checkbox, details); group.append(label, modelEvidenceDetails(model));
     }
     nodes.push(group);
   }
@@ -381,9 +466,11 @@ function renderModelSettingsList() {
 
 async function refreshModelSettings({ replaceDraft = false } = {}) {
   if (modelSettingsRequest) return modelSettingsRequest;
-  modelSettingsRequest = (async () => {
+  const generation = modelSettingsGeneration;
+  const pending = (async () => {
     try {
       const data = await request('/api/model-settings', { signal: AbortSignal.timeout(15000) });
+      if (generation !== modelSettingsGeneration) return;
       if (data.revision == null || !Array.isArray(data.models) || data.models.some(model => typeof model?.id !== 'string' || typeof model.enabled !== 'boolean'
         || model.available !== undefined && typeof model.available !== 'boolean' || model.reason !== undefined && typeof model.reason !== 'string')) throw new Error('服务返回的模型列表格式无效。');
       modelSettingsLoaded = true;
@@ -408,6 +495,7 @@ async function refreshModelSettings({ replaceDraft = false } = {}) {
       if (!completeModelDiscoverySupported()) discovery.unshift('当前后台尚未加载完整模型目录功能，下面仅显示旧目录中的已保存模型。请先重启网关服务，恢复后再刷新账号目录；仅刷新网页不会更新后台。');
       text('model-settings-discovery', discovery.join(' · ')); elements['model-settings-discovery'].hidden = !discovery.length;
     } catch (error) {
+      if (generation !== modelSettingsGeneration) return;
       modelSettingsUnavailable = error.status === 404;
       modelSettingsError = modelSettingsUnavailable ? '' : error.message || '暂时无法读取模型列表。';
       if (!modelSettings) {
@@ -415,10 +503,15 @@ async function refreshModelSettings({ replaceDraft = false } = {}) {
         empty.textContent = modelSettingsUnavailable ? '重启服务后可用。' : '模型列表暂时无法读取。';
         elements['model-settings-list'].replaceChildren(empty);
       }
-    } finally { modelSettingsRequest = null; renderChannelModelCounts(); renderModelSettingsControls(); }
+    } finally {
+      if (modelSettingsRequest === pending) {
+        modelSettingsRequest = null; renderChannelModelCounts(); renderModelSettingsControls();
+      }
+    }
   })();
+  modelSettingsRequest = pending;
   renderModelSettingsControls();
-  return modelSettingsRequest;
+  return pending;
 }
 async function refreshAuthorizedModelSettings() {
   if (modelSettingsRequest) await modelSettingsRequest;
@@ -723,7 +816,19 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         incoming = await request('/api/status', { signal: AbortSignal.timeout(5000) });
       }
       if (epoch !== accountStateEpoch.b) return status;
+      const previousToken = status?.csrfToken;
       status = incoming;
+      if (previousToken && status.csrfToken && status.csrfToken !== previousToken) {
+        modelSettingsGeneration++;
+        modelSettingsRequest = null;
+        modelSettingsLoaded = false;
+      }
+      if (queuedRestartToken && status.csrfToken && status.csrfToken !== queuedRestartToken) {
+        queuedRestartToken = null;
+        text('service-message', '网关已完成重启，新后台已连接。');
+        notify('网关已完成重启，请核对版本和模型目录。');
+        modelSettingsLoaded = false;
+      }
       managementConnected = true;
       managementStatusError = false;
       render();
@@ -731,6 +836,7 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         if (status.backend?.account && !modelsLoaded) void loadModels();
         if (!status.backend?.account) modelsLoaded = false;
         void refreshTokenUsage();
+        void refreshRequestDiagnostics();
         void refreshWith();
         void refreshCodeBuddy();
         void refreshCursor();
@@ -746,7 +852,7 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
       managementConnected = false;
       managementStatusError = true;
       elements['connection-dot'].className = 'status-dot failed';
-      text('connection-label', restartInProgress ? '正在等待网关恢复连接' : '本机服务连接中断，正在重试');
+      text('connection-label', restartInProgress || queuedRestartToken ? '正在等待网关恢复连接' : '本机服务连接中断，正在重试');
       document.querySelectorAll('button:not(#quota-refresh-button):not([role="tab"])').forEach((button) => { button.disabled = true; });
       renderAccountSummaries();
       throw error;
@@ -939,6 +1045,94 @@ function sourceMetadata(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value.toLocaleString('zh-CN');
   if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 160);
   return '未返回';
+}
+
+const diagnosticStatusLabels = { completed: '完成', tool_pending: '等待工具结果', incomplete: '未完成', failed: '失败', interrupted: '已中断' };
+const diagnosticStages = { gateway_auth: '网关认证', request_validation: '请求格式', model_policy: '模型开关',
+  account_auth: '账号认证', adapter: '协议适配', upstream: '上游服务', stream: '响应流', client_disconnect: '客户端断开',
+  gateway: '网关', validation: '请求格式', routing: '模型分流', authentication: '账号认证', transport: '上游连接', response: '上游响应',
+  upstream_request: '上游请求', upstream_response: '上游响应', downstream: '返回客户端' };
+function diagnosticDuration(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${value.toLocaleString('zh-CN', { maximumFractionDigits: 1 })} ms` : '未返回';
+}
+function diagnosticId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null; }
+
+function renderRequestDiagnostics() {
+  const recent = Array.isArray(diagnosticsData?.recent) ? diagnosticsData.recent.slice(0, 10) : [];
+  const rows = recent.map(record => {
+    const row = document.createElement('tr');
+    for (const value of [tokenTime(record.time, 'America/Los_Angeles'), record.account || '尚未识别', record.model || '尚未识别',
+      diagnosticStatusLabels[record.status] || '未知', diagnosticDuration(record.durationMs)]) {
+      const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
+    }
+    const cell = document.createElement('td'), button = document.createElement('button');
+    button.type = 'button'; button.className = 'button quiet small'; button.textContent = '查看';
+    const id = diagnosticId(record.requestId); button.disabled = !id;
+    button.addEventListener('click', () => { if (id) void loadRequestDiagnostic(id); });
+    cell.append(button); row.append(cell); return row;
+  });
+  if (!rows.length) {
+    const row = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 6; cell.className = 'empty-table';
+    cell.textContent = diagnosticsData ? '诊断启用后尚无请求记录' : '等待诊断服务'; row.append(cell); rows.push(row);
+  }
+  elements['diagnostics-recent-body'].replaceChildren(...rows);
+}
+
+async function refreshRequestDiagnostics() {
+  if (diagnosticsRequest) return diagnosticsRequest;
+  diagnosticsRequest = (async () => {
+    try {
+      diagnosticsData = await request('/api/request-diagnostics?limit=10', { signal: AbortSignal.timeout(5000) });
+      if (!Array.isArray(diagnosticsData.recent)) throw new Error('诊断记录格式无效。');
+      renderRequestDiagnostics();
+      const error = typeof diagnosticsData.error === 'string' ? diagnosticsData.error : diagnosticsData.error?.message;
+      text('diagnostics-error', error || ''); elements['diagnostics-error'].hidden = !error;
+      pill('diagnostics-state', error ? '记录需检查' : '已连接', error ? 'error' : 'success');
+    } catch (error) {
+      const unavailable = error.status === 404 || error.status === 503;
+      pill('diagnostics-state', unavailable ? '待更新后台' : '读取失败', unavailable ? 'pending' : 'error');
+      text('diagnostics-error', unavailable ? '当前后台尚未提供请求诊断；更新并重启网关后记录新请求。历史请求不会补造诊断数据。' : error.message || '请求诊断暂时无法读取。');
+      elements['diagnostics-error'].hidden = false;
+    } finally { diagnosticsRequest = null; }
+  })();
+  return diagnosticsRequest;
+}
+
+async function loadRequestDiagnostic(id) {
+  if (!diagnosticId(id)) return;
+  const generation = ++diagnosticDetailGeneration;
+  elements['diagnostics-detail'].hidden = false;
+  elements['diagnostics-export-link'].hidden = true; elements['diagnostics-export-link'].removeAttribute('href');
+  elements['diagnostics-fields'].replaceChildren();
+  text('diagnostics-detail-title', '正在读取请求详情'); text('diagnostics-detail-note', '');
+  try {
+    const data = await request(`/api/request-diagnostics/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) });
+    if (generation !== diagnosticDetailGeneration) return;
+    const record = data.request;
+    if (!record || record.requestId !== id) throw new Error('请求详情与所选记录不一致。');
+    const fields = [
+      ['请求 ID', id], ['时间', tokenTime(record.time, 'America/Los_Angeles')], ['使用渠道', record.account || '尚未识别'],
+      ['所选模型', record.model || '尚未识别'], ['上游模型', record.upstreamModel || '未返回'],
+      ['结果', diagnosticStatusLabels[record.status] || '未知'], ['HTTP 状态', record.httpStatus ?? '未返回'],
+      ['总耗时', diagnosticDuration(record.durationMs)], ['首响应耗时', diagnosticDuration(record.firstResponseMs)],
+      ['失败阶段', record.failureStage ? diagnosticStages[record.failureStage] || record.failureStage : '无'],
+      ['错误代码', record.errorCode || '无'], ['说明', record.message || '无错误'],
+      ['输入 Token', tokenCount(record.usage?.inputTokens)], ['输出 Token', tokenCount(record.usage?.outputTokens)],
+      ['缓存命中 Token', tokenCount(record.usage?.cachedInputTokens)], ['思考 Token', tokenCount(record.usage?.reasoningTokens)],
+    ];
+    elements['diagnostics-fields'].replaceChildren(...fields.map(([name, value]) => {
+      const row = document.createElement('div'), label = document.createElement('dt'), content = document.createElement('dd');
+      label.textContent = name; content.textContent = String(value); row.append(label, content); return row;
+    }));
+    text('diagnostics-detail-title', '请求详情');
+    text('diagnostics-detail-note', '首响应耗时不等于模型首 Token 耗时；渠道指本网关实际使用的账号来源。用量缺失保持未知。');
+    elements['diagnostics-export-link'].href = `/api/request-diagnostics/${encodeURIComponent(id)}/export`;
+    elements['diagnostics-export-link'].hidden = false;
+  } catch (error) {
+    if (generation !== diagnosticDetailGeneration) return;
+    text('diagnostics-detail-title', '请求详情暂不可用');
+    text('diagnostics-detail-note', error.status === 404 ? '该记录尚未保存、早于诊断启用，或已经超出保留范围。' : error.message || '请稍后重试。');
+  }
 }
 
 function renderCodeBuddy(data) {
@@ -1287,6 +1481,8 @@ elements['cursor-logout-button'].addEventListener('click', () => {
 });
 
 elements['service-restart-button'].addEventListener('click', () => { void restartService(false); });
+elements['service-idle-restart-button'].addEventListener('click', () => { void queueServiceRestart(); });
+elements['service-idle-cancel-button'].addEventListener('click', () => { void cancelQueuedRestart(); });
 elements['service-confirm-button'].addEventListener('click', () => { void restartService(restartActiveRequests > 0); });
 elements['service-cancel-button'].addEventListener('click', () => {
   if (busyAction || restartInProgress) return;

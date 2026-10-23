@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { BridgeError, writeJson } from './storage.mjs';
 import { resolveBModel, resolveCodeBuddyModel } from './models.mjs';
 import { CURSOR_MODELS } from './cursor-service.mjs';
+import { capabilitiesFromCatalog, hasCatalogCapabilityData, unverifiedModel, verificationFromRecord } from './model-capabilities.mjs';
 
 export const MODEL_POLICY_CHANNELS = Object.freeze(['A', 'B', 'CodeBuddy', 'Cursor']);
 const MAX_DISABLED = 2048;
@@ -49,6 +50,8 @@ export class ModelPolicy {
   #models = new Map();
   #disabled = new Set();
   #availability = new Map();
+  #details = new Map();
+  #verifications = new Map();
   #authorizationSources = new Map();
   #revision = 0;
   #queue = Promise.resolve();
@@ -119,13 +122,13 @@ export class ModelPolicy {
     this.#models = models; this.#disabled = disabled; this.#revision = revision;
   }
   setAuthorizationVersionGetter(channel, getter) {
-    if (!['CodeBuddy', 'Cursor'].includes(channel) || typeof getter !== 'function') throw new TypeError('Invalid model authorization source.');
+    if (!MODEL_POLICY_CHANNELS.includes(channel) || typeof getter !== 'function') throw new TypeError('Invalid model authorization source.');
     this.#authorizationSources.set(channel, getter);
   }
   #modelAvailability(id) {
     const value = this.#availability.get(id), channel = this.#models.get(id)?.channel;
     const getter = this.#authorizationSources.get(channel);
-    if (getter && (!value || value.authorizationVersion !== getter())) {
+    if (getter && ['CodeBuddy', 'Cursor'].includes(channel) && (!value || value.authorizationVersion !== getter())) {
       return { available: false, reason: '账号授权已变化或尚未取得当前账号目录，请刷新后重试。' };
     }
     if (!value) return undefined;
@@ -133,14 +136,43 @@ export class ModelPolicy {
     return publicValue;
   }
 
+  #modelDetails(id) {
+    const channel = this.#models.get(id)?.channel, stored = this.#details.get(id);
+    const getter = this.#authorizationSources.get(channel);
+    const stale = getter && (!stored || stored.authorizationVersion !== getter());
+    const details = stored && !stale ? stored.value : capabilitiesFromCatalog({}, { channel });
+    const verified = this.#verifications.get(id);
+    const verification = !stale && verified && stored && verified.authorizationVersion === stored.authorizationVersion
+      && verified.fingerprint === JSON.stringify(details) ? verified.value : unverifiedModel(stale
+        ? '账号授权已变化或尚未取得当前账号目录，请重新实测。' : undefined);
+    return { ...structuredClone(details), verification: structuredClone(verification) };
+  }
+
+  recordVerification(record) {
+    if (!this.#available || !object(record)) return false;
+    const model = this.#models.get(record.model), stored = this.#details.get(record.model);
+    const getter = model && this.#authorizationSources.get(model.channel);
+    if (!model || record.account !== model.channel || !getter || !stored || record.authorizationVersion == null) return false;
+    let version;
+    try { version = getter(); } catch { return false; }
+    if (version == null || record.authorizationVersion !== version || stored.authorizationVersion !== version
+      || this.#modelAvailability(record.model)?.available === false) return false;
+    const value = verificationFromRecord(record);
+    if (!value) return false;
+    const previous = this.#verifications.get(record.model);
+    if (previous?.authorizationVersion === version && previous.value.checkedAt > value.checkedAt) return false;
+    this.#verifications.set(record.model, { authorizationVersion: version, fingerprint: JSON.stringify(stored.value), value });
+    return true;
+  }
+
   async observe(catalog, channelHint, { defaultEnabled = true, complete = false,
-    unavailableReason = '当前账号目录未返回此模型，请刷新目录后重试。', authorizationVersion } = {}) {
+    unavailableReason = '当前账号目录未返回此模型，请刷新目录后重试。', authorizationVersion, promptMode } = {}) {
     this.#requireAvailable();
     if (channelHint !== undefined && !MODEL_POLICY_CHANNELS.includes(channelHint)) throw invalid('模型渠道无效。');
     if (typeof defaultEnabled !== 'boolean' || typeof complete !== 'boolean' || complete && channelHint === undefined
       || !safeText(unavailableReason)) throw invalid('模型目录更新参数无效。');
     // Extract only public metadata. Never retain prompts, headers, credentials,
-    // account records, or capability declarations from an upstream catalog.
+    // account records. Capability declarations use a separate in-memory schema.
     const observed = catalogModels(catalog).flatMap(model => {
       const id = modelId(model);
       if (id === null) return [];
@@ -148,13 +180,25 @@ export class ModelPolicy {
         ...(!model.available ? { reason: safeText(model.reason) ? model.reason : '当前账号暂不能使用此模型。' } : {}),
         ...(['remote', 'native-cache', 'account-catalog'].includes(model.source) ? { source: model.source } : {}),
         ...(authorizationVersion !== undefined ? { authorizationVersion } : {}) } : null;
-      return [{ id, name: modelName(model), channel: fixedChannel(id) ?? channelHint ?? 'A', availability }];
+      const channel = fixedChannel(id) ?? channelHint ?? 'A';
+      const getter = this.#authorizationSources.get(channel), previousDetails = this.#details.get(id);
+      const version = authorizationVersion ?? getter?.();
+      // Client catalogs contain bridge-generated limits. Only the provider's
+      // own directory may populate external capabilities.
+      const details = ['A', 'B'].includes(channel) && hasCatalogCapabilityData(model, { channel })
+        || channelHint === channel && ['CodeBuddy', 'Cursor'].includes(channel)
+          && (hasCatalogCapabilityData(model, { channel }) || promptMode !== undefined || !previousDetails || previousDetails.authorizationVersion !== version)
+        ? { authorizationVersion: version,
+          value: capabilitiesFromCatalog(model, { channel, promptMode: promptMode
+            ?? this.#details.get(id)?.value.capabilities.promptMode.mode }) } : null;
+      return [{ id, name: modelName(model), channel, availability, details }];
     });
     return this.#serialize(async () => {
       this.#requireAvailable();
       const getter = this.#authorizationSources.get(channelHint);
       if (getter && authorizationVersion !== undefined && getter() !== authorizationVersion) return this.snapshot();
       const models = new Map(this.#models), disabled = new Set(this.#disabled), availability = new Map(this.#availability);
+      const details = new Map(this.#details);
       let changed = false;
       for (const entry of observed) {
         const previous = models.get(entry.id);
@@ -168,6 +212,7 @@ export class ModelPolicy {
         if (entry.availability && JSON.stringify(availability.get(entry.id)) !== JSON.stringify(entry.availability)) {
           availability.set(entry.id, entry.availability); changed = true;
         }
+        if (entry.details) details.set(entry.id, entry.details);
       }
       if (complete) {
         const seen = new Set(observed.map(entry => entry.id));
@@ -183,6 +228,7 @@ export class ModelPolicy {
         await this.#commit(models, disabled);
         this.#availability = availability;
       }
+      this.#details = details;
       return this.snapshot();
     });
   }
@@ -210,7 +256,8 @@ export class ModelPolicy {
   snapshot() {
     return { available: this.#available, discoveryOnly: true, revision: this.#revision,
       disabledModels: [...this.#disabled].sort(),
-      models: [...this.#models.values()].map(model => ({ ...model, enabled: !this.#disabled.has(model.id), ...this.#modelAvailability(model.id) })),
+      models: [...this.#models.values()].map(model => ({ ...model, enabled: !this.#disabled.has(model.id),
+        ...this.#modelAvailability(model.id), ...this.#modelDetails(model.id) })),
       error: this.#error ? { ...this.#error } : null };
   }
 

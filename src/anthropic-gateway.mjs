@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { keyMatches, readBody, SseInspector } from './gateway.mjs';
 import { BridgeError, redact } from './storage.mjs';
+import { classifyDiagnosticFailure, normalizeDiagnosticRecord } from './request-diagnostics.mjs';
 
 const ROUTES = new Map([
   ['/health', 'GET'],
@@ -101,7 +102,8 @@ function emptyMetrics() {
 
 export class AnthropicGateway {
   constructor({ routes = [], gatewayKey, allowedHosts = [], allowedPeers = [],
-    onUsage = async () => {}, maxBodyBytes = 64 * 1024 * 1024, isDraining = () => false } = {}) {
+    onUsage = async () => {}, onDiagnostic = () => {}, getAuthorizationVersion = () => null,
+    maxBodyBytes = 64 * 1024 * 1024, isDraining = () => false } = {}) {
     if (typeof gatewayKey !== 'string' || !gatewayKey) throw new TypeError('A dedicated gatewayKey is required.');
     if (!Array.isArray(routes)) throw new TypeError('Anthropic model routes must be an array.');
     if (!Array.isArray(allowedHosts) || !allowedHosts.every(host => typeof host === 'string' && host)) {
@@ -110,10 +112,12 @@ export class AnthropicGateway {
     if (!Array.isArray(allowedPeers) || !allowedPeers.every(peer => typeof peer === 'string' && peer)) {
       throw new TypeError('Gateway allowedPeers must be an array of peer addresses.');
     }
+    if (typeof onDiagnostic !== 'function' || typeof getAuthorizationVersion !== 'function') throw new TypeError('Invalid request diagnostic hooks.');
     this.gatewayKey = gatewayKey;
     this.allowedHosts = new Set([...allowedHosts].map(host => host.toLowerCase()));
     this.allowedPeers = new Set([...allowedPeers].map(peerAddress));
     this.onUsage = onUsage;
+    this.onDiagnostic = onDiagnostic; this.getAuthorizationVersion = getAuthorizationVersion;
     this.maxBodyBytes = maxBodyBytes;
     this.isDraining = isDraining;
     this.metrics = emptyMetrics();
@@ -187,13 +191,32 @@ export class AnthropicGateway {
 
   async handle(req, res) {
     this.pendingRequests++;
-    try { return await this.dispatch(req, res); }
-    finally { this.pendingRequests--; }
+    const diagnostic = typeof req.url === 'string' && req.url.split('?')[0] === '/v1/messages' ? {
+      requestId: randomUUID(), time: new Date().toISOString(), started: performance.now(), stage: 'authentication',
+      account: null, model: null, upstreamModel: null, httpStatus: null, firstResponseMs: null,
+      complete: false, delivered: false, terminalVerified: false, authorizationVersion: null,
+    } : null;
+    try { return await this.dispatch(req, res, diagnostic); }
+    finally {
+      if (diagnostic) {
+        const complete = diagnostic.complete && diagnostic.delivered && diagnostic.httpStatus >= 200 && diagnostic.httpStatus < 300 && !diagnostic.failure;
+        const status = diagnostic.interrupted ? 'interrupted' : diagnostic.failure ? 'failed'
+          : complete && diagnostic.toolPending ? 'tool_pending' : complete ? 'completed' : 'incomplete';
+        const record = normalizeDiagnosticRecord({ ...diagnostic, status, durationMs: diagnostic.durationMs ?? performance.now() - diagnostic.started,
+          ...(diagnostic.failure ?? { errorCode: 'incomplete_response', failureStage: 'upstream_response' }) });
+        if (record) {
+          try { Promise.resolve(this.onDiagnostic({ ...record, terminalVerified: status === 'completed' && diagnostic.terminalVerified === true,
+            authorizationVersion: diagnostic.authorizationVersion })).catch(() => {}); } catch { /* Diagnostics must never change forwarding. */ }
+        }
+      }
+      this.pendingRequests--;
+    }
   }
 
-  async dispatch(req, res) {
+  async dispatch(req, res, diagnostic = null) {
     try {
       this.authorize(req);
+      if (diagnostic) diagnostic.stage = 'routing';
       if (this.isDraining()) throw this.gatewayError('gateway_restarting', 503, '网关正在重启，请稍后重试。');
       if (typeof req.url !== 'string' || !req.url.startsWith('/') || req.url.startsWith('//')) {
         throw this.gatewayError('invalid_target');
@@ -238,8 +261,14 @@ export class AnthropicGateway {
         json(res, 200, { data, has_more: false, first_id: data[0]?.id ?? null, last_id: data.at(-1)?.id ?? null });
         return;
       }
-      await this.forward(req, res, url.pathname + url.search);
+      await this.forward(req, res, url.pathname + url.search, diagnostic);
     } catch (error) {
+      if (diagnostic) {
+        diagnostic.interrupted ||= res.destroyed === true;
+        diagnostic.failure = classifyDiagnosticFailure(error, { httpStatus: diagnostic.httpStatus, stage: diagnostic.stage,
+          interrupted: diagnostic.interrupted || res.destroyed });
+        diagnostic.httpStatus ??= Number.isInteger(error?.status) ? error.status : 502;
+      }
       if (res.destroyed) return;
       if (res.headersSent) { res.destroy(); return; }
       const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 502;
@@ -247,7 +276,8 @@ export class AnthropicGateway {
     }
   }
 
-  async forward(req, res, path) {
+  async forward(req, res, path, diagnostic = null) {
+    if (diagnostic) diagnostic.stage = 'validation';
     if (req.headers['content-encoding'] && req.headers['content-encoding'].toLowerCase() !== 'identity') {
       throw this.gatewayError('compressed_body', 415);
     }
@@ -262,8 +292,14 @@ export class AnthropicGateway {
       if (!data || typeof data !== 'object' || Array.isArray(data) || !(route = this.routes.get(data.model))) {
         throw this.gatewayError('unsupported_model');
       }
+      if (diagnostic) {
+        diagnostic.account = route.account; diagnostic.model = route.model.id; diagnostic.upstreamModel = route.model.upstream ?? null;
+        diagnostic.stage = 'routing';
+        try { diagnostic.authorizationVersion = this.getAuthorizationVersion(route.account); } catch { /* Unknown authorization generation is not guessed. */ }
+      }
       if (data.stream !== undefined && typeof data.stream !== 'boolean') throw new BridgeError('stream 必须是布尔值。');
     } catch (error) {
+      if (diagnostic) diagnostic.interrupted = abort.signal.aborted;
       req.removeListener('aborted', onDisconnect);
       res.removeListener('close', onDisconnect);
       throw error;
@@ -272,12 +308,14 @@ export class AnthropicGateway {
     const { provider, model, account, metrics } = route;
 
     const inference = new URL(path, 'http://anthropic.invalid').pathname === '/v1/messages';
-    const requestId = randomUUID();
+    const requestId = diagnostic?.requestId ?? randomUUID();
     let complete = false, streamError = false, responseId = null, httpStatus = null;
     let rawUsage = null, reader = null, readerDone = false;
     let upstreamModel = model.upstream ?? null;
     let hasBridgeUsage = false, bridgeUsage = null;
     let jsonBytes = 0;
+    let stopReason = null, toolPending = false, messageStarted = false, messageStopped = false, evidenceInvalid = false, answerText = false;
+    const textBlocks = new Set(), openBlocks = new Set();
     const jsonChunks = [];
     const mergeUsage = update => {
       if (hasBridgeUsage) return;
@@ -290,13 +328,47 @@ export class AnthropicGateway {
     };
     const inspectEvent = event => {
       if (event.type === 'message_start') {
+        if (messageStarted || event.message?.type !== 'message' || event.message?.role !== 'assistant' || !Array.isArray(event.message?.content)) evidenceInvalid = true;
+        else {
+          messageStarted = true;
+          answerText ||= event.message.content.some(item => item?.type === 'text' && typeof item.text === 'string' && item.text.length > 0);
+        }
         responseId = event.message?.id ?? responseId;
         mergeUsage(event.message?.usage);
+        toolPending ||= Array.isArray(event.message?.content) && event.message.content.some(item => item?.type === 'tool_use');
       }
-      if (event.type === 'message_delta') mergeUsage(event.usage);
-      if (event.type === 'message_stop') complete = !streamError;
+      if (event.type === 'content_block_start') {
+        if (!messageStarted || messageStopped || !Number.isSafeInteger(event.index) || event.index < 0 || event.index >= 4096 || openBlocks.has(event.index)) evidenceInvalid = true;
+        else {
+          openBlocks.add(event.index);
+          if (event.content_block?.type === 'text') {
+            textBlocks.add(event.index);
+            answerText ||= typeof event.content_block.text === 'string' && event.content_block.text.length > 0;
+          }
+        }
+        if (event.content_block?.type === 'tool_use') toolPending = true;
+      }
+      if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+        if (!messageStarted || messageStopped || !openBlocks.has(event.index) || !textBlocks.has(event.index)) evidenceInvalid = true;
+        else answerText ||= typeof event.delta.text === 'string' && event.delta.text.length > 0;
+      }
+      if (event.type === 'content_block_stop') {
+        if (!openBlocks.delete(event.index)) evidenceInvalid = true;
+      }
+      if (event.type === 'message_delta') {
+        if (!messageStarted || messageStopped) evidenceInvalid = true;
+        mergeUsage(event.usage);
+        if (typeof event.delta?.stop_reason === 'string') stopReason = event.delta.stop_reason;
+      }
+      if (event.type === 'message_stop') {
+        complete = !streamError;
+        if (diagnostic) diagnostic.terminalVerified = messageStarted && !evidenceInvalid && answerText && openBlocks.size === 0 &&
+          ['end_turn', 'stop_sequence'].includes(stopReason) && !toolPending && !streamError;
+        messageStopped = true;
+      }
       if (event.type === 'error') {
         streamError = true; complete = false;
+        if (diagnostic) diagnostic.failure = classifyDiagnosticFailure({ code: event.error?.type ?? event.error?.code }, { httpStatus, stage: 'stream' });
         metrics.lastError = this.safeError(event.error?.message || `${account} 上游返回错误事件。`);
       }
     };
@@ -306,8 +378,16 @@ export class AnthropicGateway {
         const message = JSON.parse(Buffer.concat(jsonChunks).toString('utf8'));
         responseId = message.id ?? responseId;
         mergeUsage(message.usage);
+        stopReason = typeof message.stop_reason === 'string' ? message.stop_reason : stopReason;
+        toolPending ||= Array.isArray(message.content) && message.content.some(item => item?.type === 'tool_use');
+        if (diagnostic) diagnostic.terminalVerified = message.type === 'message' && message.role === 'assistant' &&
+          Array.isArray(message.content) && message.content.some(item => item?.type === 'text' && typeof item.text === 'string' && item.text.length > 0) &&
+          ['end_turn', 'stop_sequence'].includes(stopReason) && !toolPending;
         if (updateCompletion) complete = message.type === 'message' && typeof message.stop_reason === 'string' && Boolean(message.stop_reason);
-        if (message.type === 'error') metrics.lastError = this.safeError(message.error?.message || `${account} 上游请求失败。`);
+        if (message.type === 'error') {
+          if (diagnostic) diagnostic.failure = classifyDiagnosticFailure({ code: message.error?.type ?? message.error?.code }, { httpStatus, stage: 'upstream_response' });
+          metrics.lastError = this.safeError(message.error?.message || `${account} 上游请求失败。`);
+        }
       } catch { /* Incomplete JSON has unknown usage. */ }
     };
     if (inference) { metrics.requests++; metrics.active++; }
@@ -315,6 +395,7 @@ export class AnthropicGateway {
     abort.signal.addEventListener('abort', cancelReader, { once: true });
     try {
       abort.signal.throwIfAborted();
+      if (diagnostic) diagnostic.stage = 'upstream_request';
       const response = await provider.request({
         path, rawBody, body: { ...data, model: model.upstream ?? model.id },
         headers: requestHeaders(req.headers), signal: abort.signal,
@@ -323,6 +404,10 @@ export class AnthropicGateway {
         upstreamModel = response.bridgeModel;
       }
       httpStatus = response.status;
+      if (diagnostic) {
+        diagnostic.httpStatus = httpStatus; diagnostic.upstreamModel = upstreamModel; diagnostic.stage = 'upstream_response';
+        if (!response.ok) diagnostic.failure = classifyDiagnosticFailure(null, { httpStatus, stage: 'upstream_response' });
+      }
       if (inference && response.bridgeUsage && typeof response.bridgeUsage.then === 'function') {
         hasBridgeUsage = true;
         // Attach both handlers immediately so a rejection cannot become unhandled during streaming.
@@ -341,14 +426,17 @@ export class AnthropicGateway {
         reader = response.body.getReader();
         if (abort.signal.aborted) cancelReader();
         while (true) {
+          if (diagnostic) diagnostic.stage = 'stream';
           const { done, value } = await reader.read();
           if (done) { readerDone = true; break; }
+          if (diagnostic && diagnostic.firstResponseMs === null && value.byteLength) diagnostic.firstResponseMs = performance.now() - diagnostic.started;
           if (inference && isSse) sse.push(value);
           else if (inference) {
             jsonBytes += value.byteLength;
             if (jsonBytes <= 8 * 1024 * 1024) jsonChunks.push(Buffer.from(value));
           }
           abort.signal.throwIfAborted();
+          if (diagnostic) diagnostic.stage = 'downstream';
           if (!res.write(value)) await once(res, 'drain', { signal: abort.signal });
         }
       }
@@ -357,6 +445,7 @@ export class AnthropicGateway {
       if (!response.ok) complete = false;
       if (!inference) complete = response.ok;
       res.end();
+      if (diagnostic) diagnostic.delivered = true;
     } catch (error) {
       if (!inference && [404, 405, 501].includes(error?.status)) {
         throw this.gatewayError('count_tokens_unavailable', 501, `${account} 上游未提供 Token 计数接口。`);
@@ -364,6 +453,8 @@ export class AnthropicGateway {
       if (inference) metrics.lastError = this.safeError(error);
       throw error;
     } finally {
+      if (diagnostic) Object.assign(diagnostic, { complete, toolPending: toolPending || stopReason === 'tool_use',
+        httpStatus, interrupted: abort.signal.aborted, durationMs: performance.now() - diagnostic.started });
       req.removeListener('aborted', onDisconnect);
       res.removeListener('close', onDisconnect);
       abort.signal.removeEventListener('abort', cancelReader);
@@ -381,6 +472,10 @@ export class AnthropicGateway {
         const trusted = hasBridgeUsage ? await bridgeUsage : null;
         const usageFailure = trusted?.ok === false ? this.safeError(trusted.error ?? `${account} 服务端用量读取失败。`) : null;
         const usage = hasBridgeUsage ? normalizeBridgeUsage(trusted?.value) : normalizeAnthropicUsage(rawUsage);
+        if (diagnostic) {
+          diagnostic.usage = usage;
+          diagnostic.complete = complete && (stopReason === null || ['end_turn', 'stop_sequence', 'tool_use'].includes(stopReason));
+        }
         metrics.lastUsage = usage;
         try {
           await this.onUsage({ requestId, time: new Date().toISOString(), account,

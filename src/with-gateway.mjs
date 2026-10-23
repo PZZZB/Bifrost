@@ -9,7 +9,8 @@ export const WITH_MODEL = Object.freeze({
 
 export class WithGateway extends AnthropicGateway {
   constructor({ provider, gatewayKey, allowedHosts = ['192.168.168.1:43157'],
-    allowedPeers = ['192.168.168.10'], onUsage = async () => {}, maxBodyBytes = 64 * 1024 * 1024,
+    allowedPeers = ['192.168.168.10'], onUsage = async () => {}, onDiagnostic = () => {}, getAuthorizationVersion = () => null,
+    maxBodyBytes = 64 * 1024 * 1024,
     additionalRoutes = [], withEnabled = true, isDraining = () => false } = {}) {
     if (typeof withEnabled !== 'boolean') throw new TypeError('With enabled must be a boolean.');
     if (withEnabled && (typeof provider?.request !== 'function' || typeof provider?.status !== 'function')) {
@@ -25,7 +26,7 @@ export class WithGateway extends AnthropicGateway {
       modelIds.add(route.model.id);
       routes.push(route);
     }
-    super({ routes, gatewayKey, allowedHosts, allowedPeers, onUsage, maxBodyBytes, isDraining });
+    super({ routes, gatewayKey, allowedHosts, allowedPeers, onUsage, onDiagnostic, getAuthorizationVersion, maxBodyBytes, isDraining });
     this.provider = withEnabled ? provider : null;
   }
 

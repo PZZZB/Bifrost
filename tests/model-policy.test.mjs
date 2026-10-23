@@ -271,3 +271,76 @@ test('model availability follows the current authorization even during another c
   assert.equal(JSON.stringify(policy.snapshot()).includes('authorizationVersion'), false);
   assert.equal((await readFile(path, 'utf8')).includes('authorizationVersion'), false);
 });
+
+test('capabilities are detached runtime metadata and never enter the persisted switch schema or native payload', async t => {
+  const { policy, path } = await fixture(t), original = catalog(), before = structuredClone(original);
+  original.models[0].input_modalities = ['text', 'image'];
+  original.models[0].supports_tools = true;
+  await policy.observe(original);
+  const row = policy.snapshot().models.find(model => model.id === A);
+  assert.equal(row.capabilities.images.support, true); assert.equal(row.capabilities.contextWindow.tokens, 240000);
+  assert.equal(row.verification.state, 'unverified');
+  row.capabilities.images.support = false; row.capabilities.reasoning.efforts.push('max');
+  assert.equal(policy.snapshot().models.find(model => model.id === A).capabilities.images.support, true);
+  assert.deepEqual(policy.filterCatalog(original), original); assert.deepEqual(before.models[0].model_messages, original.models[0].model_messages);
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(saved.models.every(model => Object.keys(model).sort().join(',') === 'channel,id,name'), true);
+  assert.equal(JSON.stringify(saved).includes('capabilities'), false); assert.equal(JSON.stringify(saved).includes('verification'), false);
+  const reopened = await ModelPolicy.open({ path });
+  assert.equal(reopened.snapshot().models.find(model => model.id === A).capabilities.contextWindow.tokens, null);
+  assert.equal(reopened.snapshot().models.find(model => model.id === A).verification.state, 'unverified');
+});
+
+test('real verification is scoped to an observed model and current authorization without inferring unsupported features', async t => {
+  const { policy, path } = await fixture(t), id = 'CodeBuddy-verification-model';
+  let version = 1; policy.setAuthorizationVersionGetter('CodeBuddy', () => version);
+  await policy.observe({ models: [{ id, name: 'Observed model', available: true, supportsImages: true, source: 'native-cache' }] },
+    'CodeBuddy', { authorizationVersion: version });
+  const record = { model: id, account: 'CodeBuddy', authorizationVersion: 1, outcome: 'passed',
+    time: '2026-10-23T01:00:00.000Z', completed: true, pendingTools: false, kind: 'plain' };
+  assert.equal(policy.snapshot().models[0].enabled, false); assert.equal(policy.snapshot().models[0].verification.state, 'unverified');
+  assert.equal(policy.recordVerification({ ...record, completed: false }), false);
+  assert.equal(policy.recordVerification({ ...record, pendingTools: true }), false);
+  assert.equal(policy.recordVerification({ ...record, account: 'A' }), false);
+  assert.equal(policy.recordVerification(record), true); assert.equal(policy.snapshot().models[0].verification.state, 'passed');
+  assert.equal(policy.recordVerification({ ...record, outcome: 'failed', category: 'network', error: 'PRIVATE_ERROR', time: '2026-10-23T02:00:00.000Z' }), true);
+  assert.equal(policy.snapshot().models[0].verification.state, 'failed'); assert.equal(policy.snapshot().models[0].capabilities.images.support, true);
+  assert.match(policy.snapshot().models[0].verification.reason, /网络错误/);
+  assert.equal(policy.recordVerification(record), false, 'An earlier completion cannot replace the later observed outcome.');
+  version++;
+  assert.equal(policy.snapshot().models[0].verification.state, 'unverified'); assert.equal(policy.snapshot().models[0].capabilities.images.support, null);
+  assert.equal(policy.recordVerification({ ...record, authorizationVersion: 2 }), false);
+  await policy.observe({ models: [{ id, name: 'Observed model', available: true, supportsImages: false }] }, 'CodeBuddy', { authorizationVersion: 2 });
+  assert.equal(policy.recordVerification({ ...record, authorizationVersion: 1 }), false);
+  assert.equal(policy.recordVerification({ ...record, authorizationVersion: 2 }), true);
+  assert.equal(policy.snapshot().models[0].capabilities.images.support, false);
+  assert.equal(JSON.stringify(policy.snapshot()).includes('PRIVATE_ERROR'), false);
+  assert.equal((await readFile(path, 'utf8')).includes('gateway-observed-call'), false);
+});
+
+test('account-bound native capability metadata never changes passthrough or invents a verified account', async t => {
+  const { policy } = await fixture(t), original = catalog();
+  let version = 'native-account-one';
+  policy.setAuthorizationVersionGetter('A', () => version);
+  await policy.observe(original);
+  const record = { model: A, account: 'A', authorizationVersion: version, outcome: 'passed',
+    time: '2026-10-23T02:00:00.000Z', completed: true, pendingTools: false };
+  assert.equal(policy.recordVerification(record), true);
+  version = 'native-account-two';
+  const row = policy.snapshot().models.find(model => model.id === A);
+  assert.equal(row.capabilities.contextWindow.tokens, null); assert.equal(row.verification.state, 'unverified');
+  assert.equal(policy.assertEnabled(A), true); assert.deepEqual(policy.filterCatalog(original), original);
+  assert.equal(policy.recordVerification(record), false);
+});
+
+test('client alias summaries and later name-only observations cannot replace authoritative external capabilities', async t => {
+  const { policy } = await fixture(t), id = 'Cursor-capability-model';
+  policy.setAuthorizationVersionGetter('Cursor', () => 0);
+  await policy.observe({ models: [{ id, name: 'SDK model', available: true, contextWindow: 500000, supportsImages: true }] },
+    'Cursor', { authorizationVersion: 0, promptMode: 'project-rules' });
+  await policy.observe({ models: [{ id, name: 'SDK model', available: true }] }, 'Cursor', { authorizationVersion: 0 });
+  await policy.observe({ models: [{ slug: id, display_name: 'SDK model', context_window: 128000, input_modalities: ['text'] }] });
+  const row = policy.snapshot().models[0];
+  assert.equal(row.capabilities.images.support, true); assert.equal(row.capabilities.contextWindow.tokens, 500000);
+  assert.equal(row.compatibility.mode, 'project-rules');
+});

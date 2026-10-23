@@ -20,12 +20,15 @@ import { ModelPolicy } from './model-policy.mjs';
 import { B_MODELS, CODEBUDDY_CODEX_MODEL } from './models.mjs';
 import { startCursorService, CURSOR_MODELS } from './cursor-service.mjs';
 import { createServiceControl } from './service-control.mjs';
+import { createServiceVersion } from './service-version.mjs';
+import { RequestDiagnostics } from './request-diagnostics.mjs';
 import { CursorResponsesProvider } from './cursor-responses.mjs';
 import { ModelDiscovery } from './model-discovery.mjs';
 import { ProviderQuotas } from './provider-quotas.mjs';
 import { createMagpieDelegationServer, loadMagpieDelegation } from './magpie-delegation.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const serviceVersion = await createServiceVersion({ projectDir });
 const port = Number(process.env.BRIDGE_PORT || 43155);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('BRIDGE_PORT 必须介于 1024 和 65535。');
 // Keep the established data path so the Bifrost rename retains existing accounts and keys.
@@ -50,8 +53,27 @@ let usageLedger = null;
 try { usageLedger = await UsageLedger.open({ path: join(stateDir, 'usage.jsonl'), timeZone: 'America/Los_Angeles' }); }
 catch (error) { console.error(`Token statistics unavailable: ${redact(error.message)}`); }
 let backendRpc, configRpc, backend, integration, gateway, clientVersion, accountQuotas, serviceControl;
-let withService, cursorProvider;
+let withService, cursorProvider, requestDiagnostics;
 const modelPolicy = await ModelPolicy.open({ path: join(stateDir, 'model-policy.json') });
+try { requestDiagnostics = await RequestDiagnostics.open({ path: join(stateDir, 'request-diagnostics.jsonl') }); }
+catch { console.error('Request diagnostics unavailable; model forwarding remains enabled.'); }
+function authorizationVersion(account) {
+  return account === 'CodeBuddy' ? codeBuddyService.authorizationVersion : account === 'Cursor' ? cursorService.authorizationVersion : null;
+}
+async function recordDiagnostic(record) {
+  if (record.terminalVerified === true || ['failed', 'interrupted', 'incomplete'].includes(record.status)
+      && ['upstream_request', 'upstream_response', 'stream', 'downstream'].includes(record.failureStage)) {
+    const categories = { authentication_failed: 'authentication', access_denied: 'permission',
+      quota_or_rate_limited: 'quota', network_failed: 'network', payload_rejected: 'protocol',
+      request_interrupted: 'cancelled', incomplete_response: 'protocol' };
+    modelPolicy.recordVerification({ model: record.model, account: record.account,
+      authorizationVersion: record.authorizationVersion, time: record.time,
+      outcome: record.terminalVerified === true ? 'passed' : 'failed',
+      completed: record.terminalVerified === true, pendingTools: record.status === 'tool_pending',
+      category: categories[record.errorCode] ?? 'unknown' });
+  }
+  await requestDiagnostics?.record(record);
+}
 if (modelPolicy.snapshot().available) {
   try {
     const cachedCatalog = await readJson(join(aHome, 'models_cache.json'), null);
@@ -99,7 +121,8 @@ if (!delegation) {
     modelPolicy,
     cursorProvider, cursorEnabled: () => cursorService.enabled, getCursorModels: () => cursorService.getModels(),
     getCursorAuthorizationVersion: () => cursorService.authorizationVersion,
-    isDraining: () => serviceControl?.pending === true,
+    isDraining: () => serviceControl?.draining === true,
+    onDiagnostic: recordDiagnostic, getAuthorizationVersion: authorizationVersion,
     onUsage: record => {
       if (!usageLedger) throw new Error('Token 记录文件暂不可用，模型转发继续运行。');
       return usageLedger.record(record);
@@ -109,18 +132,20 @@ if (!delegation) {
 }
 const verificationPath = join(stateDir, 'verification.json');
 withService = await startMessagesService({ stateDir, reservedPorts: [port],
-  isDraining: () => serviceControl?.pending === true,
+  isDraining: () => serviceControl?.draining === true,
+  onDiagnostic: recordDiagnostic, getAuthorizationVersion: authorizationVersion,
   codeBuddyProvider: codeBuddyService.provider, codeBuddyModel: codeBuddyService.model, codeBuddyEnabled: codeBuddyService.enabled, onUsage: record => {
   if (!usageLedger) throw new Error('Token 记录文件暂不可用。');
   return usageLedger.record(record);
 } });
-serviceControl = createServiceControl({ stateDir, projectDir,
+serviceControl = createServiceControl({ stateDir, projectDir, version: serviceVersion,
   getActiveRequests: () => (gateway?.pendingRequests ?? 0) + (withService?.activeRequests ?? 0) +
-    Math.max(0, (cursorProvider?.activeRuns ?? 0) - (gateway?.metrics.accounts.Cursor.active ?? 0)),
+    Math.max(0, (cursorProvider?.activeRuns ?? 0) - (gateway?.metrics.accounts.Cursor.active ?? 0)) +
+    (server?.activeAdminOperations ?? 0),
   onRestart: () => shutdown(0) });
 const server = delegation ? createMagpieDelegationServer({ gatewayKey: state.gatewayKey, baseUrl }) :
   createBridgeServer({ backend, gateway, integration, state, baseUrl,
-  usageLedger, accountQuotas, providerQuotas, serviceControl, modelPolicy, modelDiscovery, cursorService, cursorProvider,
+  usageLedger, accountQuotas, providerQuotas, requestDiagnostics, serviceControl, modelPolicy, modelDiscovery, cursorService, cursorProvider,
   getWithStatus: () => withService.status(),
   codeBuddyService,
   publicDir: join(projectDir, 'public'),
@@ -142,6 +167,12 @@ server.listen(port, '127.0.0.1', () => {
 let closing = false;
 async function shutdown(code = 0) {
   if (closing) return; closing = true;
+  try { await serviceControl?.close(); }
+  catch {
+    console.error('Shutdown deferred: restart marker cleanup failed. Retry cancellation from the management page.');
+    closing = false;
+    return;
+  }
   server.close(); server.closeAllConnections();
   await Promise.allSettled([modelDiscovery.close(), providerQuotas.close()]);
   await Promise.allSettled([backendRpc?.close(), configRpc?.close(), withService.close(), codeBuddyService.close(), cursorProvider.close(), cursorService.close()]);
@@ -151,6 +182,7 @@ async function shutdown(code = 0) {
     await new Promise(resolveWait => setTimeout(resolveWait, 25));
   }
   await usageLedger?.flush();
+  await requestDiagnostics?.close();
   process.exit(code);
 }
 process.on('SIGINT', () => { void shutdown(); });
