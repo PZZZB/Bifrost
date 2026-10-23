@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { isIP } from 'node:net';
-import { createAnthropicGatewayServer } from '../src/anthropic-gateway.mjs';
+import { createClaudeGatewayServer, ChatHistoryStore } from '../src/openai-chat-gateway.mjs';
 import { ClaudeCliHub } from '../src/claude-cli-provider.mjs';
 import { startRelayControl } from '../src/relay-control.mjs';
 
@@ -41,9 +41,11 @@ try {
   hub = new ClaudeCliHub({ binary: config.cli.binary, configDir: config.cli.configDir,
     profileDir: config.cli.profileDir, stateDir: config.cli.stateDir, mcpPort });
   await hub.start();
-  server = createAnthropicGatewayServer({ gatewayKey,
+  const history = new ChatHistoryStore({ path: join(config.cli.stateDir, 'chat-history.json') });
+  await history.load();
+  server = createClaudeGatewayServer({ gatewayKey,
     allowedHosts: config.listener.allowedHosts, allowedPeers: config.listener.allowedPeers,
-    routes: config.models.map(model => ({ account: 'Claude', model, provider: hub.provider(model.upstream) })) });
+    routes: config.models.map(model => ({ account: 'Claude', model, provider: hub.provider(model.upstream) })) }, { history });
   await new Promise((yes, no) => {
     server.once('error', no); server.listen(config.listener.port, config.listener.address, () => {
       server.off('error', no); yes();

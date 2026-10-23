@@ -1,0 +1,34 @@
+[Unit]
+Description=Bifrost Claude subscription relay on the isolated VM network
+Requires=claude-lockdown.service
+After=network-online.target claude-lockdown.service mihomo-claude.service
+
+[Service]
+Type=simple
+User=claude
+Group=claude
+UMask=0077
+WorkingDirectory=/opt/bifrost
+Environment=HOME=/home/claude
+Environment=PATH=/opt/node-v22.23.4-linux-arm64/bin:/home/claude/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LANG=en_US.UTF-8
+Environment=TZ=America/Los_Angeles
+ExecStart=/opt/node-v22.23.4-linux-arm64/bin/node /opt/bifrost/scripts/run-claude-relay.mjs /etc/bifrost/relay.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/claude/.claude /home/claude/.local/share/bifrost
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

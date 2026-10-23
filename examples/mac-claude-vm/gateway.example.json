@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "listener": { "address": "127.0.0.1", "port": 43157 },
+  "gatewayKeyFile": "/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/gateway.key",
+  "relayKeyFile": "/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/relay.key",
+  "tcpForward": {
+    "version": 1,
+    "listener": { "address": "127.0.0.1", "port": 3435 },
+    "target": { "ip": "192.168.160.2", "port": 3435 }
+  }
+}

@@ -265,6 +265,12 @@ With 提供智能体会话接口，因此这里使用会话与 MCP 桥接。初�
 
 原 Claude 模型由本项目的 `ClaudeCliHub` 调用官方 Claude Agent SDK 和官方 Claude CLI。Magpie 仅作为实现参考，不是运行依赖。CodeBuddy 继续使用本项目已有的转换。模型目录列出配置的模型，不能据此证明账号有每个模型的调用权限。
 
+### Mac 客户端调用 Linux 虚拟机里的 Claude
+
+Mac 可通过独立回环网关调用 host-only 网络中的 Linux ARM64 relay，同时保持 Claude 的 OAuth、原生会话和云端流量留在虚拟机。入口支持 Anthropic Messages 和 OpenAI Chat Completions，适用于 CodeBuddy 自定义模型；会话和客户端工具复用现有 Claude Agent SDK 后端。
+
+部署模板、网络边界、登录及离线环境披露检查见 [Mac 与 Linux VM 接入](docs/mac-claude-vm.md)。这些模板不包含账号凭据、实际网关密钥或 VPS 配置。
+
 ### 准备独立 Claude CLI 后端
 
 CLI 安装、账号登录和协议适配分别管理。`OfficialClaudeCli.ps1` 固定安装官方 Claude CLI 2.1.304，校验官方 manifest、文件大小和 SHA-256，使用独立配置目录。`Plan`、`Status` 不发起模型请求，`Prepare` 安装，`Login -Interactive` 由本人在可见窗口完成官方订阅登录。普通电脑可指定自己的安装目录；当前部署必须在虚拟机内执行。

@@ -16,3 +16,7 @@ credentials.json
 /.codex-account-bridge/
 /.agent-bridge/
 /.bifrost/
+*.utm/
+*.raw
+*.qcow2
+/examples/mac-claude-vm/local/

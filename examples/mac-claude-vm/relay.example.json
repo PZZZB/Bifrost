@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "listener": {
+    "address": "192.168.160.2", "port": 3435,
+    "allowedHosts": ["192.168.160.2:3435", "127.0.0.1:3435"],
+    "allowedPeers": ["192.168.160.1"]
+  },
+  "gatewayKeyFile": "/etc/bifrost/relay.key",
+  "models": [
+    { "id": "claude-sonnet", "name": "Claude Sonnet", "upstream": "sonnet" },
+    { "id": "claude-opus", "name": "Claude Opus", "upstream": "opus" }
+  ],
+  "mcpPort": 3436,
+  "cli": {
+    "binary": "/home/claude/.local/bin/claude",
+    "configDir": "/home/claude/.claude",
+    "profileDir": "/home/claude/.local/share/bifrost/profile",
+    "stateDir": "/home/claude/.local/share/bifrost/state"
+  }
+}

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClaudeSdkWorker, CLAUDE_AGENT_SDK_VERSION, CLAUDE_CLIENT_MCP_SERVER,
-  CLAUDE_CLIENT_MCP_TIMEOUT_MS, buildClaudeEnvironment } from '../src/claude-sdk-worker.mjs';
+  CLAUDE_CLIENT_MCP_TIMEOUT_MS, CLAUDE_CLIENT_SYSTEM_PROMPT, buildClaudeEnvironment } from '../src/claude-sdk-worker.mjs';
 
 const root = join(tmpdir(), 'offline-claude-worker');
 const sessionId = 'b6b38769-021a-4931-a050-c54a2f79277b';
@@ -116,6 +116,9 @@ test('concurrent startup opens one query using only the pinned executable and cl
   assert.equal(options.settings.disableAllHooks, true);
   assert.equal(options.settings.includeGitInstructions, false);
   assert.equal(options.settings.disableClaudeAiConnectors, true);
+  assert.equal(options.env.CLAUDE_CODE_DISABLE_ATTACHMENTS, '1');
+  assert.equal(options.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1');
+  assert.equal(options.env.CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL, '1');
   assert.equal(Object.hasOwn(options, 'disableHooks'), false);
   assert.equal(Object.hasOwn(options, 'allowDangerouslySkipPermissions'), false);
   assert.equal(Object.hasOwn(options, 'allowedTools'), false);
@@ -123,6 +126,15 @@ test('concurrent startup opens one query using only the pinned executable and cl
   assert.equal(Object.hasOwn(options, 'maxOutputTokens'), false);
   assert.equal(Object.hasOwn(options, 'thinking'), false);
   assert.equal(Object.hasOwn(options, 'effort'), false);
+});
+
+test('empty client instructions use the client-tool permission prompt', async testContext => {
+  for (const systemPrompt of [undefined, '', '  \n', [], ['', ' ']]) {
+    const { worker, fake } = workerFixture(testContext, { systemPrompt });
+    await worker.start();
+    assert.equal(fake.calls[0].options.systemPrompt, CLAUDE_CLIENT_SYSTEM_PROMPT);
+    assert.ok(CLAUDE_CLIENT_SYSTEM_PROMPT.trim());
+  }
 });
 
 test('only client MCP permission requests are delegated and built-in execution remains denied', async testContext => {
@@ -154,7 +166,8 @@ test('environment snapshots retain OS and proxy settings while dropping API, OAu
     CLAUDE_CONFIG_DIR: 'wrong-profile', CLAUDE_CODE_SESSION_ID: 'wrong-session',
     AWS_ACCESS_KEY_ID: 'private-cloud-key', GOOGLE_APPLICATION_CREDENTIALS: 'private-cloud-file',
     OPENAI_API_KEY: 'private-other-key', NODE_OPTIONS: '--require=private-preload',
-    OTEL_LOG_RAW_API_BODIES: 'file:private-log', ENABLE_PROMPT_CACHING_1H: '1', DISABLE_PROMPT_CACHING: '1' };
+    OTEL_LOG_RAW_API_BODIES: 'file:private-log', ENABLE_PROMPT_CACHING_1H: '1', DISABLE_PROMPT_CACHING: '1',
+    CLAUDE_CODE_DISABLE_ATTACHMENTS: '0', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '' };
   const original = { ...env };
   const { worker, fake } = workerFixture(testContext, { env, maxTokens: 1,
     mcpUrl: 'http://127.0.0.2:43175/mcp/offline' });
@@ -173,14 +186,16 @@ test('environment snapshots retain OS and proxy settings while dropping API, OAu
   assert.equal(child.CLAUDE_CODE_MAX_OUTPUT_TOKENS, '1');
   assert.equal(child.ENABLE_TOOL_SEARCH, 'false');
   assert.equal(child.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1');
-  assert.equal(Object.hasOwn(child, 'CLAUDE_CODE_DISABLE_ATTACHMENTS'), false);
+  assert.equal(child.CLAUDE_CODE_DISABLE_ATTACHMENTS, '1');
+  assert.equal(child.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1');
   assert.equal(child.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
   assert.equal(child.DISABLE_AUTO_COMPACT, '1');
   assert.equal(child.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS, '0');
   assert.equal(child.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, '0');
   assert.equal(child.MCP_TOOL_TIMEOUT, '3600000');
   for (const name of Object.keys(original).filter(name => !['PATH', 'SystemRoot', 'HTTP_PROXY', 'https_proxy',
-    'NO_PROXY', 'NODE_EXTRA_CA_CERTS', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS'].includes(name))) {
+    'NO_PROXY', 'NODE_EXTRA_CA_CERTS', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS',
+    'CLAUDE_CODE_DISABLE_ATTACHMENTS', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'].includes(name))) {
     assert.equal(Object.hasOwn(child, name), false, `${name} must not leak into the official CLI environment`);
   }
   assert.doesNotMatch(JSON.stringify(child), /private-api-key|private-auth-token|private-oauth-token|wrong-gateway|private-other-key/);

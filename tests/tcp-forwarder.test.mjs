@@ -115,6 +115,22 @@ test('configuration snapshots exact endpoints without retaining caller objects',
     listener: { address: '::1', port: 32125 }, target: { ip: '0:0:0:0:0:0:0:1', port: 32126 } }).target.ip, '::1');
 });
 
+test('an invalid or mismatched source address is rejected before listening', async () => {
+  for (const localAddress of ['localhost', '0.0.0.0', '::', '::1']) {
+    await assert.rejects(startTcpForwarder(configuration(32125, 32126), { localAddress }), /configuration is invalid/);
+  }
+});
+
+test('an unavailable dedicated source address fails closed without reaching the target', async testContext => {
+  let accepted = 0;
+  const target = await localTarget(testContext, socket => { accepted++; socket.end('must not be delivered'); });
+  const { forwarder, listenerPort } = await forwarderFor(testContext, target.port, { localAddress: '192.0.2.254' });
+  const client = await connect(testContext, listenerPort);
+  client.resume();
+  await until(() => forwarder.status().failed === 1 && forwarder.status().active === 0);
+  assert.equal(accepted, 0);
+});
+
 test('binary bytes survive slow upstream backpressure and client half-close', { timeout: 10000 }, async testContext => {
   const payload = Buffer.alloc(5 * 1024 * 1024);
   for (let index = 0; index < payload.length; index++) payload[index] = index % 256;
