@@ -2,8 +2,8 @@ import { join } from 'node:path';
 import { CodeBuddyCredentialStore } from './codebuddy-credential-store.mjs';
 import { BridgeError, readJson, writeJson } from './storage.mjs';
 
-// These are the exact IDs published in Cursor's model pages. Availability and
-// supported variants must still come from this account's live SDK catalog.
+// Legacy defaults remain stable for existing configuration and offline fixtures.
+// Production availability and variants come from the account's full SDK catalog.
 export const CURSOR_TARGET_MODELS = Object.freeze([
   Object.freeze({ id: 'gemini-4-argon', name: 'Gemini 4 Argon' }),
   Object.freeze({ id: 'grok-4.7', name: 'Grok 4.7' }),
@@ -12,9 +12,49 @@ export const CURSOR_MODELS = Object.freeze([
   Object.freeze({ id: 'Cursor-gemini-4-argon', name: 'Cursor Gemini 4', upstream: 'gemini-4-argon' }),
   Object.freeze({ id: 'Cursor-grok-4.7', name: 'Cursor Grok 4.7', upstream: 'grok-4.7' }),
 ]);
-export function resolveCursorModel(id) { return CURSOR_MODELS.find(model => model.id === id) || null; }
-const TARGETS = new Map(CURSOR_TARGET_MODELS.map(model => [model.id, model]));
-const ID = /^[A-Za-z0-9_.:-]{1,160}$/;
+const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
+const CODEX_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
+const CAPABILITY_FLAGS = ['supportsImages', 'supportsVision', 'supportsImageInput', 'supportsTools', 'supportsToolCalls',
+  'supportsParallelToolCalls', 'supportsReasoning', 'supportsStreaming'];
+const NESTED_CAPABILITY_FLAGS = [...CAPABILITY_FLAGS, 'images', 'vision', 'imageInput', 'tools', 'toolCalls',
+  'parallelToolCalls', 'reasoning', 'streaming'];
+export function resolveCursorModel(id) {
+  if (typeof id !== 'string' || !id.startsWith('Cursor-')) return null;
+  const upstream = id.slice('Cursor-'.length);
+  if (!ID.test(upstream)) return null;
+  return CURSOR_MODELS.find(model => model.id === id) || { id, upstream, name: `Cursor ${upstream}` };
+}
+export function cursorEffortParameter(model) {
+  for (const parameter of Array.isArray(model?.parameters) ? model.parameters : []) {
+    if (!['reasoning_effort', 'reasoningEffort', 'effort', 'reasoning'].includes(parameter?.id) || !Array.isArray(parameter.values)) continue;
+    const values = parameter.values.filter(option => CODEX_EFFORTS.has(option?.value));
+    if (values.length) return { ...parameter, values };
+  }
+  return null;
+}
+export function cursorImageCapability(model) {
+  const fields = ['supportsImages', 'supportsVision', 'supportsImageInput'];
+  const values = [...fields.map(field => model?.[field]),
+    ...[...fields, 'images', 'vision', 'imageInput'].map(field => model?.capabilities?.[field])];
+  if (values.includes(false) || Array.isArray(model?.inputModalities) && !model.inputModalities.includes('image')) return false;
+  return values.includes(true) || model?.inputModalities?.includes('image') ? true : null;
+}
+const unavailableReasons = Object.freeze({ account: '账号目录标记此模型不可用。',
+  tools: '账号目录明确不支持工具调用，尚不能用于 Codex 工具对话。',
+  streaming: '账号目录明确不支持当前适配所需的流式输出。',
+  output: '此条目仅支持非文本输出，尚未适配 Codex 对话。' });
+export function cursorModelAvailability(model) {
+  if (!model || model.available === false || model.disabled === true || model.enabled === false) {
+    return { available: false, reason: Object.values(unavailableReasons).includes(model?.reason) ? model.reason : unavailableReasons.account };
+  }
+  if (['supportsTools', 'supportsToolCalls'].some(field => model[field] === false || model.capabilities?.[field] === false)
+    || model.capabilities?.tools === false || model.capabilities?.toolCalls === false) return { available: false, reason: unavailableReasons.tools };
+  if (model.supportsStreaming === false || model.capabilities?.supportsStreaming === false || model.capabilities?.streaming === false) {
+    return { available: false, reason: unavailableReasons.streaming };
+  }
+  if (Array.isArray(model.outputModalities) && !model.outputModalities.includes('text')) return { available: false, reason: unavailableReasons.output };
+  return { available: true, reason: null };
+}
 
 function validKey(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 8192 && !/[^\x21-\x7e]/.test(value);
@@ -28,21 +68,26 @@ function safeText(value, secret, limit = 320) {
 }
 
 function modelCatalog(value, secret) {
-  if (!Array.isArray(value)) throw new BridgeError('Cursor 模型目录格式无法识别。', 502, 'cursor_catalog_invalid');
+  if (!Array.isArray(value) || value.length > 4096) throw new BridgeError('Cursor 模型目录格式无法识别。', 502, 'cursor_catalog_invalid');
+  const validId = id => typeof id === 'string' && ID.test(id) && (!secret || !id.includes(secret));
   const found = new Map();
   for (const item of value) {
-    if (!TARGETS.has(item?.id) || found.has(item.id)) continue;
-    const model = { id: item.id, displayName: safeText(item.displayName, secret) || TARGETS.get(item.id).name };
-    if (item.description != null) model.description = safeText(item.description, secret, 1000);
+    if (!validId(item?.id) || found.has(item.id)) continue;
+    const model = { id: item.id, displayName: safeText(item.displayName, secret) || item.id };
+    if (safeText(item.description, secret, 1000)) model.description = safeText(item.description, secret, 1000);
     const params = list => {
       if (!Array.isArray(list) || list.length > 128) throw new Error('Invalid parameters');
+      const ids = new Set();
       return list.map(parameter => {
-        if (!ID.test(parameter?.id) || !Array.isArray(parameter.values) || !parameter.values.length || parameter.values.length > 128) throw new Error('Invalid parameter');
+        if (!validId(parameter?.id) || ids.has(parameter.id) || !Array.isArray(parameter.values) || !parameter.values.length || parameter.values.length > 128) throw new Error('Invalid parameter');
+        ids.add(parameter.id);
+        const values = new Set();
         return { id: parameter.id,
           ...(safeText(parameter.displayName, secret) ? { displayName: safeText(parameter.displayName, secret) } : {}),
           values: parameter.values.map(option => {
             const value = safeText(option?.value, secret, 160);
-            if (!value || value !== option.value) throw new Error('Invalid value');
+            if (!value || value !== option.value || values.has(value)) throw new Error('Invalid value');
+            values.add(value);
             return { value, ...(safeText(option.displayName, secret) ? { displayName: safeText(option.displayName, secret) } : {}) };
           }) };
       });
@@ -54,7 +99,7 @@ function modelCatalog(value, secret) {
         model.variants = item.variants.map(variant => {
           if (!Array.isArray(variant?.params) || variant.params.length > 128) throw new Error('Invalid variant parameters');
           const result = { params: variant.params.map(parameter => {
-            if (!ID.test(parameter?.id) || !safeText(parameter.value, secret, 160) || parameter.value !== safeText(parameter.value, secret, 160)) throw new Error('Invalid variant');
+            if (!validId(parameter?.id) || !safeText(parameter.value, secret, 160) || parameter.value !== safeText(parameter.value, secret, 160)) throw new Error('Invalid variant');
             return { id: parameter.id, value: parameter.value };
           }), displayName: safeText(variant.displayName, secret) || model.displayName };
           if (typeof variant.isDefault === 'boolean') result.isDefault = variant.isDefault;
@@ -63,10 +108,30 @@ function modelCatalog(value, secret) {
           return result;
         });
       }
+      for (const field of CAPABILITY_FLAGS) if (typeof item[field] === 'boolean') model[field] = item[field];
+      for (const field of ['contextWindow', 'maxInputTokens', 'maxOutputTokens']) {
+        if (Number.isSafeInteger(item[field]) && item[field] > 0) model[field] = item[field];
+      }
+      for (const field of ['inputModalities', 'outputModalities']) {
+        if (Array.isArray(item[field]) && item[field].length <= 4
+          && item[field].every(modality => ['text', 'image', 'audio', 'video'].includes(modality))) model[field] = [...new Set(item[field])];
+      }
+      if (item.capabilities && typeof item.capabilities === 'object' && !Array.isArray(item.capabilities)) {
+        const capabilities = Object.fromEntries(NESTED_CAPABILITY_FLAGS
+          .filter(field => typeof item.capabilities[field] === 'boolean').map(field => [field, item.capabilities[field]]));
+        if (Object.keys(capabilities).length) model.capabilities = capabilities;
+      }
+      for (const field of ['available', 'disabled', 'enabled']) if (typeof item[field] === 'boolean') model[field] = item[field];
+      if (cursorImageCapability(model) === false) {
+        model.supportsImages = false;
+        if (model.inputModalities) model.inputModalities = model.inputModalities.filter(modality => modality !== 'image');
+      }
+      const availability = cursorModelAvailability(model);
+      if (!availability.available) Object.assign(model, availability);
       found.set(model.id, model);
     } catch { /* An incomplete model descriptor must not become an invented selection. */ }
   }
-  return CURSOR_TARGET_MODELS.flatMap(model => found.has(model.id) ? [found.get(model.id)] : []);
+  return [...found.values()];
 }
 
 function safeProfile(value, record) {
@@ -121,7 +186,7 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
     }
   } catch { setupError = 'Cursor 本桥凭证无法读取，请重新授权。'; }
 
-  let closed = false, generation = 0, metadataVersion = 0, rejectedCredential = false;
+  let closed = false, generation = 0, authorizationVersion = 0, metadataVersion = 0, rejectedCredential = false;
   let sdkPromise = null, cache = null, metadataPending = null, pendingLogin = null;
   let publicLogin = { state: 'not_started' }, mutationQueue = Promise.resolve();
   const serial = action => {
@@ -205,6 +270,7 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
 
   return {
     get enabled() { return config.enabled === true; },
+    get authorizationVersion() { return authorizationVersion; },
     get promptMode() { return config.promptMode; },
     async credential() {
       return usable() ? { apiKey: record.apiKey, apiKeyExpiresAtMs: record.apiKeyExpiresAtMs,
@@ -212,7 +278,7 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
     },
     async beginLogin() {
       assertOpen(); assertConfigured();
-      generation++; cancelLogin();
+      generation++; authorizationVersion++; cancelLogin();
       const currentGeneration = generation, abort = new AbortController();
       let resolveUrl, rejectUrl;
       const urlPromise = new Promise((resolve, reject) => { resolveUrl = resolve; rejectUrl = reject; });
@@ -265,7 +331,7 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
             // Logout or another login can happen while DPAPI is writing. Its
             // newer state wins, including on disk before that operation returns.
             if (!current()) { if (record) await store.save(record); else await store.clear(); return; }
-            record = candidate; rejectedCredential = false; setupError = null; invalidate();
+            record = candidate; authorizationVersion++; rejectedCredential = false; setupError = null; invalidate();
             publicLogin = { state: 'complete' };
             clearTimeout(attempt.urlTimer); clearTimeout(attempt.expiryTimer); pendingLogin = null;
           });
@@ -296,7 +362,7 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
             record && record.apiKeyExpiresAtMs <= now() ? 'Cursor 授权已过期，请重新登录。' : null), manualVerification: true };
     },
     async logout() {
-      generation++; cancelLogin(); record = null; rejectedCredential = false; invalidate();
+      generation++; authorizationVersion++; cancelLogin(); record = null; rejectedCredential = false; invalidate();
       publicLogin = { state: 'not_started' }; config.enabled = false;
       try {
         await serial(async () => { await store.clear(); await writeJson(configPath, config); });
@@ -305,7 +371,7 @@ export async function startCursorService({ stateDir, sdkLoader = async () => imp
       return { ok: true };
     },
     async close() {
-      closed = true; generation++; cancelLogin(); invalidate();
+      closed = true; generation++; authorizationVersion++; cancelLogin(); invalidate();
       await mutationQueue;
     },
   };

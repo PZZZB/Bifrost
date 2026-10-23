@@ -159,3 +159,17 @@ test('a stuck account has a bounded timeout while the other account remains read
   assert.match(result.accounts.A.error, /超时/);
   assert.equal(result.accounts.B.status, 'ok');
 });
+
+test('quota snapshots include verified binding state and never attach a new B identity to an old result', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { quotas, state } = fixture({ readA: async () => { await gate; return snapshot(); } });
+  state.pinnedAccount.email = 'old@example.test';
+  const pending = quotas.snapshot();
+  await new Promise(resolve => setImmediate(resolve));
+  state.pinnedAccount = { ...state.pinnedAccount, accountId: 'changed-account', email: 'new@example.test' };
+  release(); const result = await pending;
+  assert.equal(result.accounts.A.authenticated, true); assert.equal(result.accounts.A.source, 'codex-account-rate-limits');
+  assert.equal(result.accounts.B.status, 'error'); assert.equal(result.accounts.B.identity, null);
+  assert.equal(JSON.stringify(result.accounts.B).includes('new@example.test'), false);
+});

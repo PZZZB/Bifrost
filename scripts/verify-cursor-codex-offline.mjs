@@ -32,7 +32,8 @@ const syntheticInternalMetadata = process.argv.includes('--internal-metadata');
 const promptMode = argument('--prompt-mode', 'project-rules');
 if (!['project-rules', 'system'].includes(promptMode)) throw new Error('--prompt-mode must be project-rules or system.');
 const selectedModel = resolveCursorModel(requestedModel);
-if (!selectedModel) throw new Error('--model must name one of the two Cursor aliases.');
+if (!selectedModel) throw new Error('--model must name a valid Cursor alias.');
+const dynamicModelFixture = !CURSOR_MODELS.some(model => model.id === selectedModel.id);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const work = join(root, '.state', `cursor-codex-offline-${Date.now()}-${randomBytes(3).toString('hex')}`);
 const codexHome = join(work, 'home');
@@ -41,7 +42,11 @@ const expected = `bifrost-cursor-offline-tool-${randomBytes(16).toString('hex')}
 const proofPath = join(work, 'bridge-proof.txt');
 await writeFile(proofPath, expected + '\n', { mode: 0o600 });
 const sdkModels = CURSOR_MODELS.map(model => ({ id: model.upstream, displayName: model.name }));
+if (!sdkModels.some(model => model.id === selectedModel.upstream)) {
+  sdkModels.push({ id: selectedModel.upstream, displayName: selectedModel.name });
+}
 const catalog = appendCursorModels({ models: [] }, sdkModels);
+assert.ok(catalog.models.some(model => model.slug === selectedModel.id), 'The selected account-advertised model must be published to native Codex.');
 assert.ok(catalog.models.every(model => model.supports_parallel_tool_calls === false));
 assert.ok(catalog.models.every(model => model.supported_reasoning_levels.length === 0));
 const catalogPath = join(work, 'catalog.json');
@@ -327,6 +332,8 @@ const serialize = value => typeof value === 'object' && value !== null
   ? '{' + Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}=${JSON.stringify(item)}`).join(',') + '}' : JSON.stringify(value);
 try {
   nativeVersion = (await promisify(execFile)(binary, ['--version'], { env, cwd: work, windowsHide: true, timeout: 10000 })).stdout.trim();
+  console.log(JSON.stringify({ phase: 'fixture-start', nativeVersion, model: selectedModel.id, dynamicModelFixture,
+    evidencePath: join(work, 'result.json') }));
   const args = ['exec', '--ephemeral', '--json', '--skip-git-repo-check', '--sandbox', 'danger-full-access', '-C', work,
     '--model', selectedModel.id, ...Object.entries(config).flatMap(([key, value]) => ['-c', `${key}=${serialize(value)}`]),
     'Read bridge-proof.txt using the provided local shell tool. Reply with exactly the file contents. Do not access the network or any other file.'];
@@ -345,6 +352,7 @@ try {
   assert.equal(replies.at(-1)?.item.text?.trim(), expected); assert.equal(callbackReturned, true);
   assert.equal(requests.length, 3); assert.equal(adapterCalls, 3); assert.equal(sdkCreated.length, 1);
   assert.equal(sdkSends.length, 1); assert.equal(sdkCallbacks.length, 2); assert.equal(sdkCancellations.length, 0);
+  assert.ok(requests.every(request => request.model === selectedModel.id));
   if (syntheticInternalMetadata) {
     assert.equal(internalMetadataInjections.length, requests.length);
     assert.equal(new Set(internalMetadataInjections.map(item => item.turnId)).size, requests.length,
@@ -384,6 +392,7 @@ try {
   const runUsage = (await responses.status()).runUsageDiagnostics;
   assert.equal(runUsage.length, 1); assert.equal(runUsage[0].httpAttribution, 'unknown'); assert.equal(runUsage[0].usage.total_tokens, 80);
   const proof = { passed: true, nativeVersion, realInference: false, existingAuthLoaded: false, model: selectedModel.id,
+    dynamicModelFixture, publishedCatalogModels: catalog.models.map(model => model.slug),
     promptMode, preservesSystemPromptPriority: promptMode === 'system',
     syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     internalMetadataInjections, sdkMetadataLeakChecks,
@@ -397,12 +406,14 @@ try {
     selectedTool, requests, responseItems, terminalResponses, sdkCreated, sdkSends, usageRecords: usageEvents.length, errors };
   await writeFile(join(work, 'result.json'), JSON.stringify(proof, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify({ passed: true, nativeVersion, model: selectedModel.id, realInference: false, existingAuthLoaded: false,
+    dynamicModelFixture,
     promptMode, preservesSystemPromptPriority: promptMode === 'system',
     syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     localToolCalls: commands.length, sameSdkRunResumed: true, sdkSends: 1, httpUsageUnknown: true,
     inheritedMaxUsesCursorDefault: true, evidencePath: join(work, 'result.json') }, null, 2));
 } catch (error) {
   const proof = { passed: false, nativeVersion, realInference: false, existingAuthLoaded: false, model: selectedModel.id,
+    dynamicModelFixture, publishedCatalogModels: catalog.models.map(model => model.slug),
     promptMode, preservesSystemPromptPriority: promptMode === 'system',
     syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     internalMetadataInjections, sdkMetadataLeakChecks,

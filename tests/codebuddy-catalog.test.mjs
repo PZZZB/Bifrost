@@ -77,6 +77,20 @@ test('nested values in promotion price fields cannot export unselected metadata'
   assert.equal(JSON.stringify(result).includes('fixture-private-marker'), false);
 });
 
+test('owned cache projects explicit model capabilities without copying nested credentials', async t => {
+  const { reader } = await fixture(t, [ownEntry({ models: [{ id: 'gpt-6-astra', name: 'GPT-6-Astra',
+    supportsToolCall: true, supportsImages: false, supportsReasoning: true, maxInputTokens: 290000, maxOutputTokens: 32000,
+    reasoning: { supportedEfforts: ['low', 'high', 'max'], defaultEffort: 'high', summary: 'auto', canDisableThinking: false,
+      apiKey: 'PRIVATE_CAPABILITY' }, contextWindow: { defaultLength: 300000, apiKey: 'PRIVATE_CAPABILITY' },
+    headers: { Authorization: 'PRIVATE_CAPABILITY' } }] })]);
+  const result = await reader.load({ identity: { uid: 'owned-employee' } });
+  assert.deepEqual(result.models, [{ id: 'gpt-6-astra', name: 'GPT-6-Astra', supportsToolCall: true, supportsImages: false,
+    supportsReasoning: true, maxInputTokens: 290000, maxOutputTokens: 32000,
+    reasoning: { supportedEfforts: ['low', 'high', 'max'], defaultEffort: 'high', summary: 'auto', canDisableThinking: false },
+    contextWindow: { defaultLength: 300000 } }]);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_CAPABILITY'), false);
+});
+
 test('cancellation and missing cache never create a database', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'codebuddy-catalog-missing-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

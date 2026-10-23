@@ -46,7 +46,8 @@ test('observation persists only safe public names and actual adapter ids, preser
   assert.equal(snapshot.revision, 1);
   assert.deepEqual(snapshot.models.map(({ id, channel }) => [id, channel]), [[A, 'A'], [B, 'B'], [CB, 'CodeBuddy'], ['Cursor-adapter-supplied-id', 'Cursor']]);
   assert.equal(snapshot.models.at(-1).name, 'Adapter supplied model');
-  assert.equal(snapshot.models.every(model => model.enabled), true);
+  assert.equal(snapshot.models.filter(model => model.channel !== 'Cursor').every(model => model.enabled), true);
+  assert.equal(snapshot.models.at(-1).enabled, false);
   const raw = await readFile(path, 'utf8'), saved = JSON.parse(raw);
   assert.deepEqual(Object.keys(saved).sort(), ['disabledModels', 'models', 'revision', 'version']);
   assert.equal(saved.models.every(model => Object.keys(model).sort().join(',') === 'channel,id,name'), true);
@@ -143,16 +144,16 @@ test('strict updates reject unknown ids, duplicate ids, malformed payloads and e
   assert.deepEqual(policy.snapshot(), before);
 });
 
-test('the disabled set accepts 256 known ids and rejects 257 without weakening existing switches', async t => {
+test('the disabled set accepts 2048 known ids and rejects 2049 without weakening existing switches', async t => {
   const { policy } = await fixture(t);
-  const ids = Array.from({ length: 257 }, (_, index) => `original-${index}`);
+  const ids = Array.from({ length: 2049 }, (_, index) => `original-${index}`);
   await policy.observe({ models: ids.map(id => ({ slug: id, display_name: id })) });
-  await policy.update({ revision: policy.snapshot().revision, disabledModels: ids.slice(0, 256) });
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: ids.slice(0, 2048) });
   const before = policy.snapshot();
   await assert.rejects(policy.update({ revision: before.revision, disabledModels: ids }), isError(400, 'invalid_model_policy'));
   assert.deepEqual(policy.snapshot(), before);
-  assert.equal(policy.assertEnabled(ids[256]), true);
-  assert.throws(() => policy.assertEnabled(ids[255]), isError(400, 'model_disabled'));
+  assert.equal(policy.assertEnabled(ids[2048]), true);
+  assert.throws(() => policy.assertEnabled(ids[2047]), isError(400, 'model_disabled'));
 });
 
 test('a failed atomic replacement leaves the last successfully persisted in-memory switches intact', async t => {
@@ -199,11 +200,11 @@ test('corrupt or unreadable policies become a feature error without throwing dur
 test('invalid observed metadata cannot hide an unseen original model or replace a safe existing label', async t => {
   const { policy } = await fixture(t);
   await policy.observe(catalog());
-  const original = { models: [null, { slug: A, display_name: 'bad\nlabel' }, { slug: 'a'.repeat(257) },
+  const original = { models: [null, { slug: A, display_name: 'bad\nlabel' }, { slug: 'a'.repeat(513) },
     { slug: 'unknown-original', display_name: 'Safe unknown', auth: { token: 'must-not-persist' } }] };
   const result = await policy.observe(original);
   assert.equal(result.models.find(model => model.id === A).name, 'Original model');
-  assert.equal(result.models.some(model => model.id.length > 256), false);
+  assert.equal(result.models.some(model => model.id.length > 512), false);
   assert.deepEqual(policy.filterCatalog(original), original);
   await assert.rejects(policy.observe(catalog(), 'Arbitrary channel'), isError(400, 'invalid_model_policy'));
   await assert.rejects(policy.observe({ data: [] }), isError(400, 'invalid_model_policy'));
@@ -219,4 +220,54 @@ test('snapshots are isolated copies and a constructor without open cannot bypass
   const unopened = new ModelPolicy({ path });
   assert.equal(unopened.snapshot().available, false);
   assert.throws(() => unopened.assertEnabled(A), isError(503, 'model_policy_unavailable'));
+});
+
+test('new external models remain disabled through every observation entry point, including an A cache', async t => {
+  const { policy, path } = await fixture(t);
+  assert.throws(() => policy.assertEnabled('Cursor-new-model'), isError(400, 'model_disabled'));
+  await policy.observe({ models: [{ id: 'Cursor-new-model', name: 'From A cache' }, { id: 'CodeBuddy-new-model', name: 'From A cache' }] }, 'A');
+  assert.equal(policy.snapshot().models.every(model => !model.enabled), true);
+  assert.equal(policy.snapshot().models.every(model => ['Cursor', 'CodeBuddy'].includes(model.channel)), true);
+  await policy.observe({ models: [{ id: 'Cursor-new-model', name: 'From actual account' }] }, 'Cursor', { defaultEnabled: false });
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: ['CodeBuddy-new-model'] });
+  assert.equal(policy.assertEnabled('Cursor-new-model'), true);
+  const reopened = await ModelPolicy.open({ path });
+  assert.equal(reopened.assertEnabled('Cursor-new-model'), true);
+  assert.throws(() => reopened.assertEnabled('CodeBuddy-new-model'), isError(400, 'model_disabled'));
+});
+
+test('source unavailability stays separate from saved switches and cannot enable a new unavailable model', async t => {
+  const { policy, path } = await fixture(t);
+  const id = 'Cursor-catalog-model';
+  await policy.observe({ models: [{ id, name: 'Catalog model', available: true, source: 'remote' }] }, 'Cursor', { defaultEnabled: false, complete: true });
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [] });
+  const unavailable = await policy.observe({ models: [] }, 'Cursor', { complete: true });
+  assert.equal(unavailable.models[0].enabled, true); assert.equal(unavailable.models[0].available, false);
+  assert.throws(() => policy.assertEnabled(id), isError(403, 'model_unavailable'));
+  await policy.update({ revision: unavailable.revision, disabledModels: [id] });
+  await assert.rejects(policy.update({ revision: policy.snapshot().revision, disabledModels: [] }), isError(400, 'invalid_model_policy'));
+  await policy.observe({ models: [{ id, name: 'Catalog model', available: true }] }, 'Cursor', { complete: true });
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [] });
+  assert.equal(policy.assertEnabled(id), true);
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  assert.deepEqual(Object.keys(saved.models[0]).sort(), ['channel', 'id', 'name']);
+});
+
+test('model availability follows the current authorization even during another channel write', async t => {
+  const { policy, path } = await fixture(t), id = 'Cursor-version-bound';
+  let version = 0; policy.setAuthorizationVersionGetter('Cursor', () => version);
+  const models = [{ id, name: 'Version bound', available: true }];
+  await policy.observe({ models }, 'Cursor', { authorizationVersion: 0 });
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [] });
+  assert.equal(policy.assertEnabled(id), true);
+  version++;
+  assert.equal(policy.snapshot().models[0].available, false);
+  assert.throws(() => policy.assertEnabled(id), isError(403, 'model_unavailable'));
+  const revision = policy.snapshot().revision;
+  await policy.observe({ models }, 'Cursor', { authorizationVersion: 0 });
+  assert.equal(policy.snapshot().revision, revision); assert.equal(policy.snapshot().models[0].available, false);
+  await policy.observe({ models }, 'Cursor', { authorizationVersion: 1 });
+  assert.equal(policy.assertEnabled(id), true);
+  assert.equal(JSON.stringify(policy.snapshot()).includes('authorizationVersion'), false);
+  assert.equal((await readFile(path, 'utf8')).includes('authorizationVersion'), false);
 });

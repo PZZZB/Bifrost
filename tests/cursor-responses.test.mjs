@@ -108,6 +108,23 @@ test('text-only SDK run uses exact public options, isolated storage, actual mode
   assert.equal(Object.hasOwn(options, 'maxTurns'), false); assert.equal(Object.hasOwn(options, 'maxTokens'), false);
 });
 
+test('every safe account-listed model routes to its exact SDK ID and absent models never create an agent', async t => {
+  const f = await fixture(t, async context => { context.text('Account model.'); context.finish(); });
+  f.setCatalog([{ id: 'composer-2.5', displayName: 'Composer 2.5' }, { id: 'gpt-5.3-codex',
+    parameters: [{ id: 'reasoning', values: [{ value: 'low' }, { value: 'high' }, { value: 'extra-high' }] }] }]);
+  const first = await f.request({ ...base, model: 'Cursor-composer-2.5' });
+  assert.equal(first.status, 200); await first.json(); assert.equal(first.bridgeModel, 'composer-2.5');
+  assert.deepEqual(f.created[0].model, { id: 'composer-2.5' });
+  const second = await f.request({ ...base, model: 'Cursor-gpt-5.3-codex', reasoning: { effort: 'high' } });
+  assert.equal(second.status, 200); await second.json();
+  assert.deepEqual(f.created[1].model, { id: 'gpt-5.3-codex', params: [{ id: 'reasoning', value: 'high' }] });
+  for (const id of ['Cursor-unlisted-model', model, 'Cursor-gpt-5.3-codex-unlisted']) {
+    const denied = await f.request({ ...base, model: id });
+    assert.equal(denied.status, 403); assert.equal((await denied.json()).error.code, 'cursor_model_unavailable');
+  }
+  assert.equal(f.created.length, 2); assert.equal(f.sends.length, 2);
+});
+
 test('client result resumes the exact original SDK callback and live run without a second send', async t => {
   let callbackResult;
   const f = await fixture(t, async context => {
@@ -341,6 +358,19 @@ test('a model without an effort parameter explicitly uses Cursor defaults and ne
   assert.equal((await f.request({ ...base, reasoning: { effort: 'max', invented: true } })).status, 400);
 });
 
+test('unknown vendor reasoning values use Cursor defaults and extra-high never becomes Codex xhigh', async t => {
+  const f = await fixture(t, async context => { context.text('Actual defaults.'); context.finish(); });
+  f.setCatalog([{ id: upstream, parameters: [{ id: 'reasoning', values: [{ value: 'extra-high' }, { value: 'adaptive' }] }] }]);
+  const response = await f.request({ ...base, reasoning: { effort: 'xhigh' } }), body = await response.json();
+  assert.equal(response.status, 200); assert.deepEqual(f.created[0].model, { id: upstream });
+  assert.deepEqual(f.sends[0].options.model, { id: upstream }); assert.deepEqual(body.reasoning, {});
+  f.setCatalog([{ id: upstream, parameters: [{ id: 'reasoning', values: [{ value: 'low' }, { value: 'extra-high' }] }] }]);
+  const unsupported = await f.request({ ...base, reasoning: { effort: 'xhigh' } });
+  assert.equal(unsupported.status, 400); await unsupported.json(); assert.equal(f.created.length, 1);
+  const unrecognized = await f.request({ ...base, reasoning: { effort: 'extra-high' } });
+  assert.equal(unrecognized.status, 400); await unrecognized.json(); assert.equal(f.created.length, 1);
+});
+
 test('client discovery adds tools to a live run through the checked dispatcher without another send', async t => {
   const search = { type: 'tool_search', execution: 'client', description: 'Discover tools.',
     parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } };
@@ -437,6 +467,20 @@ test('base64 and URL images use public SDKImage structures and invalid image dat
   assert.match((await invalid.json()).error.message, /图片/);
 });
 
+test('explicit unavailable or negative Cursor capabilities reject requests before SDK creation', async t => {
+  const f = await fixture(t, async context => { context.text('Unexpected.'); context.finish(); });
+  for (const source of [{ id: upstream, available: false }, { id: upstream, supportsTools: false },
+    { id: upstream, capabilities: { streaming: false } }, { id: upstream, outputModalities: ['image'] }]) {
+    f.setCatalog([source]); const denied = await f.request();
+    assert.equal(denied.status, 403); assert.equal((await denied.json()).error.code, 'cursor_model_unavailable');
+  }
+  const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
+  f.setCatalog([{ id: upstream, supportsImages: false, inputModalities: ['text', 'image'] }]);
+  const image = await f.request({ ...base, input: [{ role: 'user', content: [{ type: 'input_image', image_url: `data:image/png;base64,${png}` }] }] });
+  assert.equal(image.status, 400); assert.equal((await image.json()).error.code, 'cursor_image_invalid');
+  assert.equal(f.created.length, 0); assert.equal(f.sends.length, 0);
+});
+
 test('cancelAll invalidates requests waiting for credential or catalog metadata before any SDK call', async t => {
   for (const method of ['credential', 'getModels']) {
     const f = await fixture(t, async context => { context.text('Fresh login.'); context.finish(); });
@@ -487,6 +531,26 @@ test('completed SDK checkpoints resume after bridge restart with exact public st
   const final = await last.request({ path: '/responses', body: { ...base, input: [...input, ...second.output, { role: 'user', content: 'Third turn.' }] } });
   assert.equal(final.status, 200); await final.json(); assert.equal(f.resumed.length, 2);
   assert.deepEqual(f.sends.at(-1).message, { text: 'Third turn.' }); await last.close();
+});
+
+test('completed checkpoints support newly discovered models and recheck current account access before SDK resume', async t => {
+  const f = await fixture(t, async context => { context.text('New model checkpoint.'); context.finish(); }, { realCheckpoint: true });
+  const source = { id: 'composer-future-3.1', displayName: 'Composer Future' };
+  f.setCatalog([source]);
+  const body = { ...base, model: `Cursor-${source.id}` };
+  const first = await (await f.request(body)).json(); await f.provider.close();
+  const next = new CursorResponsesProvider({ cursorService: f.service, stateDir: f.directory, sdkLoader: async () => f.sdk });
+  t.after(() => next.close());
+  const continued = { ...body, input: history(first, [{ role: 'user', content: 'Continue this discovered model.' }]) };
+  f.setCatalog([]);
+  const denied = await next.request({ path: '/responses', body: continued });
+  assert.equal(denied.status, 403); assert.equal((await denied.json()).error.code, 'cursor_model_unavailable');
+  assert.equal(f.resumed.length, 0);
+  f.setCatalog([source]);
+  const resumed = await next.request({ path: '/responses', body: continued });
+  assert.equal(resumed.status, 200); await resumed.json(); assert.equal(f.resumed.length, 1);
+  assert.deepEqual(f.resumed[0].options.model, { id: source.id });
+  assert.equal(resumed.bridgeModel, source.id);
 });
 
 test('logout permanently invalidates completed recovery handles and pending tool callbacks remain unrecoverable', async t => {

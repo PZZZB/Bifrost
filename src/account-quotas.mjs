@@ -131,7 +131,13 @@ export class AccountQuotas {
   }
 
   async snapshot() {
+    const bindingKey = this.bindingKey();
     const [A, B] = await Promise.all([this.read('A'), this.read('B')]);
-    return { timeZone: 'America/Los_Angeles', accounts: { A, B } };
+    const currentB = this.bindingKey() === bindingKey ? B : failure('账号 B 已变更，请重新查询。', null);
+    const card = (account, quota) => ({ ...quota, authenticated: quota.status === 'ok' ? true : account === 'B' && this.bindingKey() === null ? false : null,
+      identity: account === 'B' && quota.status === 'ok' && typeof this.state.pinnedAccount?.email === 'string'
+        && this.state.pinnedAccount.email.length <= 320 && !/[\x00-\x1f\x7f]/.test(this.state.pinnedAccount.email) ? this.state.pinnedAccount.email : null,
+      source: 'codex-account-rate-limits' });
+    return { timeZone: 'America/Los_Angeles', accounts: { A: card('A', A), B: card('B', currentB) } };
   }
 }

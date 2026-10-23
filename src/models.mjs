@@ -1,7 +1,8 @@
 import { BridgeError } from './storage.mjs';
 import { CODEBUDDY_MODEL } from './codebuddy-provider.mjs';
 import { CODEBUDDY_EFFORTS } from './codebuddy-thinking.mjs';
-import { CURSOR_MODELS } from './cursor-service.mjs';
+import { CURSOR_MODELS, resolveCursorModel, cursorEffortParameter, cursorImageCapability, cursorModelAvailability } from './cursor-service.mjs';
+import { resolveCodeBuddyAlias } from './codebuddy-models.mjs';
 
 export const B_MODELS = [
   { id: 'B-gpt-6-astra', name: 'B-GPT-6 Astra', upstream: 'gpt-6-astra' },
@@ -17,7 +18,7 @@ export const CODEBUDDY_CODEX_MODEL = Object.freeze({
 });
 
 export function resolveCodeBuddyModel(model) {
-  return model === CODEBUDDY_CODEX_MODEL.id ? CODEBUDDY_CODEX_MODEL : null;
+  return model === CODEBUDDY_CODEX_MODEL.id ? CODEBUDDY_CODEX_MODEL : resolveCodeBuddyAlias(model);
 }
 
 const codeBuddyInstructions = 'You are a coding assistant. Follow the user\'s instructions and use available tools when needed. '
@@ -139,23 +140,71 @@ export function appendCodeBuddyModel(data) {
   return result;
 }
 
-/** Append only target models actually observed in this Cursor account's SDK catalog. */
+const knownEfforts = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
+const publicName = (value, fallback) => typeof value === 'string' && value.trim() && value.length <= 512
+  && !/[\x00-\x1f\x7f]/.test(value) ? value : fallback;
+function nextPriority(models, label) {
+  const priority = models.reduce((maximum, model) => Number.isFinite(model?.priority)
+    ? Math.max(maximum, model.priority) : maximum, models.length - 1) + 1;
+  if (!Number.isInteger(priority) || priority > 2147483647) {
+    throw new BridgeError(`模型目录无法为 ${label} 分配有效的末尾优先级。`, 502, 'invalid_model_catalog');
+  }
+  return priority;
+}
+function checkAlias(models, id, label) {
+  if (models.some(model => model?.slug === id || model?.id === id)) {
+    throw new BridgeError(`模型目录包含保留别名 ${id}，无法安全追加 ${label}。`, 409, 'model_alias_conflict');
+  }
+}
+
+/** Publish every usable account model; unsupported catalog entries remain visible in management. */
+export function appendCodeBuddyModels(data, sources) {
+  requireCatalog(data, 'A');
+  if (!Array.isArray(sources) || sources.length > 512) throw new BridgeError('CodeBuddy 未返回有效的账号模型目录。', 502, 'invalid_model_catalog');
+  const result = structuredClone(data), seen = new Set();
+  for (const source of sources) {
+    const alias = resolveCodeBuddyModel(source?.id);
+    if (!alias || seen.has(alias.id)) throw new BridgeError('CodeBuddy 目录含无效或重复模型。', 502, 'invalid_model_catalog');
+    seen.add(alias.id);
+    checkAlias(result.models, alias.id, 'CodeBuddy');
+    if (source.available === false) continue;
+    const value = appendCodeBuddyModel({ models: [] }).models[0];
+    const legacy = alias.id === CODEBUDDY_CODEX_MODEL.id;
+    const efforts = [...new Set((source.efforts ?? (legacy ? CODEBUDDY_EFFORTS : []))
+      .filter(effort => knownEfforts.has(effort)))];
+    const preferred = source.defaultEffort ?? (legacy ? 'high' : null);
+    const contextWindow = Number.isSafeInteger(source.contextWindow) && source.contextWindow > 0
+      ? Math.min(source.contextWindow, 200000) : legacy ? 200000 : 128000;
+    Object.assign(value, { slug: alias.id, display_name: publicName(source.name, alias.id),
+      description: 'CodeBuddy account model with Codex client tools. OpenAI hosted web search is unavailable.'
+        + (efforts.length ? '' : ' Uses upstream default reasoning; Codex effort levels do not apply.'),
+      priority: nextPriority(result.models, 'CodeBuddy'),
+      supported_reasoning_levels: efforts.map(effort => ({ effort, description: effortDescriptions[effort] ?? `CodeBuddy ${effort}` })),
+      default_reasoning_level: efforts.includes(preferred) ? preferred : null,
+      context_window: contextWindow, max_context_window: contextWindow,
+      input_modalities: source.supportsImages !== false && (source.inputModalities?.includes('image') || legacy && source.inputModalities === undefined) ? ['text', 'image'] : ['text'],
+      supports_parallel_tool_calls: source.supportsParallelToolCalls === true || legacy,
+    });
+    result.models.push(value);
+  }
+  return result;
+}
+
+/** Append the complete account SDK catalog in its original order. */
 export function appendCursorModels(data, sdkSourceModels) {
   requireCatalog(data, 'A');
-  if (!Array.isArray(sdkSourceModels)) throw new BridgeError('Cursor 未返回有效的 SDK 模型目录。', 502, 'invalid_model_catalog');
-  const result = structuredClone(data);
-  for (const { id, name, upstream } of CURSOR_MODELS) {
-    const sources = sdkSourceModels.filter(source => source?.id === upstream);
-    if (!sources.length) continue;
-    if (sources.length !== 1) throw new BridgeError('Cursor SDK 模型目录包含重复模型。', 502, 'invalid_model_catalog');
-    if (result.models.some(model => model?.slug === id || model?.id === id)) {
-      throw new BridgeError(`模型目录包含保留别名 ${id}，无法安全追加 Cursor。`, 409, 'model_alias_conflict');
-    }
-    const priority = result.models.reduce((maximum, model) => Number.isFinite(model?.priority)
-      ? Math.max(maximum, model.priority) : maximum, result.models.length - 1) + 1;
-    if (!Number.isInteger(priority) || priority > 2147483647) throw new BridgeError('模型目录无法为 Cursor 分配有效的末尾优先级。', 502, 'invalid_model_catalog');
-    const source = sources[0], parameter = source.parameters?.find(item => ['reasoning_effort', 'reasoningEffort', 'effort'].includes(item.id));
-    const knownEfforts = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
+  if (!Array.isArray(sdkSourceModels) || sdkSourceModels.length > 512) throw new BridgeError('Cursor 未返回有效的 SDK 模型目录。', 502, 'invalid_model_catalog');
+  const result = structuredClone(data), seen = new Set();
+  for (const source of sdkSourceModels) {
+    const alias = typeof source?.id === 'string' ? resolveCursorModel(`Cursor-${source.id}`) : null;
+    if (!alias || seen.has(alias.id)) throw new BridgeError('Cursor SDK 模型目录包含无效或重复模型。', 502, 'invalid_model_catalog');
+    seen.add(alias.id);
+    const { id, upstream } = alias;
+    const name = source.displayName ? `Cursor ${publicName(source.displayName, upstream)}`
+      : CURSOR_MODELS.find(model => model.id === id)?.name ?? `Cursor ${upstream}`;
+    checkAlias(result.models, id, 'Cursor');
+    if (!cursorModelAvailability(source).available) continue;
+    const priority = nextPriority(result.models, 'Cursor'), parameter = cursorEffortParameter(source);
     const efforts = [...new Set((parameter?.values ?? []).map(item => item.value).filter(value => knownEfforts.has(value)))];
     const preferred = source.variants?.find(variant => variant.isDefault)?.params?.find(item => item.id === parameter?.id)?.value;
     const instructions = 'You are a coding assistant using the Cursor Agent SDK. Follow the user instructions and configured tool permissions. '
@@ -178,7 +227,7 @@ export function appendCursorModels(data, sdkSourceModels) {
       web_search_tool_type: 'text', truncation_policy: { mode: 'tokens', limit: 10000 }, supports_image_detail_original: false,
       // This is a conservative client history budget, not a claim about SDK raw-inference limits.
       context_window: 128000, max_context_window: 128000, effective_context_window_percent: 90,
-      experimental_supported_tools: [], input_modalities: ['text', 'image'], supports_parallel_tool_calls: false,
+      experimental_supported_tools: [], input_modalities: cursorImageCapability(source) === true ? ['text', 'image'] : ['text'], supports_parallel_tool_calls: false,
       supports_search_tool: true, supports_experimental_context: false, use_responses_lite: false,
       supports_reasoning_effort_updates: false, prefer_websockets: false, tool_mode: 'direct', multi_agent_version: null,
     });

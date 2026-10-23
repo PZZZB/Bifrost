@@ -6,7 +6,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Gateway } from '../src/gateway.mjs';
-import { CURSOR_MODELS } from '../src/cursor-service.mjs';
+import { CURSOR_MODELS, resolveCursorModel } from '../src/cursor-service.mjs';
+import { ModelPolicy } from '../src/model-policy.mjs';
 import { CursorResponsesProvider, CURSOR_RESPONSES_STATE_PREFIX } from '../src/cursor-responses.mjs';
 import { CODEBUDDY_RESPONSES_STATE_PREFIX } from '../src/codebuddy-responses.mjs';
 
@@ -35,13 +36,14 @@ async function sdkProvider(t, { events, result, gateAfterFirst = false } = {}) {
   return { provider, counts };
 }
 
-async function fixture(t, { enabled = () => true, provider, sourceModels = CURSOR_MODELS.map(model => ({ id: model.upstream })) } = {}) {
+async function fixture(t, { enabled = () => true, provider, sourceModels = CURSOR_MODELS.map(model => ({ id: model.upstream })), modelPolicy = null } = {}) {
   const calls = [], records = [];
   let nativeCalls = 0;
-  const gateway = new Gateway({ gatewayKey: key, cursorEnabled: enabled,
+  const gateway = new Gateway({ gatewayKey: key, cursorEnabled: enabled, modelPolicy,
     cursorProvider: provider ?? { status: async () => ready, request: async options => {
       calls.push(options);
-      const model = CURSOR_MODELS.find(model => model.id === JSON.parse(options.body).model);
+      const model = resolveCursorModel(JSON.parse(options.body).model);
+      if (!model || !sourceModels.some(source => source.id === model.upstream)) return Response.json({ error: { code: 'cursor_model_unavailable' } }, { status: 403 });
       const response = Response.json({ id: 'resp-cursor-fixture', status: 'completed', output: [], usage: { input_tokens: 0, output_tokens: 0 } });
       response.bridgeUsage = Promise.resolve(null); response.bridgeModel = model.upstream; return response;
     } }, getCursorModels: async () => sourceModels,
@@ -83,9 +85,9 @@ test('Cursor aliases route exclusively to the SDK bridge, preserving client tool
   assert.equal(gateway.pendingRequests, 0);
 });
 
-test('disabled or misspelled Cursor models fail locally without using another subscription', async t => {
+test('disabled Cursor aliases and malformed reserved names fail without using another subscription', async t => {
   const { url, nativeCalls, calls } = await fixture(t, { enabled: () => false });
-  for (const [model, expected] of [[CURSOR_MODELS[0].id, 503], ['Cursor-gemini-4-wrong', 400], ['cursor/grok', 400]]) {
+  for (const [model, expected] of [[CURSOR_MODELS[0].id, 503], ['Cursor-gemini-4-wrong', 503], ['Cursor-/invalid', 400], ['cursor/grok', 400]]) {
     const response = await fetch(`${url}/responses`, { method: 'POST', headers, body: JSON.stringify({ model }) });
     assert.equal(response.status, expected); await response.text();
   }
@@ -118,8 +120,50 @@ test('Cursor joins the catalog after the original A/B and CodeBuddy entries only
   const { url } = await fixture(t, { sourceModels: [{ id: CURSOR_MODELS[1].upstream }, { id: 'unrequested-model' }] });
   const response = await fetch(`${url}/models`, { headers }); assert.equal(response.status, 200);
   const data = await response.json();
-  assert.deepEqual(data.models.map(model => model.slug), ['a-model', 'B-gpt-6-astra', 'B-gpt-6.1-sol', 'claude-codebuddy-opus-5-5', CURSOR_MODELS[1].id]);
+  assert.deepEqual(data.models.map(model => model.slug), ['a-model', 'B-gpt-6-astra', 'B-gpt-6.1-sol', 'claude-codebuddy-opus-5-5', CURSOR_MODELS[1].id, 'Cursor-unrequested-model']);
   assert.deepEqual(data.models[0].preserved, { data: true });
+});
+
+test('full Cursor discovery does not publish or execute a new alias before the user enables it', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'bifrost-cursor-switches-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const policy = await ModelPolicy.open({ path: join(directory, 'policy.json') }), id = 'Cursor-future-model';
+  await policy.observe({ models: CURSOR_MODELS });
+  const { url, calls, gateway } = await fixture(t, { modelPolicy: policy, sourceModels: [...CURSOR_MODELS.map(model => ({ id: model.upstream })), { id: 'future-model' }] });
+  const listing = await (await fetch(`${url}/models`, { headers })).json();
+  assert.equal(listing.models.some(model => model.slug === id), false);
+  assert.equal(policy.snapshot().models.find(model => model.id === id).enabled, false);
+  const blocked = await fetch(`${url}/responses`, { method: 'POST', headers, body: JSON.stringify({ model: id }) });
+  assert.equal(blocked.status, 400); assert.equal((await blocked.json()).error.code, 'model_disabled'); assert.equal(calls.length, 0);
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [] });
+  const published = await (await fetch(`${url}/models`, { headers })).json(); assert.equal(published.models.some(model => model.slug === id), true);
+  const accepted = await fetch(`${url}/responses`, { method: 'POST', headers, body: JSON.stringify({ model: id }) });
+  assert.equal(accepted.status, 200); await accepted.text(); assert.equal(calls.length, 1);
+  assert.equal(gateway.metrics.accounts.Cursor.completed, 1); assert.equal(gateway.metrics.accounts.A.requests, 0);
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [id] });
+  const closed = await fetch(`${url}/responses`, { method: 'POST', headers, body: JSON.stringify({ model: id }) });
+  assert.equal(closed.status, 400); await closed.text(); assert.equal(calls.length, 1);
+});
+
+test('the final catalog drops an earlier channel that reauthorizes while another source is still pending', async () => {
+  let version = 0, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const provider = { status: async () => ready, request() { assert.fail('Metadata must not infer'); } };
+  const gateway = new Gateway({ gatewayKey: key, catalogWaitMs: 2000,
+    backend: { credentials: async () => ({ value: 'b-fixture', accountId: 'b-fixture' }) },
+    getAProvider: async () => ({ config: { base_url: 'https://a.invalid/codex' } }),
+    fetchImpl: async address => Response.json(address.startsWith('https://a.invalid/') ? { models: [{ slug: 'a-model' }] }
+      : { models: [{ slug: 'gpt-6-astra' }, { slug: 'gpt-6.1-sol' }] }),
+    codeBuddyProvider: provider, getCodeBuddyModels: async () => [{ id: 'CodeBuddy-old-model', name: 'Old model', available: true }],
+    getCodeBuddyAuthorizationVersion: () => version,
+    cursorProvider: { ...provider, status: async () => { await gate; return ready; } }, getCursorModels: async () => [{ id: 'current-model' }],
+  });
+  let data;
+  const pending = gateway.catalog({ headers }, { writeHead() {}, end: value => { data = JSON.parse(value); } }, new URL('http://fixture.invalid/models'));
+  await new Promise(resolve => setImmediate(resolve)); version++; release(); await pending;
+  assert.equal(data.models.some(model => model.slug === 'CodeBuddy-old-model'), false);
+  assert.equal(data.models.some(model => model.slug === 'Cursor-current-model'), true);
+  assert.equal(data.models[0].slug, 'a-model');
 });
 
 test('Cursor asynchronous SDK startup rejection reaches Codex as a terminal HTTP error before SSE headers', async t => {

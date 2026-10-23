@@ -3,10 +3,9 @@ import { imagePart, ImageConversionError } from './codebuddy-images.mjs';
 import { documentParts, DocumentConversionError } from './codebuddy-documents.mjs';
 import { thinkingOptions, thinkingText, ThinkingConversionError } from './codebuddy-thinking.mjs';
 import { CodeBuddyThinkingState, CODEBUDDY_STATE_PREFIX, ThinkingStateError } from './codebuddy-thinking-state.mjs';
+import { CODEBUDDY_MODEL, codeBuddyModelAlias, resolveCodeBuddyAlias, isCodeBuddyOpus55 } from './codebuddy-models.mjs';
 
-export const CODEBUDDY_MODEL = Object.freeze({
-  id: 'claude-codebuddy-opus-5-5', name: 'CodeBuddy · Opus 5.5',
-});
+export { CODEBUDDY_MODEL };
 
 const TRANSPORT = 'codebuddy-chat-completions';
 const MAX_EVENT = 16 * 1024 * 1024;
@@ -103,10 +102,11 @@ function translate(body, upstreamModel, readThinking = thinkingText) {
   let ignoredCacheHints = 0;
   const onHint = () => { ignoredCacheHints++; };
   cacheHint(body.cache_control, onHint);
-  if (body.model !== CODEBUDDY_MODEL.id) invalid('未知的 CodeBuddy 模型。');
+  const alias = resolveCodeBuddyAlias(body.model);
+  if (!alias) invalid('未知的 CodeBuddy 模型。');
   if (!Number.isSafeInteger(body.max_tokens) || body.max_tokens < 1) invalid('max_tokens 必须是正整数。');
   if (body.stream !== undefined && typeof body.stream !== 'boolean') invalid();
-  const thinking = thinkingOptions(body);
+  const thinking = thinkingOptions(body, alias.upstream === null ? {} : { model: {}, validateOnly: true });
   if (body.stop_sequences !== undefined && (!Array.isArray(body.stop_sequences) || body.stop_sequences.length)) {
     invalid('CodeBuddy 当前未提供可核实的 stop_sequence 返回值。');
   }
@@ -236,23 +236,25 @@ function translate(body, upstreamModel, readThinking = thinkingText) {
   }
   if (pending.size || body.messages.at(-1).role !== 'user') invalid('工具结果缺失或 assistant 预填充未受支持。');
   return { body: result, streaming: body.stream === true, toolNames, forbidTools, requireTools, forcedTool,
-    ignoredCacheHints, thinking };
+    ignoredCacheHints, thinking, alias, original: body, images };
 }
 
-function isOpus55(value) {
-  return typeof value === 'string' && /^(?:claude)?(?:opus55|55opus)$/.test(value.toLowerCase().replace(/[\s._-]+/g, ''));
-}
-
-function selectModel(catalog) {
+function catalogModels(catalog) {
   const models = Array.isArray(catalog) ? catalog : catalog?.models;
-  if (!Array.isArray(models)) throw new AdapterError('CodeBuddy 模型目录格式无效。', 502);
-  const matches = models.filter(model => object(model) && (isOpus55(model.id) || isOpus55(model.name))
-    && typeof model.id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:[\]/-]{0,255}$/.test(model.id)
-    && model.disabled !== true && model.available !== false && model.enabled !== false && !model.error && !model.disabledReason);
-  const distinct = new Map(matches.map(model => [model.id, model]));
-  if (distinct.size !== 1) throw new AdapterError(distinct.size ? 'CodeBuddy Opus 5.5 目录存在多个候选，已停止选择。'
-    : '当前 CodeBuddy 账号未提供可用的 Opus 5.5。', 503);
-  return distinct.values().next().value;
+  if (!Array.isArray(models) || models.length > 512) throw new AdapterError('CodeBuddy 模型目录格式无效。', 502);
+  const valid = models.filter(model => codeBuddyModelAlias(model) !== null);
+  const candidates = new Set(valid.filter(model => isCodeBuddyOpus55(model) && codeBuddyModelAlias(model).available).map(model => model.id));
+  const counts = new Map();
+  for (const model of valid) counts.set(model.id, (counts.get(model.id) ?? 0) + 1);
+  const mapped = new Map();
+  for (const model of valid) {
+    if (mapped.has(model.id)) continue;
+    const candidate = isCodeBuddyOpus55(model) && codeBuddyModelAlias(model).available;
+    const ambiguous = counts.get(model.id) > 1 || candidate && candidates.size > 1;
+    mapped.set(model.id, { source: model, descriptor: codeBuddyModelAlias(model, {
+      legacyOpus: candidate && candidates.size === 1, ambiguous }) });
+  }
+  return [...mapped.values()];
 }
 
 function publicCatalog(catalog) {
@@ -260,7 +262,7 @@ function publicCatalog(catalog) {
   const savedAt = source === 'native-cache' && Number.isSafeInteger(catalog?.savedAt) && catalog.savedAt >= 0
     && Number.isFinite(new Date(catalog.savedAt).getTime()) ? catalog.savedAt : null;
   return { source, savedAt,
-    liveVerified: source === 'remote' && (Array.isArray(catalog) || catalog?.liveVerified === true) };
+    liveVerified: source === 'remote' && (Array.isArray(catalog) || catalog?.liveVerified === true), models: [] };
 }
 
 const promotionKeys = new Set(['id', 'name', 'priority', 'startAt', 'endAt', 'startTime', 'endTime',
@@ -363,7 +365,7 @@ class Completion {
   start() {
     if (this.started) return;
     this.started = true;
-    this.emit('message_start', { message: { id: this.id, type: 'message', role: 'assistant', model: CODEBUDDY_MODEL.id,
+    this.emit('message_start', { message: { id: this.id, type: 'message', role: 'assistant', model: this.request.alias.id,
       content: [], stop_reason: null, stop_sequence: null, usage: wireUsage(this.usage) } });
   }
   closeText() {
@@ -525,7 +527,7 @@ class Completion {
     this.emit('message_stop');
   }
   message() {
-    return { id: this.id, type: 'message', role: 'assistant', model: CODEBUDDY_MODEL.id,
+    return { id: this.id, type: 'message', role: 'assistant', model: this.request.alias.id,
       content: this.blocks, stop_reason: this.stopReason, stop_sequence: null, usage: wireUsage(this.usage) };
   }
 }
@@ -556,22 +558,30 @@ export class CodeBuddyProvider {
     const account = status?.identity ?? null;
     if (status?.authenticated === false) { this.#cache = null; this.#catalog = null; throw new AdapterError('CodeBuddy 员工账号尚未登录。', 401); }
     const identity = status?.identity?.uid ?? '';
-    if (this.#cache && this.#cache.identity === identity && this.#cache.expires > this.now()) return { model: this.#cache.model, identity: account };
+    if (this.#cache && this.#cache.identity === identity && this.#cache.expires > this.now()) return { models: this.#cache.models, identity: account };
     this.#catalog = null;
     try {
       const catalog = await this.client.modelCatalog({ signal });
       this.#catalog = publicCatalog(catalog);
-      const model = selectModel(catalog);
-      this.#cache = { identity, model, expires: this.now() + this.catalogTtlMs };
-      return { model, identity: account };
+      const models = catalogModels(catalog);
+      for (const model of models) model.descriptor.source = this.#catalog.source;
+      this.#catalog.models = models.map(model => structuredClone(model.descriptor));
+      this.#cache = { identity, models, expires: this.now() + this.catalogTtlMs };
+      return { models, identity: account };
     } catch (error) { this.#cache = null; throw error; }
+  }
+  async getModels({ signal } = {}) {
+    const { models } = await this.#metadata(signal);
+    return models.map(model => structuredClone(model.descriptor));
   }
   async status() {
     try {
-      const { model, identity } = await this.#metadata();
-      return { authenticated: true, ready: true, modelAvailable: true, error: null,
+      const { models, identity } = await this.#metadata();
+      const available = models.some(model => model.descriptor.available), legacy = models.find(model => model.descriptor.id === CODEBUDDY_MODEL.id && model.descriptor.available);
+      return { authenticated: true, ready: available, modelAvailable: available,
+        error: available ? null : '当前 CodeBuddy 账号目录没有可用的文本工具对话模型。',
         username: typeof identity?.username === 'string' ? identity.username.slice(0, 256) : null,
-        transport: TRANSPORT, upstreamModel: model.id, billing: billing(model), catalog: { ...this.#catalog },
+        transport: TRANSPORT, upstreamModel: legacy?.source.id ?? null, billing: billing(legacy?.source ?? {}), catalog: structuredClone(this.#catalog),
         cacheControl: { behavior: 'validated_hints_ignored', usage: 'upstream_reported_only' } };
     } catch (error) {
       let state = null;
@@ -603,7 +613,16 @@ export class CodeBuddyProvider {
         return thinkingText(block);
       });
       const metadata = await this.#metadata(signal);
-      model = metadata.model; identity = metadata.identity?.uid; request.body.model = model.id;
+      const selected = metadata.models.find(model => model.descriptor.id === request.alias.id);
+      if (!selected?.descriptor.available) throw new AdapterError(selected?.descriptor.reason || '当前 CodeBuddy 账号目录未提供可用的所选模型。', 503);
+      model = selected.source; identity = metadata.identity?.uid; request.body.model = model.id;
+      if (request.alias.upstream !== null) {
+        request.thinking = thinkingOptions(request.original, { model: selected.descriptor });
+        Object.assign(request.body, request.thinking.body);
+        if (selected.descriptor.maxOutputTokens && request.body.max_tokens > selected.descriptor.maxOutputTokens) invalid('max_tokens 超过当前账号目录的模型上限。');
+        if (request.images && selected.descriptor.inputModalities?.includes('image') !== true) invalid('当前 CodeBuddy 模型目录未确认支持图片输入。');
+        if (request.toolNames.size && selected.descriptor.supportsToolCall === false) invalid('当前 CodeBuddy 模型明确不支持工具调用。');
+      }
       if (scopes.some(state => state.identity !== identity || state.model !== model.id)) {
         throw new AdapterError('思考接续状态与当前 CodeBuddy 账号或模型不匹配，请使用原账号或新建会话。', 403);
       }

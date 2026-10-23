@@ -81,6 +81,56 @@ test('model settings and Cursor account mutations share local authentication and
   assert.equal(saved, 1); assert.equal(logins, 1);
 });
 
+test('the authenticated model-settings GET discovers complete account directories without a Codex model request', async t => {
+  let discoveryCalls = 0;
+  const snapshot = { available: true, revision: 4, disabledModels: ['Cursor-new'],
+    models: [{ id: 'Cursor-new', name: 'Cursor New', channel: 'Cursor', enabled: false, available: true }] };
+  const { url, cookie } = await fixture(t, { modelPolicy: { snapshot: () => ({ ...snapshot, models: [] }) },
+    modelDiscovery: { refresh: async () => { discoveryCalls++; return snapshot; } } });
+  assert.equal((await fetch(`${url}/api/model-settings`)).status, 401); assert.equal(discoveryCalls, 0);
+  assert.deepEqual(await (await fetch(`${url}/api/model-settings`, { headers: { cookie } })).json(), snapshot);
+  assert.equal(discoveryCalls, 1);
+});
+
+test('quota API combines every bound provider without replacing the native account windows', async t => {
+  let nativeReads = 0, externalReads = 0;
+  const native = { A: { status: 'ok', windows: [{ remainingPercent: 25 }] }, B: { status: 'ok', windows: [{ remainingPercent: 90 }] } };
+  const external = { CodeBuddy: { status: 'unknown', authenticated: true, identity: 'Employee', windows: [], credits: null },
+    Cursor: { status: 'unknown', authenticated: true, identity: 'Cursor user', windows: [], credits: null } };
+  const { url, cookie } = await fixture(t, { accountQuotas: { snapshot: async () => { nativeReads++; return { timeZone: 'America/Los_Angeles', accounts: native }; } },
+    providerQuotas: { snapshot: async () => { externalReads++; return { accounts: external }; } } });
+  assert.equal((await fetch(`${url}/api/account-quotas`)).status, 401); assert.equal(nativeReads + externalReads, 0);
+  const snapshot = await (await fetch(`${url}/api/account-quotas`, { headers: { cookie } })).json();
+  assert.deepEqual(snapshot.accounts, { ...native, ...external }); assert.equal(nativeReads, 1); assert.equal(externalReads, 1);
+});
+
+test('quota combination clears a changed external identity while awaiting slower native quota reads', async t => {
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const cursorService = { authorizationVersion: 0 };
+  const { url, cookie } = await fixture(t, { cursorService,
+    accountQuotas: { snapshot: async () => { await gate; return { accounts: { A: { status: 'ok', windows: [] } } }; } },
+    providerQuotas: { snapshot: async () => { entered(); return { accounts: { Cursor: { status: 'unknown', identity: 'OLD_PRIVATE_IDENTITY', authenticated: true, windows: [] } } }; } },
+  });
+  const pending = fetch(`${url}/api/account-quotas`, { headers: { cookie } }); await started;
+  cursorService.authorizationVersion++; release(); const data = await (await pending).json();
+  assert.equal(data.accounts.Cursor.status, 'error'); assert.equal(data.accounts.Cursor.identity, null);
+  assert.equal(JSON.stringify(data).includes('OLD_PRIVATE_IDENTITY'), false); assert.equal(data.accounts.A.status, 'ok');
+});
+
+test('quota combination clears a changed B binding while awaiting a slower external card', async t => {
+  let entered, release, binding = 'old';
+  const started = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const { url, cookie } = await fixture(t, { accountQuotas: { bindingKey: () => binding,
+    snapshot: async () => { entered(); return { accounts: { B: { status: 'ok', identity: 'OLD_B', windows: [{ remainingPercent: 99 }] } } }; } },
+    providerQuotas: { snapshot: async () => { await gate; return { accounts: { Cursor: { status: 'unknown', identity: 'Current Cursor' } } }; } },
+  });
+  const pending = fetch(`${url}/api/account-quotas`, { headers: { cookie } }); await started;
+  binding = 'new'; release(); const data = await (await pending).json();
+  assert.equal(data.accounts.B.status, 'error'); assert.equal(data.accounts.B.identity, null); assert.deepEqual(data.accounts.B.windows, []);
+  assert.equal(data.accounts.Cursor.identity, 'Current Cursor');
+});
+
 test('a client disappearing before the restart acknowledgement cancels the prepared request', async t => {
   let started, finishRequest, cancelled;
   const began = new Promise(resolve => { started = resolve; });

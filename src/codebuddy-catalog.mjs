@@ -29,7 +29,8 @@ const selectedEntry = `WITH owned AS (
   SELECT cache.value AS entry ${ownedEntry}
   AND json_extract(cache.value, '$.ts') = ?
 )`;
-const modelFields = ['id', 'name', 'credits', 'disabled', 'available', 'enabled'];
+const modelFields = ['id', 'name', 'credits', 'disabled', 'available', 'enabled',
+  'supportsToolCall', 'supportsImages', 'disabledMultimodal', 'supportsReasoning', 'maxInputTokens', 'maxOutputTokens'];
 const modelSql = `${selectedEntry}
   SELECT ${modelFields.flatMap(field => [
     `CASE WHEN json_type(model.value, '$.${field}') IN ('text','integer','real','true','false')
@@ -39,7 +40,18 @@ const modelSql = `${selectedEntry}
   CASE WHEN json_type(model.value, '$.error') NOT IN ('null','false')
     AND coalesce(json_extract(model.value, '$.error'), '') != '' THEN 1 ELSE 0 END AS hasError,
   CASE WHEN json_type(model.value, '$.disabledReason') NOT IN ('null','false')
-    AND coalesce(json_extract(model.value, '$.disabledReason'), '') != '' THEN 1 ELSE 0 END AS hasDisabledReason
+    AND coalesce(json_extract(model.value, '$.disabledReason'), '') != '' THEN 1 ELSE 0 END AS hasDisabledReason,
+  CASE WHEN json_type(model.value, '$.reasoning.supportedEfforts') = 'array'
+    AND json_array_length(model.value, '$.reasoning.supportedEfforts') <= 32
+    THEN (SELECT json_group_array(effort.value) FROM json_each(model.value, '$.reasoning.supportedEfforts') AS effort
+      WHERE effort.type = 'text' AND length(effort.value) <= 64) END AS reasoningEfforts,
+  CASE WHEN json_type(model.value, '$.reasoning.defaultEffort') = 'text'
+    THEN json_extract(model.value, '$.reasoning.defaultEffort') END AS defaultEffort,
+  CASE WHEN json_extract(model.value, '$.reasoning.summary') = 'auto' THEN 'auto' END AS reasoningSummary,
+  CASE WHEN json_type(model.value, '$.reasoning.canDisableThinking') IN ('true','false')
+    THEN json_extract(model.value, '$.reasoning.canDisableThinking') END AS canDisableThinking,
+  CASE WHEN json_type(model.value, '$.contextWindow.defaultLength') = 'integer'
+    THEN json_extract(model.value, '$.contextWindow.defaultLength') END AS contextLength
   FROM owned, json_each(json_extract(owned.entry, '$.data.models')) AS model
   LIMIT ${MAX_MODELS + 1}`;
 const promotionFields = ['id', 'name', 'priority', 'enabled', 'startAt', 'endAt', 'startTime', 'endTime'];
@@ -115,6 +127,24 @@ export class NativeCodeBuddyCatalog {
           const type = row[`${field}Type`];
           if (type !== null && !['null', 'true', 'false'].includes(type)) throw new NativeCatalogError('invalid_native_catalog');
           if (type === 'true' || type === 'false') model[field] = type === 'true';
+        }
+        for (const field of ['supportsToolCall', 'supportsImages', 'disabledMultimodal', 'supportsReasoning']) {
+          if (row[`${field}Type`] === 'true' || row[`${field}Type`] === 'false') model[field] = row[`${field}Type`] === 'true';
+        }
+        for (const field of ['maxInputTokens', 'maxOutputTokens']) {
+          if (Number.isSafeInteger(row[field]) && row[field] > 0 && row[field] <= 1_000_000_000) model[field] = row[field];
+        }
+        const reasoning = {};
+        if (row.reasoningEfforts !== null) {
+          const values = JSON.parse(row.reasoningEfforts);
+          if (values.every(value => /^[A-Za-z0-9_-]{1,64}$/.test(value))) reasoning.supportedEfforts = values;
+        }
+        if (text(row.defaultEffort, 64) && /^[A-Za-z0-9_-]{1,64}$/.test(row.defaultEffort)) reasoning.defaultEffort = row.defaultEffort;
+        if (row.reasoningSummary === 'auto') reasoning.summary = 'auto';
+        if (row.canDisableThinking === 0 || row.canDisableThinking === 1) reasoning.canDisableThinking = row.canDisableThinking === 1;
+        if (Object.keys(reasoning).length) model.reasoning = reasoning;
+        if (Number.isSafeInteger(row.contextLength) && row.contextLength > 0 && row.contextLength <= 1_000_000_000) {
+          model.contextWindow = { defaultLength: row.contextLength };
         }
         if (row.hasError) model.error = true;
         if (row.hasDisabledReason) model.disabledReason = true;

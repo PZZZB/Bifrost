@@ -23,22 +23,21 @@ const elements = Object.fromEntries([
   'token-with-input', 'token-with-output', 'token-with-cached', 'token-with-reasoning',
   'codebuddy-title', 'codebuddy-state', 'codebuddy-login-button', 'codebuddy-logout-button',
   'codebuddy-authorization-link', 'codebuddy-login-state', 'codebuddy-username',
-  'codebuddy-authentication', 'codebuddy-model-available', 'codebuddy-gateway-url', 'codebuddy-codex-url',
+  'codebuddy-authentication', 'codebuddy-model-available', 'codebuddy-enabled-models', 'codebuddy-gateway-url', 'codebuddy-codex-url',
   'codebuddy-transport', 'codebuddy-billing-multiplier', 'codebuddy-source-credits',
   'codebuddy-catalog-source', 'codebuddy-catalog-saved-at', 'codebuddy-catalog-note',
   'codebuddy-source-promotion', 'codebuddy-requests', 'codebuddy-completed',
   'codebuddy-failed', 'codebuddy-active', 'codebuddy-error',
   'token-codebuddy-input', 'token-codebuddy-output', 'token-codebuddy-cached', 'token-codebuddy-reasoning',
   'token-claude-row', 'token-claude-input', 'token-claude-output', 'token-claude-cached', 'token-claude-reasoning',
-  'quota-refresh-button', 'quota-a-plan', 'quota-a-state', 'quota-a-windows',
-  'quota-a-credits', 'quota-a-error', 'quota-a-updated', 'quota-b-plan', 'quota-b-state',
-  'quota-b-windows', 'quota-b-credits', 'quota-b-error', 'quota-b-updated',
+  'quota-refresh-button', ...['a', 'b', 'codebuddy', 'cursor'].flatMap(account =>
+    ['plan', 'state', 'identity', 'source', 'windows', 'credits', 'error', 'updated', 'notice', 'usage-link'].map(field => `quota-${account}-${field}`)),
   'service-state', 'service-ready', 'service-independent', 'service-active', 'service-restart-button',
   'service-message', 'service-error', 'service-confirmation', 'service-confirmation-message', 'service-confirm-button', 'service-cancel-button',
   'model-settings-state', 'model-settings-list', 'model-settings-save-button', 'model-settings-reset-button', 'model-settings-refresh-button',
-  'model-settings-message', 'model-settings-error',
+  'model-settings-message', 'model-settings-error', 'model-settings-search', 'model-settings-summary', 'model-settings-discovery',
   'cursor-state', 'cursor-login-button', 'cursor-logout-button', 'cursor-authorization-link', 'cursor-login-state',
-  'cursor-account', 'cursor-plan', 'cursor-prompt-mode', 'cursor-prompt-priority', 'cursor-prompt-note', 'cursor-gemini-state', 'cursor-grok-state',
+  'cursor-account', 'cursor-plan', 'cursor-prompt-mode', 'cursor-prompt-priority', 'cursor-prompt-note', 'cursor-catalog-models', 'cursor-enabled-models',
   'cursor-requests', 'cursor-completed', 'cursor-failed', 'cursor-active', 'cursor-error'
 ].map((id) => [id, byId(id)]));
 
@@ -62,10 +61,13 @@ let restartInProgress = false;
 let restartConfirmation = false;
 let restartActiveRequests = 0;
 let modelSettings = null;
+let modelCatalogModels = null;
 let modelSettingsRequest = null;
 let modelSettingsUnavailable = false;
 let modelSettingsError = '';
 let modelDraft = new Map();
+let modelGroupActions = [];
+let modelSettingsLoaded = false;
 let cursorStatus = null;
 let cursorRequest = null;
 
@@ -154,19 +156,51 @@ function modelSettingsDirty() {
   return modelSettings?.models.some(model => modelDraft.get(model.id) !== model.enabled) === true;
 }
 
+const modelChannel = model => model.channel === 'CursorTeams' ? 'Cursor' : model.channel || '其他渠道';
+const modelChannelLabels = { A: '账号 A', B: '账号 B', CodeBuddy: 'CodeBuddy', Cursor: 'Cursor Teams' };
+function modelSettingsEditable() {
+  return managementConnected && !busyAction && !restartInProgress && !modelSettingsUnavailable && !modelSettingsError && modelSettings !== null;
+}
+function filteredModels() {
+  const query = elements['model-settings-search'].value.trim().toLocaleLowerCase();
+  return (modelSettings?.models ?? []).filter(model => !query || [model.id, model.name, modelChannel(model),
+    modelChannelLabels[modelChannel(model)], model.reason].some(value => typeof value === 'string' && value.toLocaleLowerCase().includes(query)));
+}
+function renderChannelModelCounts() {
+  for (const [channel, catalogId, enabledId, authenticated] of [
+    ['CodeBuddy', 'codebuddy-model-available', 'codebuddy-enabled-models', codeBuddyStatus?.provider?.authenticated === true],
+    ['Cursor', 'cursor-catalog-models', 'cursor-enabled-models', cursorStatus?.authReady === true],
+  ]) {
+    const models = modelCatalogModels?.filter(model => modelChannel(model) === channel);
+    const discovery = modelSettings?.discovery?.[channel];
+    const currentCount = discovery?.state === 'ready' && Number.isSafeInteger(discovery.count) && discovery.count >= 0 ? discovery.count : null;
+    text(catalogId, !authenticated ? '登录后读取' : currentCount !== null ? `${currentCount} 项（当前账号目录）`
+      : discovery ? '当前账号目录未读取' : models ? `已发现 ${models.length} 项，当前账号目录未返回` : '请刷新账号目录');
+    text(enabledId, models ? `${models.filter(model => model.enabled && model.available !== false).length} 项（已保存）` : '尚未读取');
+  }
+}
+
 function renderModelSettingsControls() {
   const dirty = modelSettingsDirty();
-  const available = managementConnected && !busyAction && !restartInProgress && !modelSettingsUnavailable && !modelSettingsError && modelSettings !== null;
+  const available = modelSettingsEditable();
   elements['model-settings-save-button'].disabled = !available || !dirty;
   elements['model-settings-reset-button'].disabled = !available || !dirty;
   elements['model-settings-refresh-button'].disabled = !managementConnected || Boolean(busyAction) || restartInProgress || Boolean(modelSettingsRequest);
   text('model-settings-save-button', busyAction === 'model-settings-save' ? '正在保存…' : '保存模型选择');
-  elements['model-settings-list'].querySelectorAll('input').forEach(input => { input.disabled = !available; });
+  text('model-settings-refresh-button', modelSettingsRequest ? '正在刷新目录…' : '刷新账号目录');
+  elements['model-settings-search'].disabled = !modelSettings || restartInProgress;
+  const byModelId = new Map((modelSettings?.models ?? []).map(model => [model.id, model]));
+  elements['model-settings-list'].querySelectorAll('input').forEach(input => { input.disabled = !available || byModelId.get(input.value)?.available === false; });
+  for (const { button, ids, enabled } of modelGroupActions) {
+    button.disabled = !available || !ids.some(id => modelDraft.get(id) !== enabled);
+  }
   if (modelSettingsUnavailable) pill('model-settings-state', '待更新服务', 'pending');
   else if (modelSettingsError) pill('model-settings-state', '读取失败', 'error');
   else if (modelSettings) {
-    const selected = modelSettings.models.filter(model => modelDraft.get(model.id)).length;
-    pill('model-settings-state', dirty ? '有未保存更改' : `${selected} / ${modelSettings.models.length} 已启用`, dirty ? 'pending' : 'success');
+    const selected = modelSettings.models.filter(model => modelDraft.get(model.id) && model.available !== false).length;
+    pill('model-settings-state', dirty ? '有未保存更改' : `${selected} / ${modelSettings.models.length} 已开放`, dirty ? 'pending' : 'success');
+    const visible = filteredModels().length, unavailable = modelSettings.models.filter(model => model.available === false).length;
+    text('model-settings-summary', `显示 ${visible} / ${modelSettings.models.length} 项 · 当前勾选可用 ${selected} 项${unavailable ? ` · ${unavailable} 项源端不可用或尚未适配` : ''}`);
   }
   text('model-settings-error', modelSettingsUnavailable ? '重启服务后可用。当前服务尚未提供模型选择接口。' : modelSettingsError);
   elements['model-settings-error'].hidden = !modelSettingsUnavailable && !modelSettingsError;
@@ -174,33 +208,57 @@ function renderModelSettingsControls() {
 
 function renderModelSettingsList() {
   const groups = new Map();
-  for (const model of modelSettings?.models ?? []) {
-    const channel = model.channel || '其他渠道';
+  for (const model of filteredModels()) {
+    const channel = modelChannel(model);
     if (!groups.has(channel)) groups.set(channel, []);
     groups.get(channel).push(model);
   }
-  const labels = { A: '账号 A', B: '账号 B', CodeBuddy: 'CodeBuddy', Cursor: 'Cursor Teams', CursorTeams: 'Cursor Teams' };
+  modelGroupActions = [];
   const nodes = [];
   for (const [channel, models] of groups) {
     const group = document.createElement('fieldset'); group.className = 'model-settings-group';
-    const legend = document.createElement('legend'); legend.textContent = labels[channel] || channel;
+    const legend = document.createElement('legend'); legend.textContent = `${modelChannelLabels[channel] || channel} · ${models.length} 项`;
     group.append(legend);
+    const actions = document.createElement('div'); actions.className = 'model-group-actions';
+    const selectable = models.filter(model => model.available !== false).map(model => model.id);
+    for (const [enabled, title] of [[true, '全选可用项'], [false, '全关可用项']]) {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'button quiet small';
+      button.textContent = title; button.setAttribute('aria-label', `${modelChannelLabels[channel] || channel}：${title}（当前搜索结果）`);
+      button.addEventListener('click', () => {
+        if (!modelSettingsEditable() || button.disabled) return;
+        for (const id of selectable) modelDraft.set(id, enabled);
+        renderModelSettingsList();
+        text('model-settings-message', '批量选择仅作用于本渠道当前搜索结果中的可用模型；点击保存后生效。');
+      });
+      actions.append(button); modelGroupActions.push({ button, ids: selectable, enabled });
+    }
+    group.append(actions);
     for (const model of models) {
       const label = document.createElement('label'); label.className = 'model-option';
-      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = modelDraft.get(model.id) === true;
-      checkbox.addEventListener('change', () => { modelDraft.set(model.id, checkbox.checked); renderModelSettingsControls(); });
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = model.id; checkbox.checked = modelDraft.get(model.id) === true;
+      checkbox.addEventListener('change', () => {
+        if (checkbox.disabled || model.available === false) return;
+        modelDraft.set(model.id, checkbox.checked); renderModelSettingsControls();
+      });
       const details = document.createElement('span');
       const title = document.createElement('strong'); title.textContent = model.name || model.id;
       const identifier = document.createElement('small'); identifier.textContent = model.id;
-      details.append(title, identifier); label.append(checkbox, details); group.append(label);
+      details.append(title, identifier);
+      if (model.available === false) {
+        const reason = document.createElement('small'); reason.className = 'model-unavailable-reason';
+        reason.textContent = model.reason || '源端当前不可用或尚未适配。';
+        details.append(reason);
+      }
+      label.append(checkbox, details); group.append(label);
     }
     nodes.push(group);
   }
   if (!nodes.length) {
     const empty = document.createElement('p'); empty.className = 'model-settings-empty';
-    empty.textContent = '暂时没有可显示的模型。请先确认渠道授权，再刷新列表。'; nodes.push(empty);
+    empty.textContent = modelSettings?.models.length ? '没有匹配的模型，换个关键词试试。' : '暂时没有可显示的模型。请先确认渠道授权，再刷新账号目录。'; nodes.push(empty);
   }
   elements['model-settings-list'].replaceChildren(...nodes);
+  renderChannelModelCounts();
   renderModelSettingsControls();
 }
 
@@ -208,14 +266,29 @@ async function refreshModelSettings({ replaceDraft = false } = {}) {
   if (modelSettingsRequest) return modelSettingsRequest;
   modelSettingsRequest = (async () => {
     try {
-      const data = await request('/api/model-settings', { signal: AbortSignal.timeout(10000) });
-      if (data.revision == null || !Array.isArray(data.models) || data.models.some(model => typeof model?.id !== 'string' || typeof model.enabled !== 'boolean')) throw new Error('服务返回的模型列表格式无效。');
+      const data = await request('/api/model-settings', { signal: AbortSignal.timeout(15000) });
+      if (data.revision == null || !Array.isArray(data.models) || data.models.some(model => typeof model?.id !== 'string' || typeof model.enabled !== 'boolean'
+        || model.available !== undefined && typeof model.available !== 'boolean' || model.reason !== undefined && typeof model.reason !== 'string')) throw new Error('服务返回的模型列表格式无效。');
+      modelSettingsLoaded = true;
+      modelCatalogModels = data.models;
       modelSettingsUnavailable = false; modelSettingsError = typeof data.error === 'string' ? data.error : data.error?.message || '';
       const changed = !modelSettings || JSON.stringify(data) !== JSON.stringify(modelSettings);
       if (replaceDraft || !modelSettingsDirty()) {
         modelSettings = data;
         if (changed || replaceDraft) { modelDraft = new Map(data.models.map(model => [model.id, model.enabled])); renderModelSettingsList(); }
-      } else if (data.revision !== modelSettings.revision) text('model-settings-message', '模型列表已有更新。保存时会核对版本，也可以刷新列表重新选择。');
+      } else if (changed) {
+        const previous = modelSettings, prior = new Map(previous.models.map(model => [model.id, model]));
+        modelSettings = { ...data, revision: previous.revision, models: data.models.map(model => ({ ...model, enabled: prior.get(model.id)?.enabled ?? model.enabled })) };
+        // A newly unavailable model cannot retain an unsaved enable request.
+        // Already saved selections remain intact until the user changes them.
+        modelDraft = new Map(data.models.map(model => [model.id, model.available === false && !model.enabled
+          ? false : modelDraft.has(model.id) ? modelDraft.get(model.id) : model.enabled]));
+        renderModelSettingsList();
+        if (data.revision !== previous.revision) text('model-settings-message', '账号目录已更新，未保存的勾选已保留。保存时会核对版本；发生冲突时请重新勾选。');
+      }
+      const discovery = Object.entries(data.discovery ?? {}).filter(([, value]) => value?.state === 'error')
+        .map(([channel, value]) => `${modelChannelLabels[channel] || channel}：${typeof value.message === 'string' ? value.message : '目录暂不可用'}`);
+      text('model-settings-discovery', discovery.join(' · ')); elements['model-settings-discovery'].hidden = !discovery.length;
     } catch (error) {
       modelSettingsUnavailable = error.status === 404;
       modelSettingsError = modelSettingsUnavailable ? '' : error.message || '暂时无法读取模型列表。';
@@ -224,9 +297,14 @@ async function refreshModelSettings({ replaceDraft = false } = {}) {
         empty.textContent = modelSettingsUnavailable ? '重启服务后可用。' : '模型列表暂时无法读取。';
         elements['model-settings-list'].replaceChildren(empty);
       }
-    } finally { modelSettingsRequest = null; renderModelSettingsControls(); }
+    } finally { modelSettingsRequest = null; renderChannelModelCounts(); renderModelSettingsControls(); }
   })();
+  renderModelSettingsControls();
   return modelSettingsRequest;
+}
+async function refreshAuthorizedModelSettings() {
+  if (modelSettingsRequest) await modelSettingsRequest;
+  await refreshModelSettings();
 }
 
 async function bootstrapManagementSession(signal) {
@@ -292,6 +370,7 @@ async function restartService(allowInterrupt = false) {
     text('service-message', '已提交重启，正在等待网关恢复…'); renderServiceControl();
     try {
       await waitForServiceRestart(previousToken, accepted.reconnectAfterMs);
+      modelSettingsLoaded = false;
       text('service-message', '服务已重启并恢复连接。');
       notify('网关服务已重启并恢复连接。');
     } catch (error) {
@@ -331,7 +410,7 @@ function safeCursorAuthorizationUrl(value) {
 }
 
 function renderCursor(data) {
-  const login = data.login || {}, gateway = data.gateway || {}, catalog = data.catalog || {};
+  const login = data.login || {}, gateway = data.gateway || {};
   const pending = ['starting', 'pending'].includes(login.state) || busyAction === 'cursor-login';
   const authenticated = data.authReady === true;
   const idle = managementConnected && !busyAction && !restartInProgress;
@@ -349,10 +428,7 @@ function renderCursor(data) {
     : data.preservesSystemPromptPriority === false ? '项目规则优先级' : '未返回（待重启服务）');
   text('cursor-prompt-note', promptMode && typeof data.preservesSystemPromptPriority === 'boolean' ? promptMode.note
     : '当前服务未返回完整接入模式；重启网关后查看实际模式与指令优先级。');
-  const models = Array.isArray(catalog.models) ? catalog.models : Array.isArray(catalog.targetModels) ? catalog.targetModels : [];
-  for (const [element, modelId] of [['cursor-gemini-state', 'gemini-4-argon'], ['cursor-grok-state', 'grok-4.7']]) {
-    text(element, !authenticated ? '登录后确认' : models.some(model => model?.id === modelId) ? '账号目录已确认' : '账号目录未返回');
-  }
+  renderChannelModelCounts();
   for (const metric of ['requests', 'completed', 'failed', 'active']) text(`cursor-${metric}`, tokenCount(gateway[metric]));
   elements['cursor-login-button'].disabled = !idle || data.configured !== true || authenticated || pending;
   elements['cursor-logout-button'].disabled = !idle || data.configured !== true || !authenticated && !pending && data.enabled !== true;
@@ -364,7 +440,7 @@ function renderCursor(data) {
   const expiry = login.expiresAt ? ` 有效期至 ${tokenTime(login.expiresAt, 'America/Los_Angeles')}。` : '';
   text('cursor-login-state', !data.configured ? 'Cursor 渠道尚未配置。'
     : pending ? `请在 Cursor 官方页面由本人完成账号授权，此处会自动更新。${expiry}`
-      : authenticated ? data.enabled ? 'Cursor 已授权，模型会按账号目录加入可选列表。' : 'Cursor 已授权，渠道尚未启用。'
+      : authenticated ? data.enabled ? 'Cursor 已授权。请刷新上方账号目录，勾选并保存要开放的模型。' : 'Cursor 已授权，渠道尚未启用。'
         : login.state === 'complete' ? '官方授权已完成，等待账号目录更新。'
           : login.state === 'error' || login.state === 'expired' ? login.error || '本次授权未完成，请重新登录。' : '通过官方页面登录提供额度的 Cursor Teams 账号。');
   const errors = [data.error, login.error].map(error => typeof error === 'string' ? error : error?.message).filter(Boolean);
@@ -379,7 +455,13 @@ function renderCursor(data) {
 async function refreshCursor() {
   if (cursorRequest) return cursorRequest;
   cursorRequest = (async () => {
-    try { cursorStatus = await request('/api/cursor', { signal: AbortSignal.timeout(20000) }); renderCursor(cursorStatus); }
+    try {
+      const previous = cursorStatus;
+      cursorStatus = await request('/api/cursor', { signal: AbortSignal.timeout(20000) }); renderCursor(cursorStatus);
+      if (previous && (previous.authReady !== cursorStatus.authReady || previous.profile?.email !== cursorStatus.profile?.email)) {
+        void refreshAuthorizedModelSettings(); void refreshAuthorizedAccountQuotas();
+      }
+    }
     catch (error) {
       cursorStatus = null; pill('cursor-state', error.status === 404 ? '待更新服务' : '读取失败', error.status === 404 ? 'pending' : 'error');
       text('cursor-login-state', error.status === 404 ? '重启服务后可用。' : 'Cursor 状态暂时无法读取。');
@@ -518,7 +600,7 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         void refreshCodeBuddy();
         void refreshCursor();
         void refreshServiceStatus();
-        void refreshModelSettings();
+        if (!modelSettingsLoaded) void refreshModelSettings();
       }
       return status;
     } catch (error) {
@@ -560,13 +642,38 @@ function quotaTime(value, timeZone) {
   }
 }
 
+function safeQuotaUsageUrl(accountId, value) {
+  if (typeof value !== 'string') return null;
+  const hosts = { A: ['chatgpt.com'], B: ['chatgpt.com'], CodeBuddy: ['www.codebuddy.cn'], Cursor: ['cursor.com'] };
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:' && !url.username && !url.password && !url.port && hosts[accountId]?.includes(url.hostname)) return url.href;
+  } catch { /* Only the corresponding provider's official HTTPS origin is linked. */ }
+  return null;
+}
+
 function renderAccountQuotas(data) {
   const timeZone = data.timeZone || 'America/Los_Angeles';
-  for (const accountId of ['A', 'B']) {
+  for (const accountId of ['A', 'B', 'CodeBuddy', 'Cursor']) {
     const prefix = `quota-${accountId.toLowerCase()}`;
     const account = data.accounts?.[accountId];
     const succeeded = account?.status === 'ok';
+    const notConnected = account?.status === 'not_connected' || account?.authenticated === false;
+    const unknown = account?.status === 'unknown' && !notConnected;
+    const missing = account == null;
     text(`${prefix}-plan`, account?.planType || '套餐未返回');
+    text(`${prefix}-identity`, missing ? '服务未返回账号信息' : account.authenticated === true
+      ? typeof account.identity === 'string' && account.identity.trim() ? account.identity : '已绑定（账号标识未返回）'
+      : account.authenticated === false ? '未绑定本网关账号' : '账号状态未返回');
+    const sourceLabels = { 'codex-account-rate-limits': 'Codex 官方账号限额',
+      'codebuddy-account-metadata': 'CodeBuddy 官方账号信息', 'cursor-sdk-account-metadata': 'Cursor 官方账号信息' };
+    text(`${prefix}-source`, Object.hasOwn(sourceLabels, account?.source) ? sourceLabels[account.source]
+      : typeof account?.source === 'string' && account.source ? account.source : '来源未返回');
+    const notice = typeof account?.notice === 'string' ? account.notice : '';
+    text(`${prefix}-notice`, notice); elements[`${prefix}-notice`].hidden = !notice;
+    const usageUrl = safeQuotaUsageUrl(accountId, account?.usageUrl);
+    const link = elements[`${prefix}-usage-link`]; link.hidden = !usageUrl;
+    if (usageUrl) link.href = usageUrl; else link.removeAttribute('href');
     const windows = succeeded && Array.isArray(account.windows) ? account.windows : [];
     const rows = windows.map((window) => {
       const row = document.createElement('div');
@@ -598,7 +705,10 @@ function renderAccountQuotas(data) {
     if (!rows.length) {
       const empty = document.createElement('p');
       empty.className = 'quota-empty';
-      empty.textContent = succeeded ? '官方未返回额度窗口' : '本次未取得官方额度';
+      empty.textContent = missing ? '当前服务未提供此账号的额度状态，请更新并重启网关。'
+        : unknown ? '未提供剩余额度'
+          : notConnected ? '绑定账号后可读取该渠道的额度状态。'
+            : succeeded ? '官方未返回额度窗口' : '本次未取得官方额度';
       rows.push(empty);
     }
     elements[`${prefix}-windows`].replaceChildren(...rows);
@@ -610,11 +720,13 @@ function renderAccountQuotas(data) {
     if (succeeded && account.spendControlReached === true) creditLabels.push('已达到消费限额');
     text(`${prefix}-credits`, creditLabels.join(' · '));
     elements[`${prefix}-credits`].hidden = !creditLabels.length;
-    const error = succeeded ? '' : typeof account?.error === 'string' && account.error ? account.error : '官方额度暂时无法读取，请稍后重试。';
+    const error = succeeded || unknown || notConnected || missing ? ''
+      : typeof account?.error === 'string' && account.error ? account.error : '官方额度暂时无法读取，请稍后重试。';
     text(`${prefix}-error`, error);
     elements[`${prefix}-error`].hidden = !error;
-    text(`${prefix}-updated`, account?.fetchedAt ? `${succeeded ? '更新时间' : '查询时间'}：${quotaTime(account.fetchedAt, timeZone)}` : '尚无成功查询时间');
-    pill(`${prefix}-state`, succeeded ? '已更新' : '查询失败', succeeded ? 'success' : 'error');
+    text(`${prefix}-updated`, account?.fetchedAt ? `${succeeded ? '更新时间' : '查询时间'}：${quotaTime(account.fetchedAt, timeZone)}` : '尚未取得查询时间');
+    pill(`${prefix}-state`, missing ? '待更新服务' : unknown ? '未提供余额' : notConnected ? '未绑定' : succeeded ? '已更新' : '需检查',
+      succeeded ? 'success' : missing || unknown || notConnected ? 'pending' : 'error');
   }
 }
 
@@ -622,13 +734,13 @@ async function refreshAccountQuotas() {
   if (accountQuotasRequest) return accountQuotasRequest;
   elements['quota-refresh-button'].disabled = true;
   text('quota-refresh-button', '查询中…');
-  for (const accountId of ['a', 'b']) pill(`quota-${accountId}-state`, '查询中', 'pending');
+  for (const accountId of ['a', 'b', 'codebuddy', 'cursor']) pill(`quota-${accountId}-state`, '查询中', 'pending');
   accountQuotasRequest = (async () => {
     try {
       renderAccountQuotas(await request('/api/account-quotas', { signal: AbortSignal.timeout(30_000) }));
     } catch (error) {
       const message = error.name === 'TimeoutError' ? '官方额度查询超时，请稍后重试。' : error.message || '官方额度暂时无法读取，请稍后重试。';
-      renderAccountQuotas({ accounts: { A: { status: 'error', error: message }, B: { status: 'error', error: message } } });
+      renderAccountQuotas({ accounts: Object.fromEntries(['A', 'B', 'CodeBuddy', 'Cursor'].map(account => [account, { status: 'error', error: message }])) });
     } finally {
       accountQuotasRequest = null;
       elements['quota-refresh-button'].disabled = false;
@@ -636,6 +748,10 @@ async function refreshAccountQuotas() {
     }
   })();
   return accountQuotasRequest;
+}
+async function refreshAuthorizedAccountQuotas() {
+  if (accountQuotasRequest) await accountQuotasRequest;
+  await refreshAccountQuotas();
 }
 
 function renderWith(data) {
@@ -693,11 +809,10 @@ function renderCodeBuddy(data) {
   const authenticated = provider.authenticated === true;
   const idle = managementConnected && !busyAction;
   const url = safeCodeBuddyAuthorizationUrl(login.url);
-  text('codebuddy-title', data.model?.name || 'CodeBuddy · Opus 5.5');
+  text('codebuddy-title', 'CodeBuddy');
   text('codebuddy-username', provider.username || (authenticated ? '已登录（未返回账号名）' : '待登录'));
   text('codebuddy-authentication', authenticated ? '已登录' : provider.authenticated === false ? '待登录' : '未返回');
-  text('codebuddy-model-available', !authenticated ? '登录后确认' : provider.modelAvailable === true
-    ? nativeCatalog ? '本机目录已确认' : liveCatalog ? '实时目录已确认' : '目录已确认' : '当前不可用');
+  renderChannelModelCounts();
   text('codebuddy-catalog-source', nativeCatalog ? '本机 CodeBuddy 目录缓存' : catalog.source === 'remote' ? '远程模型目录' : '未返回');
   text('codebuddy-catalog-saved-at', typeof catalog.savedAt === 'number' ? tokenTime(catalog.savedAt) : '未返回');
   text('codebuddy-catalog-note', nativeCatalog
@@ -744,8 +859,13 @@ async function refreshCodeBuddy() {
   if (codeBuddyRequest) return codeBuddyRequest;
   codeBuddyRequest = (async () => {
     try {
+      const previous = codeBuddyStatus;
       codeBuddyStatus = await request('/api/codebuddy');
       renderCodeBuddy(codeBuddyStatus);
+      if (previous && (previous.provider?.authenticated !== codeBuddyStatus.provider?.authenticated
+        || previous.provider?.username !== codeBuddyStatus.provider?.username)) {
+        void refreshAuthorizedModelSettings(); void refreshAuthorizedAccountQuotas();
+      }
     } catch (error) {
       codeBuddyStatus = null;
       pill('codebuddy-state', '读取失败', 'error');
@@ -1032,8 +1152,14 @@ elements['model-settings-reset-button'].addEventListener('click', () => {
 });
 elements['model-settings-refresh-button'].addEventListener('click', () => {
   if (busyAction || restartInProgress) return;
-  void refreshModelSettings();
+  text('model-settings-message', '正在读取各账号模型目录，只查询元数据。');
+  void refreshModelSettings().then(() => {
+    if (!modelSettingsError && !modelSettingsUnavailable) text('model-settings-message', modelSettingsDirty()
+      ? '账号目录已刷新，未保存的可用勾选已保留；不可用的未保存启用已撤回。保存时仍会核对目录版本。'
+      : '账号目录已刷新。新增模型默认关闭，勾选并保存后在 Codex 中刷新模型目录。');
+  });
 });
+elements['model-settings-search'].addEventListener('input', renderModelSettingsList);
 
 void refreshAccountQuotas();
 void refreshStatus().catch(() => {});

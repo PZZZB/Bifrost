@@ -5,6 +5,7 @@ import { CodeBuddyCredentialStore } from './codebuddy-credential-store.mjs';
 import { NativeCodeBuddyCatalog } from './codebuddy-catalog.mjs';
 import { CodeBuddyProvider, CODEBUDDY_MODEL } from './codebuddy-provider.mjs';
 import { CodeBuddyThinkingState, loadThinkingStateKey } from './codebuddy-thinking-state.mjs';
+import { publicCodeBuddyModel } from './codebuddy-models.mjs';
 
 function publicBilling(value) {
   const scalar = value => typeof value === 'string' ? value.slice(0, 160)
@@ -27,7 +28,8 @@ function publicBilling(value) {
 function publicCatalog(value) {
   if (!value || !['remote', 'native-cache'].includes(value.source)) return null;
   return { source: value.source, savedAt: Number.isSafeInteger(value.savedAt) ? value.savedAt : null,
-    liveVerified: value.source === 'remote' && value.liveVerified === true };
+    liveVerified: value.source === 'remote' && value.liveVerified === true,
+    models: Array.isArray(value.models) ? value.models.slice(0, 512).map(publicCodeBuddyModel).filter(Boolean) : [] };
 }
 
 /** Independent employee authorization and model metadata. Never runs inference. */
@@ -52,7 +54,7 @@ export async function startCodeBuddyService({ stateDir, getGatewayStatus = () =>
       try { return new CodeBuddyThinkingState({ key }); }
       finally { key.fill(0); }
     } });
-  let login = null, timer = null, closed = false, generation = 0, polling = false, loginAbort = null;
+  let login = null, timer = null, closed = false, generation = 0, authorizationVersion = 0, polling = false, loginAbort = null;
   let publicLogin = { state: 'not_started' };
 
   function schedule(currentGeneration) {
@@ -73,6 +75,7 @@ export async function startCodeBuddyService({ stateDir, getGatewayStatus = () =>
       if (closed || currentGeneration !== generation) return;
       if (result.pending) schedule(currentGeneration);
       else {
+        authorizationVersion++;
         publicLogin = { state: 'complete' }; login = null;
         // Catalog verification is read-only; it must not send a verification prompt.
         void provider.status().catch(() => {});
@@ -88,9 +91,15 @@ export async function startCodeBuddyService({ stateDir, getGatewayStatus = () =>
     provider,
     model: CODEBUDDY_MODEL,
     get enabled() { return config.enabled === true; },
+    get authorizationVersion() { return authorizationVersion; },
+    async getModels(options) {
+      if (closed) throw new BridgeError('CodeBuddy 服务已停止。', 503);
+      const models = typeof provider.getModels === 'function' ? await provider.getModels(options) : [];
+      return Array.isArray(models) ? models.slice(0, 512).map(publicCodeBuddyModel).filter(Boolean) : [];
+    },
     async beginLogin() {
       if (closed) throw new BridgeError('CodeBuddy 服务已停止。', 503);
-      generation++;
+      generation++; authorizationVersion++;
       if (timer) clearTimer(timer);
       loginAbort?.abort(); loginAbort = new AbortController();
       const started = await client.begin({ signal: loginAbort.signal });
@@ -103,7 +112,7 @@ export async function startCodeBuddyService({ stateDir, getGatewayStatus = () =>
       return { url: started.authUrl, expiresAt: started.expiresAt };
     },
     async logout() {
-      generation++; if (timer) clearTimer(timer); timer = null; login = null;
+      generation++; authorizationVersion++; if (timer) clearTimer(timer); timer = null; login = null;
       loginAbort?.abort(); loginAbort = null;
       publicLogin = { state: 'not_started' };
       await client.logout();
@@ -131,7 +140,7 @@ export async function startCodeBuddyService({ stateDir, getGatewayStatus = () =>
         login: { ...publicLogin }, manualVerification: true };
     },
     async close() {
-      closed = true; generation++; if (timer) clearTimer(timer); timer = null; login = null;
+      closed = true; generation++; authorizationVersion++; if (timer) clearTimer(timer); timer = null; login = null;
       loginAbort?.abort(); loginAbort = null;
       await client.close?.();
     },

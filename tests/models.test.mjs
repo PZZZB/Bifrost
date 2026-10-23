@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { B_MODELS, CODEBUDDY_CODEX_MODEL, appendCodeBuddyModel, appendCursorModels, mergeCatalog, resolveBModel, resolveCodeBuddyModel } from '../src/models.mjs';
+import { B_MODELS, CODEBUDDY_CODEX_MODEL, appendCodeBuddyModel, appendCodeBuddyModels, appendCursorModels, mergeCatalog, resolveBModel, resolveCodeBuddyModel } from '../src/models.mjs';
 import { CURSOR_MODELS } from '../src/cursor-service.mjs';
 import { BridgeError } from '../src/storage.mjs';
 import { CODEBUDDY_MODEL } from '../src/codebuddy-provider.mjs';
@@ -239,13 +239,13 @@ test('CodeBuddy rejects invalid catalogs or an unrepresentable trailing priority
   }
 });
 
-test('Cursor appends only account-observed exact target models after A, B and CodeBuddy without sharing metadata', () => {
+test('Cursor appends the full account catalog in source order after A, B and CodeBuddy without sharing metadata', () => {
   const { aData, bData } = fixture(), before = appendCodeBuddyModel(mergeCatalog(aData, bData));
   const sources = [{ id: 'unrequested-model' }, { id: 'grok-4.7', displayName: 'Grok 4.7' }, { id: 'gemini-4-argon', displayName: 'Gemini 4 Argon' }];
   const result = appendCursorModels(before, sources);
-  assert.deepEqual(result.models.slice(0, -2), before.models);
-  assert.deepEqual(result.models.slice(-2).map(item => item.slug), CURSOR_MODELS.map(item => item.id));
-  assert.deepEqual(result.models.slice(-2).map(item => item.priority), [13, 14]);
+  assert.deepEqual(result.models.slice(0, -3), before.models);
+  assert.deepEqual(result.models.slice(-3).map(item => item.slug), sources.map(item => `Cursor-${item.id}`));
+  assert.deepEqual(result.models.slice(-3).map(item => item.priority), [13, 14, 15]);
   assert.deepEqual(appendCursorModels(before, [{ id: 'grok-4.7' }]).models.slice(-1).map(item => item.slug), ['Cursor-grok-4.7']);
   assert.deepEqual(appendCursorModels(before, []), before);
   result.models[0].model_messages.variables.push('new');
@@ -258,7 +258,7 @@ test('Cursor independent catalog declares default SDK reasoning and serialized c
   assert.match(value.description, /Cursor default reasoning/); assert.match(value.description, /Codex effort levels do not apply/);
   assert.equal(value.supports_reasoning_summary_parameter, false); assert.equal(value.supports_parallel_tool_calls, false);
   assert.equal(value.supports_search_tool, true); assert.equal(value.use_responses_lite, false);
-  assert.deepEqual(value.input_modalities, ['text', 'image']);
+  assert.deepEqual(value.input_modalities, ['text']);
   assert.equal(value.model_messages.instructions_template, value.base_instructions);
   assert.match(value.base_instructions, /Native Cursor approval requests cannot be forwarded/);
   assert.equal(JSON.stringify(value).includes('A instructions'), false);
@@ -280,4 +280,38 @@ test('Cursor rejects alias conflicts, duplicate sources and invalid trailing pri
   }
   assert.throws(() => appendCursorModels({ models: [] }, [{ id: 'grok-4.7' }, { id: 'grok-4.7' }]), BridgeError);
   assert.throws(() => appendCursorModels({ models: [] }, null), BridgeError);
+});
+
+test('CodeBuddy publishes all usable account aliases with their actual capabilities and preserves original catalogs', () => {
+  const original = fixture().aData, before = structuredClone(original);
+  const sources = [
+    { id: CODEBUDDY_MODEL.id, name: 'CodeBuddy · Opus 5.5', available: true, upstream: 'claude-opus-55', efforts: ['low', 'high'], defaultEffort: 'high', inputModalities: ['text', 'image'] },
+    { id: 'CodeBuddy-deepseek-new', name: 'CodeBuddy · DeepSeek New', upstream: 'deepseek-new', available: true,
+      contextWindow: 64000, inputModalities: ['text'], efforts: ['low', 'high', 'vendor-only'] },
+    { id: 'CodeBuddy-image-generation', name: 'CodeBuddy · Image', available: false, reason: 'Image generation.' },
+  ];
+  const result = appendCodeBuddyModels(original, sources), added = result.models.slice(original.models.length);
+  assert.deepEqual(added.map(item => item.slug), sources.slice(0, 2).map(item => item.id));
+  assert.deepEqual(added[1].input_modalities, ['text']); assert.equal(added[1].context_window, 64000);
+  assert.deepEqual(added[1].supported_reasoning_levels.map(item => item.effort), ['low', 'high']);
+  assert.equal(added[1].default_reasoning_level, null); assert.equal(added[1].supports_parallel_tool_calls, false);
+  assert.deepEqual(original, before); assert.equal(JSON.stringify(added).includes('original instructions'), false);
+});
+
+test('new CodeBuddy models default to upstream reasoning and cannot inherit Opus image or effort claims', () => {
+  const result = appendCodeBuddyModels({ models: [] }, [{ id: 'CodeBuddy-new-text-model', name: 'New text', available: true }]).models[0];
+  assert.deepEqual(result.supported_reasoning_levels, []); assert.equal(result.default_reasoning_level, null);
+  assert.deepEqual(result.input_modalities, ['text']); assert.match(result.description, /default reasoning/);
+  assert.throws(() => appendCodeBuddyModels({ models: [] }, [{ id: 'not-a-CodeBuddy-alias' }]), BridgeError);
+  assert.throws(() => appendCodeBuddyModels({ models: [] }, [{ id: 'CodeBuddy-x' }, { id: 'CodeBuddy-x' }]), BridgeError);
+  assert.throws(() => appendCodeBuddyModels({ models: [{ slug: 'CodeBuddy-x' }] }, [{ id: 'CodeBuddy-x' }]), BridgeError);
+});
+
+test('full Cursor catalog keeps exact effort names and only explicit image capability', () => {
+  const sources = [{ id: 'future-model', displayName: 'Future model', inputModalities: ['text', 'image'],
+    parameters: [{ id: 'reasoning', values: [{ value: 'low' }, { value: 'extra-high' }] }] },
+  { id: 'future-text', displayName: 'Future text' }];
+  const added = appendCursorModels({ models: [] }, sources).models;
+  assert.equal(added[0].display_name, 'Cursor Future model'); assert.deepEqual(added[0].supported_reasoning_levels.map(item => item.effort), ['low']);
+  assert.deepEqual(added[0].input_modalities, ['text', 'image']); assert.deepEqual(added[1].input_modalities, ['text']);
 });

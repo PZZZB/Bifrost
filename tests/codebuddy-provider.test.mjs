@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CodeBuddyProvider, CODEBUDDY_MODEL } from '../src/codebuddy-provider.mjs';
 import { CodeBuddyThinkingState, CODEBUDDY_STATE_PREFIX } from '../src/codebuddy-thinking-state.mjs';
+const catalogProvenance = ({ models, ...metadata }) => metadata;
 
 const actualId = 'employee-opus-route-55';
 const catalog = [{ id: actualId, name: 'Claude-5.5-Opus', supportsToolCall: true,
@@ -451,7 +452,7 @@ test('selects only a catalog-confirmed Opus 5.5 ID, caches metadata and exposes 
   assert.equal(status.ready, true);
   assert.equal(status.transport, 'codebuddy-chat-completions');
   assert.equal(status.upstreamModel, actualId);
-  assert.deepEqual(status.catalog, { source: 'remote', savedAt: null, liveVerified: true });
+  assert.deepEqual(catalogProvenance(status.catalog), { source: 'remote', savedAt: null, liveVerified: true });
   assert.equal(status.username, 'employee.user');
   assert.equal(status.cacheControl.behavior, 'validated_hints_ignored');
   assert.deepEqual(status.billing, { verified: false, employeeTokenMultiplier: null, sourceCredits: '0.5x',
@@ -475,15 +476,15 @@ test('native catalog metadata preserves its saved time without claiming live per
   assert.equal(status.ready, true);
   assert.equal(status.modelAvailable, true);
   assert.equal(status.upstreamModel, 'claude-opus-5.5');
-  assert.deepEqual(status.catalog, { source: 'native-cache', savedAt, liveVerified: false });
+  assert.deepEqual(catalogProvenance(status.catalog), { source: 'native-cache', savedAt, liveVerified: false });
   assert.deepEqual(status.billing, { verified: false, employeeTokenMultiplier: null, sourceCredits: 'x2.17', sourcePromotion: null });
   assert.equal(JSON.stringify(status).includes('PRIVATE_'), false);
   assert.equal(client.calls.length, 0);
   status.catalog.liveVerified = true;
   status.catalog.savedAt = 0;
-  assert.deepEqual((await provider.status()).catalog, { source: 'native-cache', savedAt, liveVerified: false });
+  assert.deepEqual(catalogProvenance((await provider.status()).catalog), { source: 'native-cache', savedAt, liveVerified: false });
   time += 31_000;
-  assert.deepEqual((await provider.status()).catalog, { source: 'native-cache', savedAt, liveVerified: false });
+  assert.deepEqual(catalogProvenance((await provider.status()).catalog), { source: 'native-cache', savedAt, liveVerified: false });
   assert.equal(client.reads, 2);
   const response = await request();
   await response.text();
@@ -496,21 +497,21 @@ test('remote object catalogs expose only normalized provenance and replace nativ
   let time = 1000;
   const { client, provider } = fixture({ now: () => time });
   client.models = { models: catalog, source: 'native-cache', savedAt: 'PRIVATE_INVALID_TIME', liveVerified: false };
-  assert.deepEqual((await provider.status()).catalog, { source: 'native-cache', savedAt: null, liveVerified: false });
+  assert.deepEqual(catalogProvenance((await provider.status()).catalog), { source: 'native-cache', savedAt: null, liveVerified: false });
   time += 31_000;
   client.models = { models: catalog, source: 'remote', liveVerified: true, savedAt: time, credential: 'PRIVATE_CATALOG_FIELD' };
   const status = await provider.status();
-  assert.deepEqual(status.catalog, { source: 'remote', savedAt: null, liveVerified: true });
+  assert.deepEqual(catalogProvenance(status.catalog), { source: 'remote', savedAt: null, liveVerified: true });
   assert.equal(JSON.stringify(status).includes('PRIVATE_'), false);
   client.authenticated = false;
   const loggedOut = await provider.status();
   assert.equal(loggedOut.modelAvailable, false);
-  assert.deepEqual(loggedOut.catalog, { source: 'remote', savedAt: null, liveVerified: false });
+  assert.deepEqual(catalogProvenance(loggedOut.catalog), { source: 'remote', savedAt: null, liveVerified: false });
   assert.equal(client.calls.length, 0);
 });
 
 test('missing, disabled, ambiguous or unreadable catalogs fail closed without a model request', async () => {
-  for (const models of [[], [{ ...catalog[0], disabled: true }], [{ id: 'claude-opus-5.4', name: 'Claude Opus 5.4' }],
+  for (const models of [[], [{ ...catalog[0], disabled: true }],
     [catalog[0], { ...catalog[0], id: 'another-opus-route' }]]) {
     const { client, provider, request } = fixture(); client.models = models;
     const status = await provider.status();
@@ -523,6 +524,77 @@ test('missing, disabled, ambiguous or unreadable catalogs fail closed without a 
   assert.equal((await request()).status, 502); assert.equal(client.calls.length, 0);
   client.authenticated = false;
   assert.equal((await request()).status, 401); assert.equal((await provider.status()).authenticated, false);
+});
+
+test('full catalogs expose safe descriptors and specialize unavailable entries without requiring Opus', async () => {
+  const { client, provider, request } = fixture();
+  client.models = { source: 'native-cache', savedAt: 1000, liveVerified: false, models: [
+    { id: 'gpt-6-astra', name: 'GPT-6-Astra', supportsToolCall: true, supportsImages: false,
+      reasoning: { supportedEfforts: ['low', 'high'], defaultEffort: 'high', summary: 'auto' }, apiKey: 'PRIVATE' },
+    { id: 'completion-gf', name: 'Completion' }, { id: 'default-image-generation', name: 'Image' },
+    { id: 'explicitly-disabled', name: 'Disabled', disabledReason: 'PRIVATE_DISABLED_REASON' },
+  ] };
+  const models = await provider.getModels(), status = await provider.status();
+  assert.deepEqual(models.map(model => [model.id, model.available]), [['CodeBuddy-gpt-6-astra', true], ['CodeBuddy-completion-gf', false],
+    ['CodeBuddy-default-image-generation', false], ['CodeBuddy-explicitly-disabled', false]]);
+  assert.equal(models.every(model => model.source === 'native-cache'), true); assert.equal(status.ready, true); assert.equal(status.modelAvailable, true);
+  assert.equal(status.upstreamModel, null); assert.deepEqual(status.catalog.models, models); assert.equal(status.catalog.liveVerified, false);
+  assert.equal(JSON.stringify(status).includes('PRIVATE'), false); assert.equal((await request()).status, 503);
+  models[0].name = 'mutated'; assert.equal((await provider.getModels())[0].name, 'CodeBuddy · GPT-6-Astra');
+  assert.equal(client.calls.length, 0);
+});
+
+test('a disabled older Opus entry cannot hide the one available legacy Opus route', async () => {
+  const { client, provider, request } = fixture();
+  client.models = [catalog[0], { id: 'old-opus-route', name: 'Claude Opus 5.5', disabled: true }];
+  const models = await provider.getModels();
+  assert.deepEqual(models.map(model => [model.id, model.available]), [[CODEBUDDY_MODEL.id, true], ['CodeBuddy-old-opus-route', false]]);
+  const response = await request({ ...input, stream: false });
+  assert.equal(response.status, 200); await response.json(); assert.equal(client.calls[0].body.model, actualId);
+  assert.equal((await request({ ...input, model: 'CodeBuddy-old-opus-route' })).status, 503); assert.equal(client.calls.length, 1);
+});
+
+test('generic models use exact account IDs and upstream default thinking while rejecting unsupported explicit controls and images', async () => {
+  const { client, request } = fixture();
+  client.models = [{ id: 'model-no-thinking-controls', name: 'Text model', supportsToolCall: true }];
+  const body = { ...input, model: 'CodeBuddy-model-no-thinking-controls', stream: false };
+  const response = await request(body), message = await response.json();
+  assert.equal(response.status, 200); assert.equal(message.model, body.model); assert.equal(response.bridgeModel, 'model-no-thinking-controls');
+  assert.equal(client.calls[0].body.model, 'model-no-thinking-controls');
+  assert.equal(Object.hasOwn(client.calls[0].body, 'reasoning_effort'), false); assert.equal(Object.hasOwn(client.calls[0].body, 'reasoning_summary'), false);
+  for (const extra of [{ output_config: { effort: 'high' } }, { thinking: { type: 'disabled' } }, { thinking: { type: 'adaptive' } },
+    { messages: [{ role: 'user', content: [embeddedImage()] }] }]) {
+    assert.equal((await request({ ...body, ...extra })).status, 400);
+  }
+  assert.equal((await request({ ...body, model: 'CodeBuddy-not-in-this-account' })).status, 503);
+  assert.equal(client.calls.length, 1);
+});
+
+test('generic effort and image capabilities follow the actual model and opaque state cannot cross model IDs', async () => {
+  const key = Buffer.alloc(32, 0x55), { client, provider, request } = fixture({ loadThinkingState: () => new CodeBuddyThinkingState({ key }) });
+  client.models = ['one', 'two'].map(id => ({ id, name: id, supportsImages: true, supportsReasoning: true,
+    reasoning: { supportedEfforts: ['low', 'max'], summary: 'auto' } }));
+  client.respond = () => upstream([chunk({ reasoning_content: 'PRIVATE_MODEL_REASONING' }), chunk({ content: 'Done.' }), chunk({}, 'stop'), '[DONE]']);
+  const body = { ...input, model: 'CodeBuddy-one', stream: false, output_config: { effort: 'max' }, messages: [{ role: 'user', content: [embeddedImage()] }] };
+  const response = await request(body), message = await response.json();
+  assert.equal(response.status, 200); assert.equal(client.calls[0].body.reasoning_effort, 'max'); assert.equal(client.calls[0].body.reasoning_summary, undefined);
+  const marker = message.content.find(block => block.type === 'thinking');
+  assert.equal(new CodeBuddyThinkingState({ key }).open(marker).model, 'one');
+  assert.equal(JSON.stringify(message).includes('PRIVATE_MODEL_REASONING'), false);
+  const next = { ...body, model: 'CodeBuddy-two', messages: [...body.messages, { role: 'assistant', content: message.content }, { role: 'user', content: 'Next.' }] };
+  assert.equal((await request(next)).status, 403); assert.equal(client.calls.length, 1);
+  assert.equal((await request({ ...body, output_config: { effort: 'high' } })).status, 400);
+  client.identity = 'employee-two'; await provider.getModels(); assert.equal(client.reads, 2);
+});
+
+test('generic image requests cannot bypass explicit negative catalog flags with a conflicting modality list', async () => {
+  for (const negative of [{ supportsImages: false }, { disabledMultimodal: true }, { supportsImages: true, disabledMultimodal: true }]) {
+    const { client, provider, request } = fixture();
+    client.models = [{ id: 'text-only-conflict', name: 'Text only', inputModalities: ['text', 'image'], ...negative }];
+    assert.deepEqual((await provider.getModels())[0].inputModalities, ['text']);
+    const response = await request({ ...input, model: 'CodeBuddy-text-only-conflict', messages: [{ role: 'user', content: [embeddedImage()] }] });
+    assert.equal(response.status, 400); assert.equal(client.calls.length, 0);
+  }
 });
 
 test('translates system/text/options and buffers upstream SSE for a nonstream Anthropic response', async () => {

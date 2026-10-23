@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, unlink, lstat, realpath, readdir, rm } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
-import { resolveCursorModel } from './cursor-service.mjs';
+import { cursorEffortParameter, resolveCursorModel, cursorImageCapability, cursorModelAvailability } from './cursor-service.mjs';
 import { translateResponses, ResponsesConversion, encodeResponsesEvent } from './codebuddy-responses.mjs';
 import { imagePart, ImageConversionError } from './codebuddy-images.mjs';
 import { writeJson } from './storage.mjs';
@@ -69,9 +69,6 @@ function rawBody(value) {
 }
 function atoms(messages) {
   return messages.flatMap(message => message.content.filter(block => block.type !== 'thinking').map(block => ({ role: message.role, block })));
-}
-function effortParameter(model) {
-  return model?.parameters?.find(parameter => ['reasoning_effort', 'reasoningEffort', 'effort'].includes(parameter.id));
 }
 function modelMismatch(actual, selected) {
   if (actual?.id && actual.id !== selected.id) return true;
@@ -451,13 +448,15 @@ export class CursorResponsesProvider {
       const source = (await this.cursorService.getModels()).find(item => item.id === model.upstream);
       this.#assertCurrent(epoch, signal);
       if (!source) throw new CursorError('当前 Cursor 账号没有此模型。', 403, 'cursor_model_unavailable');
+      const availability = cursorModelAvailability(source);
+      if (!availability.available) throw new CursorError(availability.reason, 403, 'cursor_model_unavailable');
       auth = digest(credential.apiKey + '\n' + (credential.teamId ?? ''));
       const incomingStates = Array.isArray(parsed.input) ? parsed.input.filter(item => item?.type === 'reasoning' && item.encrypted_content != null).map(item => item.encrypted_content) : [];
       const lastState = incomingStates.at(-1), liveRecord = this.#handles.get(lastState)?.record;
       if (lastState !== undefined && !liveRecord) checkpoint = await this.#loadCheckpoint(lastState, epoch);
       this.#assertCurrent(epoch, signal);
       const stateHashes = liveRecord?.stateHashes ?? new Set(checkpoint?.stateHashes ?? []);
-      const parameter = effortParameter(source);
+      const parameter = cursorEffortParameter(source);
       // A Codex profile can carry a global effort even when the selected SDK
       // model has no such parameter. This bridge explicitly uses Cursor's
       // default in that case; it must never echo that hint as executed effort.
@@ -471,6 +470,10 @@ export class CursorResponsesProvider {
           handle = value;
           return [{ type: 'thinking', thinking: '', signature: value }];
         } });
+      if (cursorImageCapability(source) === false && translated.upstream.messages.some(message => message.content.some(block => block.type === 'image'
+        || block.type === 'tool_result' && Array.isArray(block.content) && block.content.some(part => part.type === 'image')))) {
+        throw new CursorError('当前 Cursor 模型目录明确不支持图片输入。', 400, 'cursor_image_invalid');
+      }
       selection = { id: model.upstream, ...(parsed.reasoning?.effort !== undefined ? { params: [{ id: parameter.id, value: parsed.reasoning.effort }] } : {}) };
     } catch (error) { return denied(error); }
     let record, lease;

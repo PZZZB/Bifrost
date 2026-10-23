@@ -11,7 +11,8 @@ function keys(value, allowed) {
 }
 
 /** CodeBuddy exposes effort and readable summaries, not Anthropic token budgets. */
-export function thinkingOptions({ thinking, output_config: outputConfig } = {}) {
+export function thinkingOptions({ thinking, output_config: outputConfig } = {}, { model, validateOnly = false } = {}) {
+  if (model) return genericThinkingOptions({ thinking, outputConfig }, model, validateOnly);
   let effort = 'high';
   if (outputConfig !== undefined) {
     keys(outputConfig, ['effort']);
@@ -39,6 +40,32 @@ export function thinkingOptions({ thinking, output_config: outputConfig } = {}) 
   }
   return { body: { reasoning_effort: effort, reasoning_summary: 'auto' }, visible: display === 'summarized',
     mode: 'adaptive', display };
+}
+
+function genericThinkingOptions({ thinking, outputConfig }, model, validateOnly) {
+  const body = {};
+  if (outputConfig !== undefined) {
+    keys(outputConfig, ['effort']);
+    if (outputConfig.effort !== undefined) {
+      if (typeof outputConfig.effort !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(outputConfig.effort)) fail('思考强度格式无效。');
+      if (!validateOnly && !model.efforts?.includes(outputConfig.effort)) fail('当前 CodeBuddy 模型目录未确认支持此思考强度。');
+      body.reasoning_effort = outputConfig.effort;
+    }
+  }
+  let display = 'omitted';
+  if (thinking !== undefined) {
+    keys(thinking, ['type', 'display']);
+    if (thinking.type !== 'adaptive' || thinking.display !== undefined && !['omitted', 'summarized'].includes(thinking.display)) {
+      fail('此 CodeBuddy 模型只支持上游默认思考，不能映射启停或精确思考预算。');
+    }
+    if (!validateOnly && model.supportsReasoning !== true && !model.efforts?.length) fail('当前 CodeBuddy 模型目录未确认支持思考参数。');
+    display = thinking.display ?? 'omitted';
+    if (display === 'summarized') {
+      if (!validateOnly && model.supportsReasoningSummary !== true) fail('当前 CodeBuddy 模型目录未确认支持思考摘要参数。');
+      body.reasoning_summary = 'auto';
+    }
+  }
+  return { body, visible: display === 'summarized', mode: 'upstream-default', display };
 }
 
 /** Empty signatures denote this bridge's readable Chat-compatible summaries. */

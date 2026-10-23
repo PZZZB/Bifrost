@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { CODEBUDDY_MODEL } from './codebuddy-provider.mjs';
 import { CODEBUDDY_STATE_PREFIX } from './codebuddy-thinking-state.mjs';
+import { resolveCodeBuddyAlias } from './codebuddy-models.mjs';
 
 // A bridge-owned, opaque envelope containing real, already encrypted CodeBuddy
 // continuation markers. This is not an OpenAI token and must never reach A/B.
@@ -601,7 +602,7 @@ export class CodeBuddyResponsesProvider {
   }
   async status() { return { ...await this.provider.status(), responsesCapabilities: CODEBUDDY_RESPONSES_CAPABILITIES }; }
   async request({ path, body, headers: _headers, signal } = {}) {
-    let request;
+    let request, profile = {};
     try {
       let url;
       try {
@@ -612,7 +613,42 @@ export class CodeBuddyResponsesProvider {
       if (url.search || url.hash) fail('CodeBuddy Responses 不支持此 URL 查询参数或片段。', 'path');
       if (body instanceof Uint8Array && body.byteLength > LIMIT || typeof body === 'string' && Buffer.byteLength(body) > LIMIT) fail('请求超过大小限制。', 'body');
       if (signal?.aborted) throw new AdapterError('CodeBuddy 请求已取消。', 499);
-      request = translate(body, this.instructionMarker);
+      if (typeof this.provider.getModels === 'function') {
+        let parsed;
+        try { parsed = typeof body === 'string' || body instanceof Uint8Array ? JSON.parse(Buffer.from(body).toString('utf8')) : body; }
+        catch { fail('请求不是有效 JSON。', 'body'); }
+        const alias = resolveCodeBuddyAlias(parsed?.model);
+        if (!alias) fail('未知的模型。', 'model');
+        // Reject malformed content and foreign continuation envelopes before
+        // reading account metadata, including on the original Opus route.
+        const preliminary = { model: alias.id, ...(alias.upstream !== null ? {
+          allowedEfforts: typeof parsed.reasoning?.effort === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(parsed.reasoning.effort) ? [parsed.reasoning.effort] : [],
+        } : {}) };
+        request = translate(parsed, this.instructionMarker, preliminary);
+        const models = await this.provider.getModels({ signal });
+        const model = Array.isArray(models) && models.find(model => model.id === alias.id);
+        if (!model?.available) throw new AdapterError(model?.reason || '当前 CodeBuddy 账号目录未提供可用的所选模型。', 503);
+        const codexEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent'];
+        profile = { model: model.id, allowedEfforts: (model.efforts ?? []).filter(value => codexEfforts.includes(value)),
+          ...(alias.upstream !== null ? { defaultReasoning: {} } : {}) };
+        if (alias.upstream !== null && !profile.allowedEfforts.length && Object.hasOwn(request.original.reasoning ?? {}, 'effort')) {
+          if (!codexEfforts.includes(request.original.reasoning.effort)) fail('reasoning.effort 不是已知的 Codex 档位。', 'reasoning.effort');
+          // Codex can inherit a global hint even when the catalog exposes no
+          // corresponding control. Use upstream defaults and never echo it.
+          delete request.original.reasoning.effort;
+          delete request.upstream.output_config;
+        }
+        if (request.original.reasoning?.effort !== undefined && !profile.allowedEfforts.includes(request.original.reasoning.effort)) fail('当前模型不支持此思考参数。', 'reasoning.effort');
+        if (alias.upstream !== null) {
+          delete request.upstream.thinking;
+          if (model.maxOutputTokens && parsed.max_output_tokens === undefined) request.upstream.max_tokens = Math.min(request.upstream.max_tokens, model.maxOutputTokens);
+          if (model.maxOutputTokens && request.upstream.max_tokens > model.maxOutputTokens) fail('max_output_tokens 超过当前账号目录的模型上限。', 'max_output_tokens');
+          if (parsed.reasoning?.summary === 'auto') {
+            if (model.supportsReasoningSummary !== true) fail('当前 CodeBuddy 模型目录未确认支持思考摘要参数。', 'reasoning.summary');
+            request.upstream.thinking = { type: 'adaptive', display: 'summarized' };
+          }
+        }
+      } else request = translate(body, this.instructionMarker);
     } catch (error) { return errorResponse(error); }
     const abort = new AbortController(), onAbort = () => abort.abort();
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -632,7 +668,7 @@ export class CodeBuddyResponsesProvider {
       }
       if (!upstream.body) throw new AdapterError('CodeBuddy 上游缺少响应内容。', 502);
     } catch (error) { cleanup(); return errorResponse(abort.signal.aborted ? new AdapterError('CodeBuddy 请求已取消。', 499) : error); }
-    const conversion = new Conversion(request), reader = upstream.body.getReader();
+    const conversion = new Conversion(request, profile), reader = upstream.body.getReader();
     const cancelRead = () => { void reader.cancel().catch(() => {}); };
     abort.signal.addEventListener('abort', cancelRead, { once: true });
     if (abort.signal.aborted) cancelRead();

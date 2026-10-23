@@ -2,9 +2,9 @@ import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import * as zlib from 'node:zlib';
 import { BridgeError, redact } from './storage.mjs';
-import { mergeCatalog, resolveBModel, appendCodeBuddyModel, resolveCodeBuddyModel, appendCursorModels } from './models.mjs';
+import { mergeCatalog, resolveBModel, appendCodeBuddyModel, appendCodeBuddyModels, resolveCodeBuddyModel, appendCursorModels } from './models.mjs';
 import { CODEBUDDY_RESPONSES_STATE_PREFIX } from './codebuddy-responses.mjs';
-import { resolveCursorModel } from './cursor-service.mjs';
+import { resolveCursorModel, cursorModelAvailability } from './cursor-service.mjs';
 import { CURSOR_RESPONSES_STATE_PREFIX } from './cursor-responses.mjs';
 
 export function keyMatches(actual, expected) {
@@ -140,14 +140,17 @@ export class Gateway {
     upstream = 'https://chatgpt.com/backend-api/codex', catalogWaitMs = 1200, onUsage = async () => {},
     codeBuddyProvider = null, codeBuddyEnabled = () => codeBuddyProvider !== null, modelPolicy = null,
     isDraining = () => false, cursorProvider = null, cursorEnabled = () => cursorProvider !== null,
-    getCursorModels = async () => [] }) {
+    getCursorModels = async () => [], getCodeBuddyModels = null,
+    getCursorAuthorizationVersion = () => null, getCodeBuddyAuthorizationVersion = () => null }) {
     if (typeof getAProvider !== 'function') throw new TypeError('getAProvider is required for account routing.');
     if (codeBuddyProvider !== null && (typeof codeBuddyProvider.status !== 'function' || typeof codeBuddyProvider.request !== 'function') ||
-        typeof codeBuddyEnabled !== 'function') throw new TypeError('Invalid CodeBuddy Responses provider.');
+        typeof codeBuddyEnabled !== 'function' || getCodeBuddyModels !== null && typeof getCodeBuddyModels !== 'function') throw new TypeError('Invalid CodeBuddy Responses provider.');
     if (cursorProvider !== null && (typeof cursorProvider.status !== 'function' || typeof cursorProvider.request !== 'function') ||
         typeof cursorEnabled !== 'function' || typeof getCursorModels !== 'function') throw new TypeError('Invalid Cursor Responses provider.');
+    if (typeof getCursorAuthorizationVersion !== 'function' || typeof getCodeBuddyAuthorizationVersion !== 'function') throw new TypeError('Invalid account catalog version getters.');
     Object.assign(this, { backend, gatewayKey, getAProvider, fetchImpl, upstream, catalogWaitMs, onUsage,
-      codeBuddyProvider, codeBuddyEnabled, modelPolicy, isDraining, cursorProvider, cursorEnabled, getCursorModels });
+      codeBuddyProvider, codeBuddyEnabled, modelPolicy, isDraining, cursorProvider, cursorEnabled, getCursorModels, getCodeBuddyModels,
+      getCursorAuthorizationVersion, getCodeBuddyAuthorizationVersion });
     this.pendingRequests = 0;
     this.bCatalog = null; this.catalogRefresh = null;
     this.threadTraffic = new Map();
@@ -229,8 +232,11 @@ export class Gateway {
     const aCatalog = await response.json();
     if (!Array.isArray(aCatalog.models)) throw new BridgeError('账户 A 的完整模型目录格式无效。', 502);
     let data = aCatalog;
+    const codeBuddyVersion = this.getCodeBuddyAuthorizationVersion(), cursorVersion = this.getCursorAuthorizationVersion();
+    const codeBuddyCurrent = () => this.codeBuddyEnabled() === true && this.getCodeBuddyAuthorizationVersion() === codeBuddyVersion;
+    const cursorCurrent = () => this.cursorEnabled() === true && this.getCursorAuthorizationVersion() === cursorVersion;
     const codeBuddyMetadata = this.codeBuddyProvider !== null && this.codeBuddyEnabled() === true
-      ? Promise.resolve().then(() => this.codeBuddyProvider.status()).catch(() => null) : Promise.resolve(null);
+      ? Promise.resolve().then(() => this.getCodeBuddyModels ? this.getCodeBuddyModels() : this.codeBuddyProvider.status()).catch(() => null) : Promise.resolve(null);
     const cursorMetadata = this.cursorProvider !== null && this.cursorEnabled() === true
       ? Promise.resolve().then(async () => {
         const metadata = await this.cursorProvider.status();
@@ -258,8 +264,14 @@ export class Gateway {
       const remaining = Math.max(0, Math.min(this.catalogWaitMs, 4000 - (Date.now() - started)));
       const metadata = await Promise.race([codeBuddyMetadata,
         new Promise(resolve => { timer = setTimeout(() => resolve(null), remaining); })]);
-      if (metadata?.authenticated === true && metadata.ready === true && metadata.modelAvailable === true &&
-          this.codeBuddyEnabled() === true) {
+      if (Array.isArray(metadata) && codeBuddyCurrent()) {
+        if (this.modelPolicy) await this.modelPolicy.observe({ models: metadata }, 'CodeBuddy', { defaultEnabled: false, authorizationVersion: codeBuddyVersion });
+        if (codeBuddyCurrent()) data = appendCodeBuddyModels(data, metadata);
+        else if (this.modelPolicy) await this.modelPolicy.observe({ models: [] }, 'CodeBuddy', { complete: true, defaultEnabled: false,
+          unavailableReason: 'CodeBuddy 授权已变化，请刷新账号目录。', authorizationVersion: this.getCodeBuddyAuthorizationVersion() });
+        this.metrics.accounts.CodeBuddy.lastError = null;
+      } else if (metadata?.authenticated === true && metadata.ready === true && metadata.modelAvailable === true &&
+          codeBuddyCurrent()) {
         data = appendCodeBuddyModel(data);
         this.metrics.accounts.CodeBuddy.lastError = null;
       }
@@ -272,7 +284,15 @@ export class Gateway {
       const remaining = Math.max(0, Math.min(this.catalogWaitMs, 4000 - (Date.now() - started)));
       const sourceModels = await Promise.race([cursorMetadata,
         new Promise(resolveWait => { timer = setTimeout(() => resolveWait(null), remaining); })]);
-      if (Array.isArray(sourceModels) && this.cursorEnabled() === true) data = appendCursorModels(data, sourceModels);
+      if (Array.isArray(sourceModels) && cursorCurrent()) {
+        const entries = sourceModels.map(source => ({ id: `Cursor-${source.id}`,
+          name: source.displayName ? `Cursor ${source.displayName}` : resolveCursorModel(`Cursor-${source.id}`)?.name ?? `Cursor ${source.id}`,
+          ...cursorModelAvailability(source), source: source.source ?? 'account-catalog' }));
+        if (this.modelPolicy) await this.modelPolicy.observe({ models: entries }, 'Cursor', { defaultEnabled: false, authorizationVersion: cursorVersion });
+        if (cursorCurrent()) data = appendCursorModels(data, sourceModels);
+        else if (this.modelPolicy) await this.modelPolicy.observe({ models: [] }, 'Cursor', { complete: true, defaultEnabled: false,
+          unavailableReason: 'Cursor 授权已变化，请刷新账号目录。', authorizationVersion: this.getCursorAuthorizationVersion() });
+      }
     } catch (error) {
       if (error.code === 'model_alias_conflict') throw error;
       this.metrics.accounts.Cursor.lastError = redact(error.message);
@@ -281,6 +301,10 @@ export class Gateway {
       await this.modelPolicy.observe(data);
       data = this.modelPolicy.filterCatalog(data);
     }
+    // Recheck both sources after all awaited metadata/policy operations. No
+    // await separates this filter from the committed catalog response.
+    data.models = data.models.filter(model => (codeBuddyCurrent() || !resolveCodeBuddyModel(model?.slug ?? model?.id))
+      && (cursorCurrent() || !resolveCursorModel(model?.slug ?? model?.id)));
     res.writeHead(200, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
   }

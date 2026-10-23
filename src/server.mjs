@@ -16,8 +16,8 @@ function json(res, status, data) {
 }
 
 export function createBridgeServer({ backend, gateway, integration, state, publicDir, baseUrl,
-  usageLedger = null, accountQuotas = null,
-  codeBuddyService = null, serviceControl = null, modelPolicy = null, cursorService = null, cursorProvider = null,
+  usageLedger = null, accountQuotas = null, providerQuotas = null,
+  codeBuddyService = null, serviceControl = null, modelPolicy = null, modelDiscovery = null, cursorService = null, cursorProvider = null,
   getWithStatus = async () => ({ configured: false, running: false,
     model: { id: 'claude-opus-5-5', name: 'With · Opus 5.5' },
     gateway: { baseUrl: 'http://192.168.168.1:43157' },
@@ -48,8 +48,8 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
     }
   }
 
-  async function bodyJson(req) {
-    const bytes = await readBody(req, 64 * 1024);
+  async function bodyJson(req, limit = 64 * 1024) {
+    const bytes = await readBody(req, limit);
     if (!bytes.length) return {};
     try { return JSON.parse(bytes.toString('utf8')); }
     catch { throw new BridgeError('请求不是有效 JSON。'); }
@@ -131,7 +131,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
         }
         if (url.pathname === '/api/model-settings') {
           if (!modelPolicy) throw new BridgeError('当前运行版本尚未启用模型管理。', 503);
-          json(res, 200, modelPolicy.snapshot()); return;
+          json(res, 200, modelDiscovery ? await modelDiscovery.refresh() : modelPolicy.snapshot()); return;
         }
         if (url.pathname === '/api/cursor') {
           if (!cursorService) throw new BridgeError('Cursor 渠道尚未配置。', 503);
@@ -164,8 +164,19 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
           json(res, 200, info); return;
         }
         if (url.pathname === '/api/account-quotas') {
-          if (!accountQuotas) throw new BridgeError('账号额度查询暂不可用。', 503);
-          json(res, 200, await accountQuotas.snapshot()); return;
+          if (!accountQuotas && !providerQuotas) throw new BridgeError('账号额度查询暂不可用。', 503);
+          const codeBuddyVersion = codeBuddyService?.authorizationVersion, cursorVersion = cursorService?.authorizationVersion;
+          const bVersion = typeof accountQuotas?.bindingKey === 'function' ? accountQuotas.bindingKey() : null;
+          const [native, external] = await Promise.all([accountQuotas?.snapshot(), providerQuotas?.snapshot()]);
+          const accounts = { ...native?.accounts, ...external?.accounts };
+          const staleCard = (account) => ({ ...accounts[account], status: 'error', authenticated: null, identity: null,
+            planType: null, windows: [], credits: null, spendControlReached: null, fetchedAt: null,
+            error: `${account} 账号授权已变化，请重新查询。` });
+          if (codeBuddyVersion !== codeBuddyService?.authorizationVersion) accounts.CodeBuddy = staleCard('CodeBuddy');
+          if (cursorVersion !== cursorService?.authorizationVersion) accounts.Cursor = staleCard('Cursor');
+          if (typeof accountQuotas?.bindingKey === 'function' && bVersion !== accountQuotas.bindingKey()) accounts.B = staleCard('B');
+          json(res, 200, { timeZone: native?.timeZone ?? external?.timeZone ?? 'America/Los_Angeles',
+            accounts }); return;
         }
         if (url.pathname === '/api/token-usage') {
           if (!usageLedger) throw new BridgeError('Token 统计暂不可用，请检查本机记录文件。', 503);
@@ -190,7 +201,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       if (adminBusy) throw new BridgeError('另一个管理操作正在执行。', 409);
       adminBusy = true;
       try {
-        const body = await bodyJson(req);
+        const body = await bodyJson(req, url.pathname === '/api/model-settings' ? 1024 * 1024 : 64 * 1024);
         if (url.pathname === '/api/service/restart') {
           if (!serviceControl) throw new BridgeError('当前运行版本尚未启用网页服务控制。', 503);
           const result = await serviceControl.request(body);

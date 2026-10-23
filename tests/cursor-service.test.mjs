@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setImmediate as nextTick } from 'node:timers/promises';
-import { CURSOR_MODELS, resolveCursorModel, startCursorService } from '../src/cursor-service.mjs';
+import { CURSOR_MODELS, cursorEffortParameter, resolveCursorModel, startCursorService } from '../src/cursor-service.mjs';
 
 const EPOCH = 1800000000000;
 const SECRET = 'mock-cursor-key-private-do-not-export';
@@ -83,12 +83,29 @@ test('unconfigured Cursor stays offline and never reads native SDK credentials',
   assert.equal(f.calls.load, 1);
 });
 
-test('only exact public aliases resolve, with no account or model fallback', () => {
+test('safe exact provider aliases resolve without treating legacy defaults as an availability list', () => {
   assert.deepEqual(CURSOR_MODELS.map(model => model.id), ['Cursor-gemini-4-argon', 'Cursor-grok-4.7']);
   assert.equal(resolveCursorModel('Cursor-gemini-4-argon').upstream, 'gemini-4-argon');
-  for (const id of ['gemini-4-argon', 'Cursor-gemini-4', 'cursor-grok-4.7', 'Cursor-grok-4.6', 'auto', null]) {
+  for (const upstream of ['auto-smart', 'default', 'composer-2.5', 'gpt-5.3-codex', 'grok-4.6', 'future-model-v20.4', 'vendor:model']) {
+    const id = `Cursor-${upstream}`;
+    assert.deepEqual(resolveCursorModel(id), { id, upstream, name: `Cursor ${upstream}` });
+  }
+  for (const id of ['gemini-4-argon', 'cursor-grok-4.7', 'auto', null, {}, 1,
+    'Cursor-', 'Cursor-../model', 'Cursor-.hidden', 'Cursor-model/name', 'Cursor-grok?key=value', 'Cursor- model',
+    'Cursor-model\n', 'Cursor-model%2fname', 'Cursor-' + 'x'.repeat(161)]) {
     assert.equal(resolveCursorModel(id), null);
   }
+});
+
+test('reasoning parameters expose only exact Codex levels and never invent aliases for vendor values', () => {
+  assert.equal(cursorEffortParameter({ parameters: [{ id: 'reasoning', values: [{ value: 'extra-high' }] }] }), null);
+  assert.equal(cursorEffortParameter({ parameters: [{ id: 'thinking', values: [{ value: 'true' }] }] }), null);
+  assert.equal(cursorEffortParameter({ parameters: [{ id: 'reasoning_effort', values: [] }] }), null);
+  const parameter = { id: 'reasoning', displayName: 'Reasoning', values: [{ value: 'low' }, { value: 'extra-high' }, { value: 'high' }] };
+  assert.deepEqual(cursorEffortParameter({ parameters: [parameter] }), { ...parameter, values: [{ value: 'low' }, { value: 'high' }] });
+  assert.equal(parameter.values.length, 3);
+  assert.equal(cursorEffortParameter({ parameters: [{ id: 'effort', values: [{ value: 'vendor-special' }] },
+    { id: 'reasoning_effort', values: [{ value: 'medium' }] }] }).id, 'reasoning_effort');
 });
 
 test('official browser login mints only a bridge-owned credential without touching Cursor auth files', async t => {
@@ -112,6 +129,28 @@ test('official browser login mints only a bridge-owned credential without touchi
   assert.equal(status.authReady, true);
   assert.deepEqual(status.profile, { email: 'mock@example.test', name: 'Mock User', userId: 42 });
   assert.equal(JSON.stringify(status).includes(SECRET), false);
+});
+
+test('installing a replacement credential invalidates catalogs captured while login was pending', async t => {
+  const replacement = 'mock-cursor-replacement-private';
+  const f = await fixture(t, { initial: credential(), config: { enabled: true },
+    modelImpl: ({ apiKey }) => [{ id: apiKey === SECRET ? 'old-account-model' : 'new-account-model' }] });
+  assert.equal(f.service.authorizationVersion, 0);
+  await f.service.beginLogin();
+  const pendingVersion = f.service.authorizationVersion;
+  const pendingModels = await f.service.getModels();
+  assert.equal(pendingVersion, 1);
+  assert.deepEqual(pendingModels.map(model => model.id), ['old-account-model']);
+  await finishLogin(f, 0, replacement);
+  assert.equal(f.service.authorizationVersion, pendingVersion + 1);
+  assert.equal((await f.service.credential()).apiKey, replacement);
+  assert.deepEqual((await f.service.getModels()).map(model => model.id), ['new-account-model']);
+  assert.deepEqual(pendingModels.map(model => model.id), ['old-account-model']);
+  await f.service.logout();
+  assert.equal(f.service.authorizationVersion, pendingVersion + 2);
+  assert.deepEqual(await f.service.getModels(), []);
+  await f.service.close();
+  assert.equal(f.service.authorizationVersion, pendingVersion + 3);
 });
 
 test('explicit Cursor prompt modes survive login and logout with their advertised priority', async t => {
@@ -152,24 +191,64 @@ test('metadata passes only this bridge user key and its explicit team context', 
   assert.equal((await f.service.credential()).teamId, 123);
 });
 
-test('catalog includes only account-visible exact Gemini 4 Argon and Grok 4.7 IDs and actual variants', async t => {
+test('catalog retains every account-visible canonical model in remote order with real parameters and variants', async t => {
   const f = await fixture(t, { initial: credential() });
   const models = await f.service.getModels();
-  assert.deepEqual(models.map(model => model.id), ['gemini-4-argon', 'grok-4.7']);
-  assert.deepEqual(models[1].parameters, catalog()[0].parameters);
-  assert.deepEqual(models[1].variants, catalog()[0].variants);
+  assert.deepEqual(models.map(model => model.id), catalog().map(model => model.id));
+  assert.deepEqual(models[0].parameters, catalog()[0].parameters);
+  assert.deepEqual(models[0].variants, catalog()[0].variants);
   assert.equal(JSON.stringify(models).includes(SECRET), false);
   models[0].id = 'tampered'; models[1].parameters[0].values[0].value = 'tampered';
-  assert.deepEqual((await f.service.getModels()).map(model => model.id), ['gemini-4-argon', 'grok-4.7']);
-  assert.equal((await f.service.getModels())[1].parameters[0].values[0].value, 'high');
+  assert.deepEqual((await f.service.getModels()).map(model => model.id), catalog().map(model => model.id));
+  assert.equal((await f.service.getModels())[1].parameters[0].values[0].value, 'medium');
 });
 
-test('unavailable target models stay unavailable instead of using aliases or display names', async t => {
+test('display names never substitute canonical IDs or introduce models missing from the account', async t => {
   const f = await fixture(t, { initial: credential(), modelImpl: async () => [
     { id: 'auto', displayName: 'Grok 4.7' }, { id: 'gemini-3.1-pro', displayName: 'Gemini 4 Argon' },
   ] });
-  assert.deepEqual(await f.service.getModels(), []);
-  assert.deepEqual((await f.service.status()).catalog.models, []);
+  assert.deepEqual((await f.service.getModels()).map(model => model.id), ['auto', 'gemini-3.1-pro']);
+  assert.deepEqual((await f.service.status()).catalog.models.map(model => model.id), ['auto', 'gemini-3.1-pro']);
+});
+
+test('full Cursor directories preserve unavailable entries and explicit negative capabilities override positive claims', async t => {
+  const f = await fixture(t, { initial: credential(), modelImpl: async () => [
+    { id: 'disabled-model', available: false, reason: SECRET }, { id: 'no-tools', supportsTools: false },
+    { id: 'no-stream', capabilities: { streaming: false } }, { id: 'image-output', outputModalities: ['image'] },
+    { id: 'conflicting-image', supportsVision: false, supportsImages: true, inputModalities: ['text', 'image'] },
+  ] });
+  const models = await f.service.getModels(); assert.equal(models.length, 5);
+  for (const model of models.slice(0, 4)) { assert.equal(model.available, false); assert.equal(typeof model.reason, 'string'); }
+  assert.equal(models[4].supportsImages, false); assert.deepEqual(models[4].inputModalities, ['text']);
+  assert.equal(JSON.stringify(models).includes(SECRET), false);
+});
+
+test('full model catalog strips private fields, unsafe IDs and secret values while preserving only explicit capabilities', async t => {
+  const f = await fixture(t, { initial: credential(), modelImpl: async () => [
+    { id: 'composer-2.5', displayName: 'Composer 2.5', aliases: [SECRET], credential: SECRET,
+      privateToken: SECRET, description: SECRET, supportsImages: false, supportsTools: true, supportsReasoning: 'true',
+      contextWindow: 200000, maxOutputTokens: -1, inputModalities: ['text'], outputModalities: ['text', SECRET],
+      capabilities: { images: false, toolCalls: true, privateToken: SECRET, custom: true },
+      parameters: [{ id: 'fast', displayName: 'Fast', privateToken: SECRET,
+        values: [{ value: 'false', displayName: 'Normal', token: SECRET }, { value: 'true', displayName: SECRET }] }],
+      variants: [{ params: [{ id: 'fast', value: 'false', token: SECRET }], displayName: 'Composer',
+        isDefault: true, isMaxMode: false, description: SECRET, token: SECRET }] },
+    { id: 'plain-model', displayName: 'Plain' },
+    { id: 'composer-2.5', displayName: 'Duplicate must not overwrite' },
+    { id: '../unsafe' }, { id: '.unsafe' }, { id: `model-${SECRET}` },
+    { id: 'secret-parameter', parameters: [{ id: SECRET, values: [{ value: 'high' }] }] },
+    { id: 'secret-value', parameters: [{ id: 'effort', values: [{ value: SECRET }] }] },
+    { id: 'duplicate-parameter', parameters: [{ id: 'effort', values: [{ value: 'low' }] }, { id: 'effort', values: [{ value: 'high' }] }] },
+    { id: 'duplicate-value', parameters: [{ id: 'effort', values: [{ value: 'high' }, { value: 'high' }] }] },
+  ] });
+  const models = await f.service.getModels();
+  assert.deepEqual(models, [{ id: 'composer-2.5', displayName: 'Composer 2.5',
+    parameters: [{ id: 'fast', displayName: 'Fast', values: [{ value: 'false', displayName: 'Normal' }, { value: 'true' }] }],
+    variants: [{ params: [{ id: 'fast', value: 'false' }], displayName: 'Composer', isDefault: true, isMaxMode: false }],
+    supportsImages: false, supportsTools: true, contextWindow: 200000, inputModalities: ['text'],
+    capabilities: { images: false, toolCalls: true } }, { id: 'plain-model', displayName: 'Plain' }]);
+  assert.equal(Object.hasOwn(models[1], 'supportsImages'), false);
+  assert.equal(JSON.stringify(await f.service.status()).includes(SECRET), false);
 });
 
 test('read-only catalog and identity calls coalesce and cache for exactly 30 seconds', async t => {
@@ -293,7 +372,7 @@ test('metadata permission errors do not mislabel a valid user key as an expired 
   assert.equal((await f.service.credential()).apiKey, SECRET);
 });
 
-test('malformed target descriptors are excluded instead of partially inventing selectable variants', async t => {
+test('malformed descriptors are excluded instead of partially inventing selectable variants', async t => {
   const f = await fixture(t, { initial: credential(), modelImpl: async () => [
     { id: 'gemini-4-argon', parameters: [{ id: 'effort', values: [] }] },
     { id: 'grok-4.7', variants: [{ params: [{ id: 'effort', value: `high\n${SECRET}` }] }] },

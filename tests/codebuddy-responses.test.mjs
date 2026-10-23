@@ -96,6 +96,52 @@ test('JSON response preserves actual thinking through provider restart and full-
   assert.equal((await second.json()).output.at(-1).content[0].text, '第二回合');
 });
 
+test('Responses generic models use dynamic account effort metadata and never invent default reasoning controls', async () => {
+  const { client, request } = fixture();
+  client.modelCatalog = async () => [{ id: 'gpt-6-astra', name: 'GPT-6-Astra', supportsToolCall: true, supportsImages: false,
+    supportsReasoning: true, reasoning: { supportedEfforts: ['low', 'max'], summary: 'auto' } }];
+  const body = { model: 'CodeBuddy-gpt-6-astra', stream: false, input: 'Hello.' };
+  const response = await request(body), json = await response.json();
+  assert.equal(response.status, 200); assert.equal(json.model, body.model); assert.deepEqual(json.reasoning, {});
+  assert.equal(response.bridgeModel, 'gpt-6-astra'); assert.equal(client.calls[0].body.model, 'gpt-6-astra');
+  assert.equal(Object.hasOwn(client.calls[0].body, 'reasoning_effort'), false); assert.equal(Object.hasOwn(client.calls[0].body, 'reasoning_summary'), false);
+  const explicit = await request({ ...body, reasoning: { effort: 'max', summary: 'none' } });
+  assert.equal(explicit.status, 200); await explicit.json(); assert.equal(client.calls[1].body.reasoning_effort, 'max');
+  assert.equal((await request({ ...body, reasoning: { effort: 'high' } })).status, 400);
+  assert.equal((await request({ ...body, input: [{ role: 'user', content: [{ type: 'input_image', image_url: `data:image/png;base64,${png}` }] }] })).status, 400);
+  assert.equal(client.calls.length, 2);
+});
+
+test('a generic model can complete a Responses client tool turn using its actual model-bound opaque state', async () => {
+  const { client, request } = fixture();
+  client.modelCatalog = async () => [{ id: 'generic-tools', name: 'Tools', supportsToolCall: true }];
+  client.respond = ({ body }) => source([chunk({ extra_fields: { continuation: 'PRIVATE_GENERIC_STATE' },
+    tool_calls: [{ index: 0, id: 'generic-call', type: 'function', function: { name: body.tools[0].function.name, arguments: '{"path":"fixture"}' } }] }), chunk({}, 'tool_calls'), '[DONE]']);
+  const body = { model: 'CodeBuddy-generic-tools', stream: false, input: 'Read.', tools: [fn] };
+  const first = await (await request(body)).json();
+  assert.equal(first.model, body.model); const call = first.output.find(item => item.type === 'function_call');
+  assert.equal(call.name, 'read_file'); assert.equal(JSON.stringify(first).includes('PRIVATE_GENERIC_STATE'), false);
+  client.respond = () => source([chunk({ content: 'Done.' }), chunk({}, 'stop'), '[DONE]']);
+  const second = await request({ ...body, input: [{ role: 'user', content: 'Read.' }, ...first.output,
+    { type: 'function_call_output', call_id: call.call_id, output: 'actual client result' }] });
+  assert.equal(second.status, 200); await second.json(); assert.equal(client.calls.length, 2);
+  assert.equal(client.calls[1].body.model, 'generic-tools');
+  assert.deepEqual(client.calls[1].body.messages.find(message => message.role === 'assistant').extra_fields, { continuation: 'PRIVATE_GENERIC_STATE' });
+});
+
+test('generic models without mapped effort controls ignore only known inherited Codex hints without echoing them', async () => {
+  const { client, request } = fixture();
+  client.modelCatalog = async () => [{ id: 'upstream-default-model', name: 'Default model', supportsToolCall: true }];
+  const body = { model: 'CodeBuddy-upstream-default-model', input: 'Hello.', stream: false, reasoning: { effort: 'max' } };
+  const response = await request(body), result = await response.json();
+  assert.equal(response.status, 200); assert.deepEqual(result.reasoning, {});
+  assert.equal(Object.hasOwn(client.calls[0].body, 'reasoning_effort'), false);
+  assert.equal(Object.hasOwn(client.calls[0].body, 'reasoning_summary'), false);
+  assert.equal(body.reasoning.effort, 'max');
+  assert.equal((await request({ ...body, reasoning: { effort: 'unknown-effort' } })).status, 400);
+  assert.equal(client.calls.length, 1);
+});
+
 test('namespace function and custom tool calls preserve names, namespace, call_id, grammar, and exact raw input', async () => {
   const { client, request } = fixture();
   const raw = '*** Begin Patch\n*** Add File: x.txt\n+ 中 文\t🙂\n*** End Patch\n';

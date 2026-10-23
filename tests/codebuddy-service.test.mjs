@@ -44,9 +44,11 @@ test('logout cancels an old login and a late result cannot restore its public co
   const { service, timers, signals, loggedOut } = await fixture(t, {
     poll: (_login, { signal }) => { signals.push(signal); return new Promise(resolve => { resolvePoll = resolve; }); },
   });
-  await service.beginLogin();
+  assert.equal(service.authorizationVersion, 0);
+  await service.beginLogin(); assert.equal(service.authorizationVersion, 1);
   const polling = timers[0].action();
   await service.logout();
+  assert.equal(service.authorizationVersion, 2);
   assert.equal(signals[0].aborted, true);
   resolvePoll({ pending: false }); await polling;
   assert.equal((await service.status()).login.state, 'not_started');
@@ -63,7 +65,32 @@ test('authorization completion only refreshes metadata and retains per-channel g
   assert.equal(status.login.state, 'complete'); assert.equal(status.provider.username, 'employee');
   assert.equal(status.gateway.requests, 2); assert.equal(status.provider.billing.verified, false);
   assert.equal(status.provider.billing.sourceCredits, 'x2.17');
-  assert.deepEqual(status.provider.catalog, { source: 'native-cache', savedAt: 1792401859577, liveVerified: false });
+  assert.deepEqual(status.provider.catalog, { source: 'native-cache', savedAt: 1792401859577, liveVerified: false, models: [] });
+  assert.equal(modelCalls(), 0);
+});
+
+test('installing a replacement authorization invalidates catalogs captured during a pending attempt', async t => {
+  let installed = false;
+  const { service, provider, timers, modelCalls } = await fixture(t, {
+    poll: async () => { installed = true; return { pending: false }; },
+  });
+  provider.getModels = async () => [{ id: `CodeBuddy-${installed ? 'new' : 'old'}-account-model`,
+    upstream: `${installed ? 'new' : 'old'}-account-model`, name: 'CodeBuddy · Account model', available: true, reason: null }];
+  assert.equal(service.authorizationVersion, 0);
+  await service.beginLogin();
+  const pendingVersion = service.authorizationVersion;
+  const pendingModels = await service.getModels();
+  assert.equal(pendingVersion, 1);
+  assert.equal(pendingModels[0].upstream, 'old-account-model');
+  await timers[0].action();
+  assert.equal((await service.status()).login.state, 'complete');
+  assert.equal(service.authorizationVersion, pendingVersion + 1);
+  assert.equal((await service.getModels())[0].upstream, 'new-account-model');
+  assert.equal(pendingModels[0].upstream, 'old-account-model');
+  await service.logout();
+  assert.equal(service.authorizationVersion, pendingVersion + 2);
+  await service.close();
+  assert.equal(service.authorizationVersion, pendingVersion + 3);
   assert.equal(modelCalls(), 0);
 });
 
@@ -85,6 +112,20 @@ test('the management status exposes a sanitized channel error and clears it when
   assert.equal((await service.status()).gateway.lastError, null);
   assert.equal((await service.status()).gateway.failed, 1);
   assert.equal(modelCalls(), 0);
+});
+
+test('full service model catalogs expose only mapped public descriptors and preserve source availability', async t => {
+  const { service, provider, modelCalls } = await fixture(t);
+  const models = [{ id: 'CodeBuddy-gpt-6-astra', name: 'CodeBuddy · GPT-6-Astra', upstream: 'gpt-6-astra',
+    available: true, reason: null, source: 'native-cache', efforts: ['low', 'high'], contextWindow: 300000, apiKey: 'PRIVATE' },
+  { id: 'CodeBuddy-completion-gf', name: 'CodeBuddy · Completion', upstream: 'completion-gf', available: false, reason: 'PRIVATE_REASON', source: 'native-cache' }];
+  provider.getModels = async () => models;
+  provider.status = async () => ({ authenticated: true, ready: true, modelAvailable: true,
+    catalog: { source: 'native-cache', savedAt: 1000, liveVerified: false, models, token: 'PRIVATE' } });
+  const listed = await service.getModels(), status = await service.status();
+  assert.equal(listed.length, 2); assert.deepEqual(status.provider.catalog.models, listed); assert.equal(listed[1].available, false);
+  assert.equal(listed[0].source, 'native-cache'); assert.deepEqual(listed[0].efforts, ['low', 'high']);
+  assert.equal(JSON.stringify(status).includes('PRIVATE'), false); assert.equal(modelCalls(), 0);
 });
 
 test('the CodeBuddy management API exposes the optional Codex endpoint without changing the Messages endpoint', async t => {

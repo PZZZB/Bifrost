@@ -296,3 +296,17 @@
 - 完整 JavaScript 离线测试 780/780、`npm run check` 和 diff 检查通过。Cursor provider/错误/网关定向 51 项通过。全量日志为 `.state/cursor-project-rules-tests.log`。网页根据运行中服务返回值显示模式；旧后端缺少字段时只显示待重启，不把磁盘上的新 UI 当成后端已更新。
 - 实际 Codex CLI `0.163.0-alpha.11.1` 搭配模拟 SDK 的两种模式都通过：兼容模式证明全部三段原始 system/developer 指令都在隔离 `AGENTS.md`，无 `systemPrompt` 且仅 project 来源；system 模式证明使用 `systemPrompt`、无规则副本且设置来源为空。各三个 HTTP 合成注入 21 个元数据条目，同一 Run 完成两次本地工具回调，仅一次 send，SDK 未收到这些内部元数据。证据分别为 `.state/cursor-codex-offline-1792664634038-5ca58f/result.json` 与 `.state/cursor-codex-offline-1792664634055-239afd/result.json`；每次四个外部 CONNECT 均被回环代理阻断，未建立隧道。
 - 本次没有真实模型推理、账号授权、服务重启、虚拟机或 Claude 修改。真实 Cursor SDK 是否加载规则、模型遵循效果、权限、用量与费用继续由用户完整回合验证；离线 fake SDK 检查不替代这些证据。当前网页重启接口已就绪，等待用户自行在管理页重启加载。
+
+## 完整模型目录与各账号额度卡片（2026-10-22，洛杉矶）
+
+- 管理页改为读取各账号的完整安全模型目录，提供搜索及按渠道批量勾选。保留已有选择，新增外部模型默认关闭；未启用的模型不会发布给 Codex。目录查询不再依赖 Codex 先请求模型，也不随请求统计定时轮询。历史选择继续保留，但当前目录已撤下或不支持的模型显示原因且禁止新启用。
+- 本机 CodeBuddy 自有缓存的安全投影包含 38 项模型，其中 34 项可用于当前对话适配，4 项专用补全、重写、跳转或生成模型保留在网页并标记不可用。证据为 `.state/codebuddy-account-catalog-proof.json`、`.state/codebuddy-account-catalog-fixture.json`。来源是 `native-cache`，`liveVerified:false`，不将缓存目录当作真实权限或推理成功证明。现有 Opus 别名保留，新增模型使用 `CodeBuddy-<来源 ID>`。
+- Cursor 官方 SDK 账号目录读取到 48 项，安全处理后仍为 48 项，未遗漏来源 ID；证据为 `.state/cursor-full-catalog-audit-1792724517113/result.json`。发布按来源顺序及用户选择执行，新增模型使用 `Cursor-<来源 ID>`。未知图片、上下文及工具能力不套用其他模型的声明；显式不支持的能力优先于冲突的正面提示。
+- 各模型发送真实来源 ID；CodeBuddy 的续接状态同时绑定账号与所选模型。推理档位只映射明确可对应的来源参数；没有对应档位时不发送继承的 Codex 档位提示。未适配内容继续明确报错，不以清理未知字段伪造完整支持。
+- 目录查询支持单渠道超时及部分失败。独立授权版本在开始登录、成功安装新凭证、退出及关闭时更新；模型可用状态与授权版本绑定。跨渠道等待、策略写盘及最终目录发布均有换号回归，旧目录不能在新账号下继续启用或发布。安全状态及授权版本只留在内存，策略文件继续只保存模型选择和显示名称。
+- 额度区统一显示 A、B、CodeBuddy、Cursor 四张卡。A/B 保留官方 `account/rateLimits/read` 结果；CodeBuddy 当前员工账号元数据和 Cursor 用户 SDK 没有可确认的套餐余额字段，因此显示绑定身份、来源、查询状态及官方用量入口，余额明确为未知。模型积分倍率、单 Agent 用量、本网关 Token 均未当成账号套餐余额；Teams 标签仍标注未核实。
+- 额度仅在打开页面、授权变化或手动刷新时查询，没有 60 秒或请求统计轮询。每卡独立超时及缓存，某渠道失败不覆盖其他渠道。查询与最终合并阶段均核对身份版本；专门回归覆盖外部卡等待慢 A/B，以及 A/B 等待外部卡时换号，迟到结果不显示旧身份和额度。
+- 完整离线 JavaScript 测试 845/845、`npm run check`、新增模块语法和 diff 检查通过。日志为 `.state/full-model-catalog-tests.log`。独立审查提出的默认启用、负面能力、授权成功版本及跨渠道结果竞态均已修复并加入回归，最终复核无阻断项。
+- 使用安全保存的账号目录 fixture，对真实 ModelDiscovery、ModelPolicy、CodeBuddy 目录处理及发布器完成 86 项目录集成检查：网页目录为 CodeBuddy 38/Cursor 48，首次仅发布原有三项选择，分别新选一项后发布五项；真实推理计数为零。证据为 `.state/full-model-catalog-integration-1792726244489/result.json`，未加载既有凭证。
+- 实际 Codex CLI `0.163.0-alpha.11.2` 搭配模拟 SDK，以新增别名 `Cursor-catalog-fixture-new` 完成三个 HTTP、同一 SDK Run 的两次本地工具回调和一次 send，21 项合成内部元数据未传入 SDK。证据为 `.state/cursor-codex-offline-1792725051786-8b1091/result.json`。空白临时配置未加载既有账号；四次外部 CONNECT 尝试被回环代理阻断，未建立隧道，不是实际 Cursor 模型验证。
+- 本次未授权账号、发送真实模型请求、重启生产服务或修改虚拟机、Claude、代理和 VPS。后台变化仍需用户在网页重启网关后加载；真实模型问答、工具质量及实际计费继续由用户验收。

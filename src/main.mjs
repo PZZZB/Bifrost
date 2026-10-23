@@ -21,6 +21,8 @@ import { B_MODELS, CODEBUDDY_CODEX_MODEL } from './models.mjs';
 import { startCursorService, CURSOR_MODELS } from './cursor-service.mjs';
 import { createServiceControl } from './service-control.mjs';
 import { CursorResponsesProvider } from './cursor-responses.mjs';
+import { ModelDiscovery } from './model-discovery.mjs';
+import { ProviderQuotas } from './provider-quotas.mjs';
 import { createMagpieDelegationServer, loadMagpieDelegation } from './magpie-delegation.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -71,6 +73,10 @@ const codeBuddyService = await startCodeBuddyService({ stateDir,
         channels.reduce((total, channel) => total + (channel[name] || 0), 0)])),
       lastError: channels.map(channel => channel.lastError).find(Boolean) ?? null };
   } });
+const modelDiscovery = new ModelDiscovery({ modelPolicy, codeBuddyService, cursorService });
+const providerQuotas = new ProviderQuotas({ codeBuddyService, cursorService });
+// Load optional account catalogs without delaying the gateway or starting inference.
+void modelDiscovery.refresh().catch(error => console.error(`Model discovery: ${redact(error.message)}`));
 if (!delegation) {
   const binary = process.env.CODEX_BINARY || 'codex';
   const { stdout: versionOutput } = await promisify(execFile)(binary, ['--version'], {
@@ -88,8 +94,11 @@ if (!delegation) {
     getAProvider: () => integration.originalProvider(),
     codeBuddyProvider: new CodeBuddyResponsesProvider({ provider: codeBuddyService.provider }),
     codeBuddyEnabled: () => codeBuddyService.enabled,
+    getCodeBuddyModels: () => codeBuddyService.getModels(),
+    getCodeBuddyAuthorizationVersion: () => codeBuddyService.authorizationVersion,
     modelPolicy,
     cursorProvider, cursorEnabled: () => cursorService.enabled, getCursorModels: () => cursorService.getModels(),
+    getCursorAuthorizationVersion: () => cursorService.authorizationVersion,
     isDraining: () => serviceControl?.pending === true,
     onUsage: record => {
       if (!usageLedger) throw new Error('Token 记录文件暂不可用，模型转发继续运行。');
@@ -111,7 +120,7 @@ serviceControl = createServiceControl({ stateDir, projectDir,
   onRestart: () => shutdown(0) });
 const server = delegation ? createMagpieDelegationServer({ gatewayKey: state.gatewayKey, baseUrl }) :
   createBridgeServer({ backend, gateway, integration, state, baseUrl,
-  usageLedger, accountQuotas, serviceControl, modelPolicy, cursorService, cursorProvider,
+  usageLedger, accountQuotas, providerQuotas, serviceControl, modelPolicy, modelDiscovery, cursorService, cursorProvider,
   getWithStatus: () => withService.status(),
   codeBuddyService,
   publicDir: join(projectDir, 'public'),
@@ -134,6 +143,7 @@ let closing = false;
 async function shutdown(code = 0) {
   if (closing) return; closing = true;
   server.close(); server.closeAllConnections();
+  await Promise.allSettled([modelDiscovery.close(), providerQuotas.close()]);
   await Promise.allSettled([backendRpc?.close(), configRpc?.close(), withService.close(), codeBuddyService.close(), cursorProvider.close(), cursorService.close()]);
   // Account for response-finally work triggered by closing sockets before flushing.
   const deadline = Date.now() + 5000;
