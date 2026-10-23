@@ -33,6 +33,20 @@ test('management requires an HttpOnly session and does not publish gateway crede
   assert.ok(!JSON.stringify(status).includes('private-gateway-key-test'));
 });
 
+test('client account administration stays behind the local administrator cookie and CSRF gate', async t => {
+  const calls=[];
+  const {url,cookie,status}=await fixture(t,{clientAdmin:{snapshot:()=>({accounts:[],registration:{mode:'open'}}),
+    mutate:async(path,body)=>{calls.push({path,body});return{account:{id:'safe-user'}};}}});
+  assert.equal((await fetch(url+'/api/client-admin')).status,401);
+  const headers={cookie,'X-Bridge-CSRF':status.csrfToken,'content-type':'application/json'};
+  assert.deepEqual((await(await fetch(url+'/api/client-admin',{headers:{cookie}})).json()).accounts,[]);
+  const path=url+'/api/client-admin/accounts';
+  assert.equal((await fetch(path,{method:'POST',headers:{cookie},body:'{}'})).status,403);
+  assert.equal(calls.length,0);
+  assert.equal((await fetch(path,{method:'POST',headers,body:'{"username":"sample"}'})).status,200);
+  assert.deepEqual(calls,[{path:'/api/client-admin/accounts',body:{username:'sample'}}]);
+});
+
 test('diagnostic history, detail and download require the local session and validate identifiers', async t => {
   const id = 'e053b2e4-d1a6-4b0e-b3ef-5df7c434aa34';
   const record = { requestId: id, account: 'CodeBuddy', model: 'safe-model', upstreamModel: 'actual-model',

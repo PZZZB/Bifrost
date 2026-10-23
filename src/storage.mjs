@@ -17,6 +17,7 @@ export async function writeJson(path, value) {
 export function redact(message) {
   return String(message ?? '未知错误')
     .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(?:bfk_|bfs_|bfi_)[A-Za-z0-9_-]{20,}\b/g, '[REDACTED]')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]')
     .replace(/\b(?:sk-|rt_|oat_)[A-Za-z0-9_-]{12,}\b/g, '[REDACTED]')
     .slice(0, 1200);

@@ -3,7 +3,17 @@
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'connection-dot', 'connection-label', 'version', 'notice', 'setup-state',
-  'tab-console', 'tab-accounts', 'panel-console', 'panel-accounts',
+  'tab-console', 'tab-accounts', 'tab-clients', 'panel-console', 'panel-accounts', 'panel-clients',
+  'client-admin-refresh', 'client-admin-error', 'client-admin-message', 'client-admin-state',
+  'client-api-base', 'client-portal-link', 'client-access-note', 'client-users-count', 'client-user-list',
+  'client-user-create-form', 'client-create-username', 'client-create-password', 'client-user-create',
+  'client-detail-title', 'client-user-state', 'client-user-empty', 'client-user-detail', 'client-user-meta', 'client-user-toggle',
+  'client-user-limit-form', 'client-user-key-limit', 'client-user-limit-save',
+  'client-model-form', 'client-model-list', 'client-model-save', 'client-model-message',
+  'client-key-list', 'client-key-create-form', 'client-key-name', 'client-key-days', 'client-key-create',
+  'client-registration-form', 'client-registration-mode', 'client-registration-days', 'client-registration-save',
+  'client-invitation-list', 'client-invitation-create-form', 'client-invitation-days', 'client-invitation-uses', 'client-invitation-models', 'client-invitation-create',
+  'client-secret-panel', 'client-secret-title', 'client-secret-note', 'client-secret-label', 'client-secret-value', 'client-secret-copy', 'client-secret-close',
   ...['a', 'b', 'codebuddy', 'cursor'].flatMap(account =>
     ['state', 'identity', 'plan', 'method', 'catalog', 'enabled'].map(field => `account-${account}-${field}`)),
   'step-login', 'step-bind', 'step-verify', 'login-button', 'device-login-button', 'authorization-link',
@@ -91,6 +101,16 @@ let cursorRequest = null;
 let cursorRequestEpoch = -1;
 const accountStateEpoch = { b: 0, codebuddy: 0, cursor: 0 };
 const accountMetadataNeedsRefresh = new Set();
+let clientAdminData = null;
+let clientAdminRequest = null;
+let clientAdminLoaded = false;
+let clientAdminError = '';
+let clientAdminUnavailable = true;
+let clientSelectedId = '';
+let clientModelDraft = new Set();
+let clientInviteDraft = new Set();
+let clientSecret = '';
+let clientDefaultDays = 30;
 
 function text(id, value) {
   elements[id].textContent = value == null ? '' : String(value);
@@ -102,8 +122,8 @@ function pill(id, label, kind = '') {
 }
 
 function selectManagementTab(name, { focus = false, updateLocation = true } = {}) {
-  const selected = name === 'accounts' ? 'accounts' : 'console';
-  for (const tab of ['console', 'accounts']) {
+  const selected = ['accounts', 'clients'].includes(name) ? name : 'console';
+  for (const tab of ['console', 'accounts', 'clients']) {
     const active = selected === tab;
     elements[`tab-${tab}`].setAttribute('aria-selected', String(active));
     elements[`tab-${tab}`].tabIndex = active ? 0 : -1;
@@ -111,6 +131,263 @@ function selectManagementTab(name, { focus = false, updateLocation = true } = {}
   }
   if (focus) elements[`tab-${selected}`].focus();
   if (updateLocation && window.history?.replaceState) window.history.replaceState(null, '', `#${selected}`);
+  if (selected === 'clients' && !clientAdminLoaded && managementConnected) void refreshClientAdmin();
+}
+
+function clientAccount() {
+  return clientAdminData?.accounts?.find(account => account.id === clientSelectedId) ?? null;
+}
+
+function clientAdminReady() {
+  return managementConnected && !busyAction && !restartInProgress && !clientAdminRequest && !clientAdminUnavailable && clientAdminData !== null;
+}
+
+function clientModelSelectionDirty() {
+  const saved = new Set(clientAccount()?.allowedModels ?? []);
+  return saved.size !== clientModelDraft.size || [...saved].some(id => !clientModelDraft.has(id));
+}
+
+function renderClientAdminControls() {
+  const ready = clientAdminReady();
+  const selected = Boolean(clientAccount());
+  elements['client-secret-close'].disabled = false;
+  elements['client-secret-copy'].disabled = !clientSecret;
+  elements['client-admin-refresh'].disabled = !managementConnected || Boolean(busyAction) || restartInProgress || Boolean(clientAdminRequest);
+  for (const id of ['client-user-create', 'client-registration-save', 'client-invitation-create']) elements[id].disabled = !ready;
+  for (const id of ['client-user-toggle', 'client-user-limit-save', 'client-key-create']) elements[id].disabled = !ready || !selected;
+  elements['client-model-save'].disabled = !ready || !selected || !clientModelSelectionDirty();
+  for (const button of document.querySelectorAll('[data-client-write]')) button.disabled = !ready;
+  text('client-admin-error', clientAdminError);
+  elements['client-admin-error'].hidden = !clientAdminError;
+}
+
+function clientLocalDate(value) {
+  const date = new Date(value);
+  return value && Number.isFinite(date.getTime()) ? new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
+}
+
+function clientTime(value) {
+  return value ? tokenTime(value, 'America/Los_Angeles') : '未设置';
+}
+
+function clientInteger(id, label, maximum = 3650) {
+  const value = elements[id].value.trim();
+  const number = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(number) || number < 1 || number > maximum) throw new Error(`${label}需为 1–${maximum} 的整数。`);
+  return number;
+}
+
+function clientAccountPath(id = clientSelectedId) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('用户标识无效，请刷新用户列表。');
+  return `/api/client-admin/accounts/${encodeURIComponent(id)}`;
+}
+
+function clientKeyPath(id, accountId = clientSelectedId) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('Key 标识无效，请刷新用户列表。');
+  return `${clientAccountPath(accountId)}/keys/${encodeURIComponent(id)}`;
+}
+
+function clientInvitationPath(id) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('邀请码标识无效，请刷新用户列表。');
+  return `/api/client-admin/invites/${encodeURIComponent(id)}`;
+}
+
+function clearClientSecret() {
+  clientSecret = '';
+  elements['client-secret-value'].value = '';
+  elements['client-secret-panel'].hidden = true;
+}
+
+function showClientSecret(value, invitation = false) {
+  clearClientSecret();
+  if (typeof value !== 'string' || !value || value.length > 4096) throw new Error('服务未返回完整凭证。请检查列表；已生成的凭证无法再次读取。');
+  clientSecret = value;
+  elements['client-secret-value'].value = value;
+  text('client-secret-title', invitation ? '新邀请码' : '新 API Key');
+  text('client-secret-label', invitation ? '邀请码' : 'API Key');
+  text('client-secret-note', invitation ? '完整邀请码只展示这一次。请立即复制；刷新后无法重新读取。' : '完整 Key 只展示这一次。请立即复制；刷新后只能看到前缀。');
+  elements['client-secret-panel'].hidden = false;
+}
+
+function clientModelOptions(containerId, selected, onChange) {
+  const models = Array.isArray(clientAdminData?.models) ? [...clientAdminData.models] : [];
+  const known = new Set(models.map(model => model.id));
+  for (const id of selected) if (!known.has(id)) models.push({ id, name: id, available: false, missing: true });
+  const options = models.filter(model => typeof model?.id === 'string' && model.id).map(model => {
+    const label = document.createElement('label'); label.className = 'model-option';
+    const input = document.createElement('input'); input.type = 'checkbox'; input.value = model.id; input.checked = selected.has(model.id);
+    input.disabled = model.available === false && !input.checked;
+    input.addEventListener('change', () => {
+      if (input.checked) selected.add(model.id); else selected.delete(model.id);
+      onChange?.();
+    });
+    const content = document.createElement('span');
+    const title = document.createElement('strong'); title.textContent = model.name || model.id;
+    const detail = document.createElement('small'); detail.textContent = `${model.channel || '模型'} · ${model.id}${model.missing ? ' · 当前目录未返回' : model.available === false ? ' · 当前不可用' : model.enabled === false ? ' · 全局未开放' : ''}`;
+    content.append(title, detail); label.append(input, content); return label;
+  });
+  if (!options.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = '模型目录尚未返回；可先创建用户，刷新目录后再授权。'; options.push(empty); }
+  elements[containerId].replaceChildren(...options);
+}
+
+function clientWriteButton(label, operation, { danger = false } = {}) {
+  const button = document.createElement('button'); button.type = 'button'; button.className = `button ${danger ? 'danger' : 'secondary'} small`;
+  button.textContent = label; button.setAttribute('data-client-write', '');
+  button.addEventListener('click', () => { void runClientAdminAction(operation); }); return button;
+}
+
+function clientRevocationControls(container, label, operation) {
+  const trigger = document.createElement('button'); trigger.type = 'button'; trigger.className = 'button quiet small'; trigger.textContent = '撤销'; trigger.setAttribute('data-client-write', '');
+  const confirmation = document.createElement('div'); confirmation.className = 'client-item-confirm'; confirmation.hidden = true;
+  const warning = document.createElement('p'); warning.textContent = `${label}撤销后无法恢复。确认撤销？`;
+  const buttons = document.createElement('div'); buttons.className = 'button-row';
+  const confirm = clientWriteButton('确认撤销', operation, { danger: true });
+  const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'button quiet small'; cancel.textContent = '取消';
+  cancel.addEventListener('click', () => { confirmation.hidden = true; trigger.hidden = false; });
+  trigger.addEventListener('click', () => { confirmation.hidden = false; trigger.hidden = true; });
+  buttons.append(confirm, cancel); confirmation.append(warning, buttons); container.append(trigger, confirmation);
+}
+
+function renderClientKeys(account) {
+  const keys = Array.isArray(account.keys) ? account.keys : [];
+  const nodes = keys.map(key => {
+    const card = document.createElement('section'); card.className = 'client-access-item';
+    const heading = document.createElement('div'); heading.className = 'client-access-item-heading';
+    const title = document.createElement('div'); const name = document.createElement('strong'); name.textContent = key.name || '未命名 Key';
+    const prefix = document.createElement('code'); prefix.textContent = typeof key.lastFour === 'string' ? `••••${key.lastFour}` : '尾号未返回'; title.append(name, prefix);
+    const state = document.createElement('span');
+    const revoked = Boolean(key.revokedAt) || key.status === 'revoked';
+    const labels = { active: '有效', expired: '已过期', disabled: '已停用', revoked: '已撤销', account_disabled: '用户已停用', account_expired: '账号到期上限已过' };
+    state.className = `pill ${key.status === 'active' && account.enabled !== false ? 'success' : 'pending'}`;
+    state.textContent = revoked ? '已撤销' : account.enabled === false ? '用户已停用' : labels[key.status] || (key.enabled === false ? '已停用' : '状态未返回');
+    heading.append(title, state); card.append(heading);
+    const expiry = document.createElement('p'); expiry.textContent = `Key 到期：${clientTime(key.expiresAt)} · 实际到期：${clientTime(key.effectiveExpiresAt ?? key.expiresAt)}`; card.append(expiry);
+    if (!revoked) {
+      const actions = document.createElement('div'); actions.className = 'client-item-actions';
+      actions.append(clientWriteButton(key.enabled === false ? '启用' : '停用', async () => {
+        await post(clientKeyPath(key.id, account.id), { enabled: key.enabled === false });
+      }));
+      const renewal = document.createElement('label'); renewal.className = 'client-field'; renewal.textContent = '增加天数';
+      const days = document.createElement('input'); days.type = 'number'; days.min = '1'; days.max = '3650'; days.value = '30'; renewal.append(days);
+      actions.append(renewal, clientWriteButton('续期', async () => {
+        const number = Number(days.value);
+        if (!/^\d+$/.test(days.value) || !Number.isSafeInteger(number) || number < 1 || number > 3650) throw new Error('续期天数需为 1–3650 的整数。');
+        const currentExpiry = new Date(key.expiresAt).getTime();
+        const expiresAt = new Date(Math.max(Date.now(), Number.isFinite(currentExpiry) ? currentExpiry : 0) + number * 86400000).toISOString();
+        await post(clientKeyPath(key.id, account.id), { expiresAt });
+      }));
+      clientRevocationControls(actions, '此 Key ', async () => { await post(`${clientKeyPath(key.id, account.id)}/revoke`); clearClientSecret(); });
+      card.append(actions);
+    }
+    return card;
+  });
+  if (!nodes.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = '此用户还没有 API Key。'; nodes.push(empty); }
+  elements['client-key-list'].replaceChildren(...nodes);
+}
+
+function selectClientAccount(id, { preserveDraft = false } = {}) {
+  clientSelectedId = id;
+  const account = clientAccount();
+  if (!preserveDraft) clientModelDraft = new Set(account?.allowedModels ?? []);
+  elements['client-user-empty'].hidden = Boolean(account);
+  elements['client-user-detail'].hidden = !account;
+  text('client-detail-title', account?.username || '选择一个用户');
+  pill('client-user-state', account ? account.enabled === false ? '已停用' : '已启用' : '—', account?.enabled ? 'success' : 'pending');
+  text('client-model-message', '');
+  if (account) {
+    const fields = [['用户名', account.username], ['创建时间', clientTime(account.createdAt)], ['Key 到期上限', account.keyExpiresAtLimit ? clientTime(account.keyExpiresAtLimit) : '无账号上限']];
+    elements['client-user-meta'].replaceChildren(...fields.map(([name, value]) => {
+      const row = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = name; dd.textContent = value; row.append(dt, dd); return row;
+    }));
+    text('client-user-toggle', account.enabled === false ? '启用用户' : '停用用户');
+    elements['client-user-key-limit'].value = clientLocalDate(account.keyExpiresAtLimit);
+    clientModelOptions('client-model-list', clientModelDraft, renderClientAdminControls);
+    renderClientKeys(account);
+  }
+  for (const button of elements['client-user-list'].querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.getAttribute('data-client-id') === id));
+  renderClientAdminControls();
+}
+
+function renderClientInvitations() {
+  const invites = Array.isArray(clientAdminData?.invites) ? clientAdminData.invites : [];
+  const nodes = invites.map(invite => {
+    const card = document.createElement('section'); card.className = 'client-access-item';
+    const heading = document.createElement('div'); heading.className = 'client-access-item-heading';
+    const name = document.createElement('strong'); name.textContent = typeof invite.lastFour === 'string' ? `邀请码 ••••${invite.lastFour}` : `邀请码 ${invite.id}`;
+    const status = document.createElement('span'); status.className = 'pill pending';
+    const labels = { active: '有效', used: '已用完', exhausted: '已用完', expired: '已过期', revoked: '已撤销' };
+    status.textContent = invite.revokedAt ? '已撤销' : labels[invite.status] || '状态未返回'; heading.append(name, status);
+    const description = document.createElement('p'); description.textContent = `到期：${clientTime(invite.expiresAt)} · 已使用 ${Number.isSafeInteger(invite.uses) ? invite.uses : 0} / ${Number.isSafeInteger(invite.maxUses) ? invite.maxUses : '未返回'} · 模型 ${Array.isArray(invite.allowedModels) ? invite.allowedModels.length : 0} 项`;
+    card.append(heading, description);
+    if (!invite.revokedAt && invite.status !== 'revoked') {
+      const actions = document.createElement('div'); actions.className = 'client-item-actions';
+      clientRevocationControls(actions, '此邀请码', async () => { await post(`${clientInvitationPath(invite.id)}/revoke`); clearClientSecret(); }); card.append(actions);
+    }
+    return card;
+  });
+  if (!nodes.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = '尚未创建邀请码。'; nodes.push(empty); }
+  elements['client-invitation-list'].replaceChildren(...nodes);
+}
+
+function renderClientAdmin({ replaceDraft = false } = {}) {
+  const data = clientAdminData;
+  if (!data) { renderClientAdminControls(); return; }
+  const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+  text('client-api-base', data.endpoint?.baseUrl || '入口尚未配置');
+  const portal = typeof data.endpoint?.portalUrl === 'string' ? data.endpoint.portalUrl : '/register';
+  try {
+    const url = new URL(portal, window.location);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid portal URL');
+    elements['client-portal-link'].href = url.href; elements['client-portal-link'].hidden = false;
+  } catch { elements['client-portal-link'].removeAttribute('href'); elements['client-portal-link'].hidden = true; }
+  pill('client-admin-state', data.server?.ready ? '接入已就绪' : data.server?.enabled ? '入口尚未就绪' : '入口待启用', data.server?.ready ? 'success' : 'pending');
+  text('client-access-note', data.server?.message || '客户端配置基础地址、独立 API Key 和获准模型。Key 的到期与撤销不删除用户账号。');
+  text('client-users-count', `${accounts.length} 位用户`);
+  const users = accounts.map(account => {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'client-user-option'; button.setAttribute('data-client-id', account.id);
+    const identity = document.createElement('span'), title = document.createElement('strong'), detail = document.createElement('small');
+    title.textContent = account.username; detail.textContent = `${account.allowedModels?.length ?? 0} 个模型 · ${account.keys?.length ?? 0} 个 Key`;
+    identity.append(title, detail); const state = document.createElement('span'); state.className = `pill ${account.enabled ? 'success' : 'pending'}`; state.textContent = account.enabled ? '已启用' : '已停用';
+    button.append(identity, state); button.addEventListener('click', () => { if (!busyAction) selectClientAccount(account.id); }); return button;
+  });
+  if (!users.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = '尚无接入用户。可在此创建，或通过用户页面注册。'; users.push(empty); }
+  elements['client-user-list'].replaceChildren(...users);
+  const selectedStillPresent = accounts.some(account => account.id === clientSelectedId);
+  selectClientAccount(selectedStillPresent ? clientSelectedId : accounts[0]?.id || '', { preserveDraft: selectedStillPresent && !replaceDraft });
+  elements['client-registration-mode'].value = ['open', 'invite', 'closed'].includes(data.registration?.mode) ? data.registration.mode : 'closed';
+  const defaultDays = Number.isSafeInteger(data.registration?.defaultKeyDays) ? data.registration.defaultKeyDays : 30;
+  elements['client-registration-days'].value = String(defaultDays);
+  if (!elements['client-key-days'].value || elements['client-key-days'].value === String(clientDefaultDays)) elements['client-key-days'].value = String(defaultDays);
+  clientDefaultDays = defaultDays;
+  clientModelOptions('client-invitation-models', clientInviteDraft);
+  renderClientInvitations(); renderClientAdminControls();
+}
+
+async function refreshClientAdmin({ clearSecret = false, replaceDraft = false } = {}) {
+  if (clearSecret) clearClientSecret();
+  if (clientAdminRequest) return clientAdminRequest;
+  const pending = (async () => {
+    try {
+      const data = await request('/api/client-admin', { signal: AbortSignal.timeout(10000) });
+      if (!Array.isArray(data.accounts) || !Array.isArray(data.invites)) throw new Error('用户管理返回格式不完整，请更新后台。');
+      clientAdminData = data; clientAdminError = ''; clientAdminUnavailable = false; clientAdminLoaded = true;
+      renderClientAdmin({ replaceDraft });
+    } catch (error) {
+      clientAdminLoaded = true; clientAdminUnavailable = true;
+      clientAdminError = error.status === 404 || error.status === 503 ? '接入用户管理需在更新并重启后台后可用。' : `用户管理读取失败：${error.message || '请重试。'}`;
+      pill('client-admin-state', error.status === 404 || error.status === 503 ? '待更新后台' : '读取失败', 'pending');
+    } finally { if (clientAdminRequest === pending) clientAdminRequest = null; renderClientAdminControls(); }
+  })();
+  clientAdminRequest = pending; renderClientAdminControls(); return pending;
+}
+
+async function runClientAdminAction(operation) {
+  if (!clientAdminReady()) return;
+  await action('client-admin', async () => {
+    clientAdminError = ''; renderClientAdminControls();
+    try { await operation(); await refreshClientAdmin(); text('client-admin-message', '已保存，接入权限立即生效。'); }
+    catch (error) { clientAdminError = error.message || '操作未完成，请重试。'; renderClientAdminControls(); throw error; }
+  });
 }
 
 function channelModelCounts(channel, authenticated) {
@@ -798,6 +1075,7 @@ function render() {
   renderServiceControl();
   renderModelSettingsControls();
   renderAccountSummaries();
+  renderClientAdminControls();
 }
 
 async function refreshStatus({ duringRestart = false, signal } = {}) {
@@ -842,6 +1120,7 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         void refreshCursor();
         void refreshServiceStatus();
         if (!modelSettingsLoaded) void refreshModelSettings();
+        if (elements['tab-clients'].getAttribute('aria-selected') === 'true' && !clientAdminLoaded) void refreshClientAdmin();
         if (!status.backend?.error && accountMetadataNeedsRefresh.delete('b')) {
           void refreshAuthorizedModelSettings(); void refreshAuthorizedAccountQuotas();
         }
@@ -855,6 +1134,7 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
       text('connection-label', restartInProgress || queuedRestartToken ? '正在等待网关恢复连接' : '本机服务连接中断，正在重试');
       document.querySelectorAll('button:not(#quota-refresh-button):not([role="tab"])').forEach((button) => { button.disabled = true; });
       renderAccountSummaries();
+      renderClientAdminControls();
       throw error;
     } finally {
       if (statusRequest === pending) statusRequest = null;
@@ -1446,16 +1726,87 @@ elements['copy-button'].addEventListener('click', () => {
 
 elements['quota-refresh-button'].addEventListener('click', () => { void refreshAccountQuotas(); });
 
-for (const [index, name] of ['console', 'accounts'].entries()) {
+const managementTabs = ['console', 'accounts', 'clients'];
+for (const [index, name] of managementTabs.entries()) {
   elements[`tab-${name}`].addEventListener('click', () => selectManagementTab(name));
   elements[`tab-${name}`].addEventListener('keydown', event => {
-    const next = event.key === 'Home' ? 'console' : event.key === 'End' ? 'accounts'
-      : ['ArrowLeft', 'ArrowRight'].includes(event.key) ? ['console', 'accounts'][1 - index] : null;
+    const next = event.key === 'Home' ? 'console' : event.key === 'End' ? 'clients'
+      : event.key === 'ArrowLeft' ? managementTabs[(index + managementTabs.length - 1) % managementTabs.length]
+        : event.key === 'ArrowRight' ? managementTabs[(index + 1) % managementTabs.length] : null;
     if (next) { event.preventDefault(); selectManagementTab(next, { focus: true }); }
   });
 }
-window.addEventListener('hashchange', () => selectManagementTab(window.location.hash === '#accounts' ? 'accounts' : 'console', { updateLocation: false }));
-selectManagementTab(window.location?.hash === '#accounts' ? 'accounts' : 'console', { updateLocation: false });
+window.addEventListener('hashchange', () => selectManagementTab(window.location.hash.slice(1), { updateLocation: false }));
+selectManagementTab(window.location?.hash?.slice(1), { updateLocation: false });
+
+elements['client-admin-refresh'].addEventListener('click', () => { void refreshClientAdmin({ clearSecret: true }); });
+elements['client-secret-close'].addEventListener('click', clearClientSecret);
+elements['client-secret-copy'].addEventListener('click', () => {
+  if (!clientSecret) return;
+  void copyText(clientSecret).then(() => notify('完整凭证已复制，请妥善保存。')).catch(error => notify(error.message || '复制失败，请选中凭证复制。', true));
+});
+elements['client-user-create-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const username = elements['client-create-username'].value.trim();
+    const password = elements['client-create-password'].value;
+    if (username.length < 3 || username.length > 64) throw new Error('用户名需为 3–64 个字符。');
+    if (password.length < 12 || password.length > 256) throw new Error('密码需为 12–256 个字符。');
+    elements['client-create-password'].value = '';
+    const result = await post('/api/client-admin/accounts', { username, password, allowedModels: [], enabled: true });
+    if (typeof result.account?.id === 'string') { clientSelectedId = result.account.id; clientModelDraft = new Set(result.account.allowedModels ?? []); }
+    elements['client-create-username'].value = '';
+  });
+});
+elements['client-user-toggle'].addEventListener('click', () => {
+  const account = clientAccount(); if (!account) return;
+  void runClientAdminAction(async () => { await post(clientAccountPath(account.id), { enabled: account.enabled === false }); });
+});
+elements['client-user-limit-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const value = elements['client-user-key-limit'].value;
+    const date = value ? new Date(value) : null;
+    if (date && !Number.isFinite(date.getTime())) throw new Error('Key 到期上限格式无效。');
+    await post(clientAccountPath(), { keyExpiresAtLimit: date ? date.toISOString() : null });
+  });
+});
+elements['client-model-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    await post(clientAccountPath(), { allowedModels: [...clientModelDraft].sort() });
+  });
+});
+elements['client-key-create-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const expiresInDays = clientInteger('client-key-days', 'Key 有效天数');
+    const name = elements['client-key-name'].value.trim() || 'Default';
+    if (name.length > 80) throw new Error('Key 名称最多 80 个字符。');
+    clearClientSecret();
+    const result = await post(`${clientAccountPath()}/keys`, { name, expiresInDays });
+    showClientSecret(result.secret); elements['client-key-name'].value = '';
+  });
+});
+elements['client-registration-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const mode = elements['client-registration-mode'].value;
+    if (!['open', 'invite', 'closed'].includes(mode)) throw new Error('注册方式无效。');
+    const defaultKeyDays = clientInteger('client-registration-days', '默认有效天数');
+    await post('/api/client-admin/registration', { mode, defaultKeyDays });
+  });
+});
+elements['client-invitation-create-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const expiresInDays = clientInteger('client-invitation-days', '邀请码有效天数');
+    const maxUses = clientInteger('client-invitation-uses', '可注册人数', 10000);
+    clearClientSecret();
+    const result = await post('/api/client-admin/invites', { expiresInDays, maxUses, allowedModels: [...clientInviteDraft].sort() });
+    showClientSecret(result.token, true);
+  });
+});
 
 elements['cursor-login-button'].addEventListener('click', () => {
   if (busyAction || restartInProgress) return;

@@ -216,7 +216,29 @@ test('downstream cancellation aborts Magpie and concurrent calls are bounded', a
 });
 
 test('delegated main starts with an unusable Codex binary and never creates A/B homes or reads their auth', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'magpie-main-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const dir = await mkdtemp(join(tmpdir(), 'magpie-main-'));
+  let child = null, exited = Promise.resolve();
+  t.after(async () => {
+    const running = () => child?.pid && child.exitCode === null && child.signalCode === null;
+    const waitForExit = async () => {
+      let timer;
+      try {
+        await Promise.race([exited, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('fixture main did not exit during cleanup')), 2000);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
+    if (running()) {
+      child.kill('SIGTERM');
+      try { await waitForExit(); }
+      catch {
+        if (running()) child.kill('SIGKILL');
+        await waitForExit();
+      }
+    }
+    // Stop all background metadata writes before removing this test's directory.
+    await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  });
   const aHome = join(dir, 'account-a-must-not-exist');
   const marker = { version: 1, baseUrl: MAGPIE_DELEGATION_BASE_URL };
   await writeFile(join(dir, 'magpie-delegation.json'), JSON.stringify(marker));
@@ -224,18 +246,21 @@ test('delegated main starts with an unusable Codex binary and never creates A/B 
   await writeFile(join(dir, 'bridge.json'), originalState);
   const reservation = http.createServer(); await listen(reservation);
   const port = reservation.address().port; await new Promise(resolve => reservation.close(resolve));
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/main.mjs', import.meta.url))], {
+  child = spawn(process.execPath, [fileURLToPath(new URL('../src/main.mjs', import.meta.url))], {
     env: { ...process.env, BRIDGE_STATE_DIR: dir, BRIDGE_PORT: String(port), BRIDGE_CLIENT_CODEX_HOME: aHome,
       CODEX_BINARY: join(dir, 'must-never-launch-codex.exe') }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
-  const exited = new Promise(resolve => child.once('exit', resolve));
-  t.after(async () => { if (child.exitCode === null) { child.kill(); await exited; } });
+  exited = new Promise(resolve => {
+    child.once('exit', resolve); child.once('error', resolve);
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) resolve();
+  });
   let output = '', errors = '';
   child.stderr.on('data', bytes => { errors += bytes; });
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('fixture main did not listen')), 10_000);
     child.stdout.on('data', bytes => { output += bytes; if (output.includes('Codex delegation: Magpie')) { clearTimeout(timer); resolve(); } });
     child.once('exit', code => { clearTimeout(timer); reject(new Error(`fixture main exited ${code}: ${errors}`)); });
+    child.once('error', () => { clearTimeout(timer); reject(new Error('fixture main could not spawn')); });
   });
   const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
   assert.equal(health.delegation, 'magpie');

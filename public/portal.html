@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="referrer" content="no-referrer">
+    <title>Bifröst · 用户中心</title>
+    <link rel="stylesheet" href="/portal.css">
+    <script src="/portal.js" defer></script>
+  </head>
+  <body>
+    <main class="portal-shell">
+      <header class="portal-topbar">
+        <a class="portal-brand" href="/portal" aria-label="Bifröst 用户中心"><span class="brand-mark" aria-hidden="true">B</span><span>Bifröst</span></a>
+        <span class="topbar-caption">用户中心</span>
+      </header>
+      <div class="notice" id="portal-notice" role="status" aria-live="polite" hidden></div>
+
+      <section class="auth-layout" id="auth-panel" aria-labelledby="auth-heading">
+        <div class="auth-intro">
+          <div class="eyebrow">ONE KEY. YOUR MODELS.</div>
+          <h1 id="auth-heading">连接你的模型</h1>
+          <p>注册账号，创建专属 API Key。将网关地址、Key 和模型 ID 填入支持自定义服务的客户端，即可连接 Bifröst。</p>
+          <div class="intro-details"><span>独立密钥</span><span>到期自动失效</span><span>随时撤销</span></div>
+        </div>
+        <section class="card auth-card" aria-label="账号登录与注册">
+          <div class="auth-tabs" role="tablist" aria-label="账号操作">
+            <button id="login-tab" type="button" role="tab" aria-selected="true" aria-controls="credentials-form" tabindex="0">登录</button>
+            <button id="register-tab" type="button" role="tab" aria-selected="false" aria-controls="credentials-form" tabindex="-1">注册</button>
+          </div>
+          <form id="credentials-form" role="tabpanel" aria-labelledby="login-tab">
+            <label for="username">用户名<input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" minlength="3" maxlength="64" required></label>
+            <label for="password">密码<input id="password" name="password" type="password" autocomplete="current-password" minlength="12" maxlength="256" required></label>
+            <label for="invite-code" id="invite-field" hidden>邀请码<input id="invite-code" name="inviteToken" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="256"></label>
+            <p class="field-note" id="registration-note" hidden></p>
+            <div class="form-error" id="auth-error" role="alert" hidden></div>
+            <button class="button primary full-width" id="auth-submit" type="submit" disabled>登录</button>
+          </form>
+          <p class="subtle-note">密码用于登录用户中心。客户端使用单独的 API Key。</p>
+        </section>
+      </section>
+
+      <section id="dashboard-panel" aria-labelledby="dashboard-heading" hidden>
+        <div class="dashboard-heading"><div><div class="eyebrow">YOUR GATEWAY</div><h1 id="dashboard-heading">我的工作台</h1><p id="user-summary"></p></div><div class="actions"><button class="button secondary" id="portal-refresh" type="button">刷新</button><button class="button quiet" id="portal-logout" type="button">退出登录</button></div></div>
+        <div class="account-banner" id="account-banner" role="status" hidden></div>
+        <div class="portal-grid">
+          <section class="card connection-card" aria-labelledby="connection-heading">
+            <div class="eyebrow">CONNECT</div><h2 id="connection-heading">接入客户端</h2>
+            <p class="card-copy">在 CodeBuddy、WorkBuddy 或其他支持自定义 API 的客户端中，填写以下信息。</p>
+            <dl class="connection-fields" id="connection-fields"></dl>
+            <p class="subtle-note">API Key 在下方创建。接口格式和模型 ID 需与客户端配置一致。</p>
+            <details class="client-setup"><summary>CodeBuddy / WorkBuddy 怎么填写</summary><p><strong>CodeBuddy IDE：</strong>在用户级 <code>~/.codebuddy/models.json</code> 的 <code>models</code> 数组中添加模型，<code>id</code> 填下方模型 ID，<code>url</code> 填完整 Chat 接口地址，<code>apiKey</code> 填新建的 Key。</p><p><strong>WorkBuddy：</strong>打开“设置 → 模型 → 自定义 / Custom”，填写 URL、API Key 和模型名。使用完整接口地址时，可开启高级“自定义协议”，按填写的地址直接请求。</p></details>
+          </section>
+          <section class="card create-key-card" aria-labelledby="create-key-heading">
+            <div class="eyebrow">API KEY</div><h2 id="create-key-heading">创建密钥</h2>
+            <form id="key-form">
+              <label for="key-name">密钥名称<input id="key-name" name="name" type="text" maxlength="80" placeholder="例如：办公电脑" autocomplete="off" required></label>
+              <label for="key-days">有效天数<input id="key-days" name="expiresInDays" type="number" min="1" max="365" step="1" value="30" required><span class="field-note" id="key-expiry-note">到期后此 Key 自动失效，账号仍可登录。</span></label>
+              <button class="button primary" id="key-create-button" type="submit">创建 API Key</button>
+            </form>
+          </section>
+        </div>
+
+        <section class="card secret-card" id="new-key-panel" aria-labelledby="new-key-heading" hidden>
+          <div class="card-heading"><div><div class="eyebrow">SAVE YOUR KEY</div><h2 id="new-key-heading">请保存新密钥</h2></div><button class="button quiet" id="secret-dismiss" type="button">关闭并清除</button></div>
+          <p class="card-copy">完整 Key 只显示这一次。关闭后无法再次读取；遗失时请撤销并新建。</p>
+          <label class="visually-hidden" for="new-key-secret">新建的完整 API Key</label><textarea id="new-key-secret" readonly rows="2" spellcheck="false" autocomplete="off"></textarea>
+          <div class="actions"><button class="button primary" id="secret-copy" type="button">复制 API Key</button><span class="copy-status" id="secret-copy-status" role="status" aria-live="polite"></span></div>
+        </section>
+
+        <section class="card keys-card" aria-labelledby="keys-heading">
+          <div class="card-heading"><div><div class="eyebrow">MY KEYS</div><h2 id="keys-heading">我的密钥</h2></div><span class="count" id="key-count"></span></div>
+          <div id="keys-list" class="keys-list"><p class="empty-state">正在读取密钥…</p></div>
+        </section>
+        <section class="card models-card" aria-labelledby="models-heading">
+          <div class="card-heading"><div><div class="eyebrow">AVAILABLE MODELS</div><h2 id="models-heading">可用模型</h2></div><span class="count" id="model-count"></span></div>
+          <p class="card-copy">复制模型 ID，填入客户端的模型配置。</p>
+          <div id="models-list" class="models-list"><p class="empty-state">正在读取模型…</p></div>
+        </section>
+      </section>
+      <footer class="portal-footer">Bifröst <span>模型网关</span></footer>
+    </main>
+  </body>
+</html>

@@ -103,6 +103,7 @@ function harness(overrides = {}) {
     if (path === '/api/token-usage') return json({ accounts: {}, totals: {}, recent: [] });
     if (path === '/api/request-diagnostics?limit=10') return json(diagnostics);
     if (path === '/api/account-quotas') return json(quotas);
+    if (path === '/api/client-admin') return json({ accounts: [], invites: [], models: [], registration: { mode: 'invite', defaultKeyDays: 30 }, server: {} });
     throw new Error(`Unexpected fixture endpoint: ${path}`);
   };
   const api = { calls, elements, intervals, tabs, control, document, location, historyCalls,
@@ -575,7 +576,7 @@ test('provider quota identities refresh only on manual action or authorization c
 });
 
 function assertSelectedTab(page, selected) {
-  for (const name of ['console', 'accounts']) {
+  for (const name of ['console', 'accounts', 'clients']) {
     const tab = page.elements.get(`tab-${name}`), panel = page.elements.get(`panel-${name}`);
     assert.ok(tab && panel, `Missing management tab or panel: ${name}`);
     assert.equal(tab.getAttribute('role'), 'tab');
@@ -607,9 +608,10 @@ test('management tab switches preserve unsaved model choices and search without 
 test('management tabs support keyboard wrapping, Home and End with focus and roving tab stops', async () => {
   const page = harness(); await settle();
   const beforeCalls = page.calls.length;
-  for (const [from, key, to] of [['console', 'ArrowLeft', 'accounts'], ['accounts', 'ArrowRight', 'console'],
+  for (const [from, key, to] of [['console', 'ArrowLeft', 'clients'], ['clients', 'ArrowRight', 'console'],
     ['console', 'ArrowRight', 'accounts'], ['accounts', 'ArrowLeft', 'console'],
-    ['console', 'End', 'accounts'], ['accounts', 'Home', 'console']]) {
+    ['accounts', 'ArrowRight', 'clients'], ['clients', 'ArrowLeft', 'accounts'],
+    ['console', 'End', 'clients'], ['accounts', 'Home', 'console']]) {
     const event = page.elements.get(`tab-${from}`).trigger('keydown', { key });
     assert.equal(event.defaultPrevented, true); assertSelectedTab(page, to);
     assert.equal(page.document.activeElement, page.elements.get(`tab-${to}`));
@@ -617,7 +619,8 @@ test('management tabs support keyboard wrapping, Home and End with focus and rov
   }
   const ignored = page.elements.get('tab-console').trigger('keydown', { key: 'Escape' });
   assert.equal(ignored.defaultPrevented, false); assertSelectedTab(page, 'console');
-  await settle(); assert.equal(page.calls.length, beforeCalls);
+  await settle(); assert.equal(page.calls.length, beforeCalls + 1);
+  assert.equal(page.calls.at(-1).path, '/api/client-admin', 'New user management loads only when first selected.');
 });
 
 test('management tabs honor account deep links and hash navigation without rewriting browser history or requesting data', async () => {
@@ -647,7 +650,7 @@ test('disconnected management service leaves tab navigation usable and clears st
     assert.equal(page.elements.get(`tab-${name}`).disabled, false, 'Disconnected action controls must not disable navigation.');
     page.elements.get(`tab-${name}`).trigger('click'); assertSelectedTab(page, name);
   }
-  page.elements.get('tab-console').trigger('keydown', { key: 'End' }); assertSelectedTab(page, 'accounts');
+  page.elements.get('tab-console').trigger('keydown', { key: 'End' }); assertSelectedTab(page, 'clients');
   for (const id of ['a', 'b', 'codebuddy', 'cursor']) {
     assert.equal(accountSummary(page, id).state, '连接中断');
     assert.equal(accountSummary(page, id).identity, '未确认');

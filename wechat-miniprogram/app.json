@@ -1,0 +1,11 @@
+{
+  "pages": ["pages/index/index"],
+  "window": {
+    "navigationBarTitleText": "Bifröst",
+    "navigationBarBackgroundColor": "#111515",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#111515"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

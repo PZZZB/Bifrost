@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "enabled": true,
+  "listener": {
+    "address": "127.0.0.1",
+    "port": 43159,
+    "allowedHosts": ["localhost:43159", "127.0.0.1:43159"]
+  },
+  "publicBaseUrl": "http://127.0.0.1:43159"
+}

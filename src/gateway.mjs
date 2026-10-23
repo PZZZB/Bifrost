@@ -1,4 +1,5 @@
 import { timingSafeEqual, randomUUID } from 'node:crypto';
+import { clientScope } from './client-scope.mjs';
 import { once } from 'node:events';
 import * as zlib from 'node:zlib';
 import { BridgeError, redact } from './storage.mjs';
@@ -417,6 +418,7 @@ export class Gateway {
           // Only content negotiation reaches the adapter. Neither A/B auth nor
           // the management key, cookies or native routing headers cross over.
           response = await provider.request({ path: `${path}${url.search}`,
+            clientScope: clientScope(req.headers['x-bifrost-client-scope']),
             body: Buffer.from(JSON.stringify(data)), headers: new Headers({
               'content-type': 'application/json', ...(typeof req.headers.accept === 'string' ? { accept: req.headers.accept } : {}),
             }), signal: abort.signal });

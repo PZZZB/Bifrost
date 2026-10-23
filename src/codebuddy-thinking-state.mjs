@@ -79,11 +79,19 @@ function jsonValue(value, depth = 0, ancestors = new WeakSet()) {
 }
 
 function payload(value) {
-  if ((!shape(value, ['reasoning', 'identity', 'model']) && !shape(value, ['reasoning', 'identity', 'model', 'extra_fields'])) ||
+  if (!value || typeof value !== 'object' || types.isProxy(value) || Array.isArray(value)) throw new Error();
+  const fields = ['reasoning', 'identity', 'model'];
+  if (Object.hasOwn(value ?? {}, 'extra_fields')) fields.push('extra_fields');
+  if (Object.hasOwn(value ?? {}, 'client_scope')) fields.push('client_scope');
+  if (!shape(value, fields) ||
       typeof value.reasoning !== 'string' ||
       value.reasoning.length > MAX_PAYLOAD_BYTES || Buffer.byteLength(value.reasoning, 'utf8') > MAX_PAYLOAD_BYTES ||
       !scope(value.identity) || !scope(value.model)) throw new Error();
   const result = { reasoning: value.reasoning, identity: value.identity, model: value.model };
+  if (Object.hasOwn(value, 'client_scope')) {
+    if (!scope(value.client_scope)) throw new Error();
+    result.client_scope = value.client_scope;
+  }
   if (Object.hasOwn(value, 'extra_fields') && value.extra_fields != null) result.extra_fields = jsonValue(value.extra_fields);
   return result;
 }
