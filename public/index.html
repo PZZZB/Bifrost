@@ -27,48 +27,196 @@
 
       <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
 
-      <div class="management-grid">
-        <section class="panel service-panel" aria-labelledby="service-title">
-          <div class="panel-heading"><div><div class="eyebrow">SERVICE</div><h2 id="service-title">网关服务</h2></div><span class="pill pending" id="service-state">读取中</span></div>
-          <p class="panel-copy">重启服务以加载配置变更。重启前会检查正在运行的请求。</p>
-          <dl class="service-details">
-            <div><dt>服务状态</dt><dd id="service-ready">读取中</dd></div>
-            <div><dt>运行方式</dt><dd id="service-independent">读取中</dd></div>
-            <div><dt>进行中的请求</dt><dd id="service-active">—</dd></div>
-          </dl>
-          <button class="button secondary" id="service-restart-button" type="button" disabled>重启网关服务</button>
-          <p class="inline-status management-message" id="service-message" role="status" aria-live="polite"></p>
-          <div class="restart-confirmation" id="service-confirmation" hidden>
-            <p id="service-confirmation-message"></p>
-            <div class="button-row"><button class="button danger" id="service-confirm-button" type="button">允许中断并重启</button><button class="button quiet" id="service-cancel-button" type="button">取消</button></div>
-          </div>
-          <div class="gateway-error" id="service-error" role="status" hidden></div>
-        </section>
-
-        <section class="panel model-settings-panel" aria-labelledby="model-settings-title">
-          <div class="panel-heading"><div><div class="eyebrow">CODEX MODELS</div><h2 id="model-settings-title">模型选择</h2></div><span class="pill pending" id="model-settings-state">读取中</span></div>
-          <p class="panel-copy">按账号目录勾选要开放给 Codex 的模型。新模型默认关闭；不可用或尚未适配的模型会显示原因。保存后在 Codex 中刷新模型目录，或重开 Codex。</p>
-          <label class="model-search-label" for="model-settings-search">搜索模型或渠道<input type="search" id="model-settings-search" placeholder="输入模型名称、ID 或渠道" autocomplete="off" disabled></label>
-          <p class="model-settings-summary" id="model-settings-summary" role="status" aria-live="polite"></p>
-          <p class="gateway-error" id="model-settings-discovery" role="status" hidden></p>
-          <div class="model-settings-list" id="model-settings-list" aria-label="账号模型目录"><p class="model-settings-empty">正在读取模型目录…</p></div>
-          <div class="button-row model-settings-actions"><button class="button primary" id="model-settings-save-button" type="button" disabled>保存模型选择</button><button class="button quiet" id="model-settings-reset-button" type="button" disabled>恢复勾选</button><button class="button quiet" id="model-settings-refresh-button" type="button" disabled>刷新账号目录</button></div>
-          <p class="footnote">批量选择仅作用于本渠道当前搜索结果中的可用模型。目录在打开页面、授权变更或手动刷新时更新；模型功能以各渠道实际适配为准。</p>
-          <p class="inline-status management-message" id="model-settings-message" role="status" aria-live="polite"></p>
-          <div class="gateway-error" id="model-settings-error" role="status" hidden></div>
-        </section>
+      <div class="console-tabs" role="tablist" aria-label="管理页面">
+        <button id="tab-console" role="tab" type="button" aria-controls="panel-console" aria-selected="true" tabindex="0">控制台</button>
+        <button id="tab-accounts" role="tab" type="button" aria-controls="panel-accounts" aria-selected="false" tabindex="-1">账号管理</button>
       </div>
 
-      <details class="account-management">
-        <summary>账号 B 与 Codex 接入<span>登录、绑定、验证与配置管理</span></summary>
-        <div class="dashboard">
-        <section class="panel setup-panel" aria-labelledby="setup-title">
-          <div class="panel-heading"><div><div class="eyebrow">ACCOUNT B</div><h2 id="setup-title">订阅账号 B</h2></div><span class="pill" id="setup-state">准备中</span></div>
-          <div class="account-actions">
+      <section class="workspace-panel" id="panel-console" role="tabpanel" aria-labelledby="tab-console" tabindex="0">
+        <div class="management-grid">
+          <section class="panel service-panel" aria-labelledby="service-title">
+            <div class="panel-heading"><div><div class="eyebrow">SERVICE</div><h2 id="service-title">网关服务</h2></div><span class="pill pending" id="service-state">读取中</span></div>
+            <p class="panel-copy">重启服务以加载配置变更。重启前会检查正在运行的请求。</p>
+            <dl class="service-details">
+              <div><dt>服务状态</dt><dd id="service-ready">读取中</dd></div>
+              <div><dt>运行方式</dt><dd id="service-independent">读取中</dd></div>
+              <div><dt>进行中的请求</dt><dd id="service-active">—</dd></div>
+            </dl>
+            <button class="button secondary" id="service-restart-button" type="button" disabled>重启网关服务</button>
+            <p class="inline-status management-message" id="service-message" role="status" aria-live="polite"></p>
+            <div class="restart-confirmation" id="service-confirmation" hidden>
+              <p id="service-confirmation-message"></p>
+              <div class="button-row"><button class="button danger" id="service-confirm-button" type="button">允许中断并重启</button><button class="button quiet" id="service-cancel-button" type="button">取消</button></div>
+            </div>
+            <div class="gateway-error" id="service-error" role="status" hidden></div>
+          </section>
+
+          <section class="panel model-settings-panel" aria-labelledby="model-settings-title">
+            <div class="panel-heading"><div><div class="eyebrow">CODEX MODELS</div><h2 id="model-settings-title">模型选择</h2></div><span class="pill pending" id="model-settings-state">读取中</span></div>
+            <p class="panel-copy">按账号目录勾选要开放给 Codex 的模型。新模型默认关闭；不可用或尚未适配的模型会显示原因。保存后在 Codex 中刷新模型目录，或重开 Codex。</p>
+            <label class="model-search-label" for="model-settings-search">搜索模型或渠道<input type="search" id="model-settings-search" placeholder="输入模型名称、ID 或渠道" autocomplete="off" disabled></label>
+            <p class="model-settings-summary" id="model-settings-summary" role="status" aria-live="polite"></p>
+            <p class="gateway-error" id="model-settings-discovery" role="status" hidden></p>
+            <div class="model-settings-list" id="model-settings-list" aria-label="账号模型目录"><p class="model-settings-empty">正在读取模型目录…</p></div>
+            <div class="button-row model-settings-actions"><button class="button primary" id="model-settings-save-button" type="button" disabled>保存模型选择</button><button class="button quiet" id="model-settings-reset-button" type="button" disabled>恢复勾选</button><button class="button quiet" id="model-settings-refresh-button" type="button" disabled>刷新账号目录</button></div>
+            <p class="footnote">批量选择仅作用于本渠道当前搜索结果中的可用模型。目录在打开页面、授权变更或手动刷新时更新；模型功能以各渠道实际适配为准。</p>
+            <p class="inline-status management-message" id="model-settings-message" role="status" aria-live="polite"></p>
+            <div class="gateway-error" id="model-settings-error" role="status" hidden></div>
+          </section>
+        </div>
+        <section class="panel gateway-panel" aria-labelledby="gateway-title">
+          <div class="panel-heading"><div><div class="eyebrow">GATEWAY</div><h2 id="gateway-title">运行状态</h2></div><span class="pill" id="gateway-state">等待连接</span></div>
+          <div class="endpoint"><span>网关地址</span><code id="gateway-url">读取中</code></div>
+          <div class="metrics"><div><strong id="metric-requests">0</strong><span>收到请求</span></div><div><strong id="metric-completed">0</strong><span>完成</span></div><div><strong id="metric-failed">0</strong><span>失败</span></div></div>
+          <div class="account-usage">
+            <section class="account-usage-row" aria-label="账号 A 请求统计">
+              <div class="account-usage-heading"><strong>账号 A</strong><span>原有模型</span></div>
+              <div class="metrics"><div><strong id="metric-a-requests">0</strong><span>收到请求</span></div><div><strong id="metric-a-completed">0</strong><span>完成</span></div><div><strong id="metric-a-failed">0</strong><span>失败</span></div></div>
+              <div class="last-model"><span>最近模型</span><code id="account-a-last-model">尚无请求</code></div>
+            </section>
+            <section class="account-usage-row" aria-label="账号 B 请求统计">
+              <div class="account-usage-heading"><strong>账号 B</strong><span>两个 B 模型</span></div>
+              <div class="metrics"><div><strong id="metric-b-requests">0</strong><span>收到请求</span></div><div><strong id="metric-b-completed">0</strong><span>完成</span></div><div><strong id="metric-b-failed">0</strong><span>失败</span></div></div>
+              <div class="last-model"><span>最近模型</span><code id="account-b-last-model">尚无请求</code></div>
+            </section>
+            <section class="account-usage-row" aria-label="CodeBuddy 请求统计">
+              <div class="account-usage-heading"><strong>CodeBuddy</strong><span>本网关请求</span></div>
+              <div class="metrics with-metrics"><div><strong id="codebuddy-requests">—</strong><span>收到请求</span></div><div><strong id="codebuddy-completed">—</strong><span>完成</span></div><div><strong id="codebuddy-failed">—</strong><span>失败</span></div><div><strong id="codebuddy-active">—</strong><span>进行中</span></div></div>
+            </section>
+            <section class="account-usage-row" aria-label="Cursor 请求统计">
+              <div class="account-usage-heading"><strong>Cursor</strong><span>本网关请求</span></div>
+              <div class="metrics with-metrics"><div><strong id="cursor-requests">—</strong><span>收到请求</span></div><div><strong id="cursor-completed">—</strong><span>完成</span></div><div><strong id="cursor-failed">—</strong><span>失败</span></div><div><strong id="cursor-active">—</strong><span>进行中</span></div></div>
+            </section>
+          </div>
+          <div class="gateway-error" id="gateway-error" hidden></div>
+          <p class="footnote">页面每 3 秒更新。原有模型使用 A；仅 B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用已确认的账号 B。</p>
+        </section>
+        <section class="panel quota-panel" aria-labelledby="quota-title">
+          <div class="panel-heading"><div><div class="eyebrow">ACCOUNT QUOTAS</div><h2 id="quota-title">账号剩余额度</h2></div><button class="button secondary small" id="quota-refresh-button" type="button">刷新额度</button></div>
+          <p class="panel-copy">按渠道查看已绑定账号与官方套餐额度。未提供的剩余额度显示未知，不按 0% 或 100% 计算，也不从本网关 Token 统计推算。</p>
+          <div class="quota-accounts">
+            <section class="quota-account" aria-labelledby="quota-a-title">
+              <div class="quota-account-heading"><div><h3 id="quota-a-title">账号 A</h3><span id="quota-a-plan">套餐未返回</span></div><span class="pill pending" id="quota-a-state">等待查询</span></div>
+              <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-a-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-a-source">来源未返回</dd></div></dl>
+              <div class="quota-windows" id="quota-a-windows"><p class="quota-empty">等待官方额度</p></div>
+              <p class="quota-credits" id="quota-a-credits" hidden></p>
+              <p class="quota-notice" id="quota-a-notice" hidden></p>
+              <a class="text-link quota-usage-link" id="quota-a-usage-link" target="_blank" rel="noopener noreferrer" hidden>打开官方用量页</a>
+              <div class="gateway-error" id="quota-a-error" role="status" hidden></div>
+              <p class="quota-updated" id="quota-a-updated">尚未查询</p>
+            </section>
+            <section class="quota-account" aria-labelledby="quota-b-title">
+              <div class="quota-account-heading"><div><h3 id="quota-b-title">账号 B</h3><span id="quota-b-plan">套餐未返回</span></div><span class="pill pending" id="quota-b-state">等待查询</span></div>
+              <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-b-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-b-source">来源未返回</dd></div></dl>
+              <div class="quota-windows" id="quota-b-windows"><p class="quota-empty">等待官方额度</p></div>
+              <p class="quota-credits" id="quota-b-credits" hidden></p>
+              <p class="quota-notice" id="quota-b-notice" hidden></p>
+              <a class="text-link quota-usage-link" id="quota-b-usage-link" target="_blank" rel="noopener noreferrer" hidden>打开官方用量页</a>
+              <div class="gateway-error" id="quota-b-error" role="status" hidden></div>
+              <p class="quota-updated" id="quota-b-updated">尚未查询</p>
+            </section>
+            <section class="quota-account" aria-labelledby="quota-codebuddy-title">
+              <div class="quota-account-heading"><div><h3 id="quota-codebuddy-title">CodeBuddy</h3><span id="quota-codebuddy-plan">套餐未返回</span></div><span class="pill pending" id="quota-codebuddy-state">等待查询</span></div>
+              <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-codebuddy-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-codebuddy-source">来源未返回</dd></div></dl>
+              <div class="quota-windows" id="quota-codebuddy-windows"><p class="quota-empty">等待官方额度</p></div>
+              <p class="quota-credits" id="quota-codebuddy-credits" hidden></p>
+              <p class="quota-notice" id="quota-codebuddy-notice" hidden></p>
+              <a class="text-link quota-usage-link" id="quota-codebuddy-usage-link" target="_blank" rel="noopener noreferrer" hidden>打开官方用量页</a>
+              <div class="gateway-error" id="quota-codebuddy-error" role="status" hidden></div>
+              <p class="quota-updated" id="quota-codebuddy-updated">尚未查询</p>
+            </section>
+            <section class="quota-account" aria-labelledby="quota-cursor-title">
+              <div class="quota-account-heading"><div><h3 id="quota-cursor-title">Cursor</h3><span id="quota-cursor-plan">套餐未返回</span></div><span class="pill pending" id="quota-cursor-state">等待查询</span></div>
+              <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-cursor-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-cursor-source">来源未返回</dd></div></dl>
+              <div class="quota-windows" id="quota-cursor-windows"><p class="quota-empty">等待官方额度</p></div>
+              <p class="quota-credits" id="quota-cursor-credits" hidden></p>
+              <p class="quota-notice" id="quota-cursor-notice" hidden></p>
+              <a class="text-link quota-usage-link" id="quota-cursor-usage-link" target="_blank" rel="noopener noreferrer" hidden>打开官方用量页</a>
+              <div class="gateway-error" id="quota-cursor-error" role="status" hidden></div>
+              <p class="quota-updated" id="quota-cursor-updated">尚未查询</p>
+            </section>
+          </div>
+          <p class="footnote">打开页面、账号授权变化或点击“刷新额度”时查询，不定时轮询。重置时间与更新时间使用洛杉矶时间（America/Los_Angeles）。个人限额不代表团队总余额；各渠道费用以其官方用量页为准。</p>
+        </section>
+        <section class="panel token-panel" aria-labelledby="token-title">
+          <div class="panel-heading"><div><div class="eyebrow">TOKEN USAGE</div><h2 id="token-title">Token 用量</h2></div><span class="pill" id="token-state">读取中</span></div>
+          <p class="panel-copy">仅统计网关启用记录后的服务端用量；不换算订阅剩余额度。</p>
+          <div class="token-totals">
+            <div><span>总输入 Token</span><strong id="token-total-input">—</strong></div>
+            <div><span>总输出 Token</span><strong id="token-total-output">—</strong></div>
+            <div><span>服务端总 Token</span><strong id="token-total-all">—</strong></div>
+          </div>
+          <div class="token-subsets"><span>缓存命中 <strong id="token-total-cached">—</strong><small>输入子集</small></span><span>思考 Token <strong id="token-total-reasoning">—</strong><small>输出子集</small></span></div>
+          <p class="footnote token-subset-note">缓存命中已包含在输入中，思考 Token 已包含在输出中，不重复相加。</p>
+          <div class="token-accounts with-token-accounts">
+            <section class="token-account" aria-label="账号 A Token 用量">
+              <div class="account-usage-heading"><strong>账号 A</strong><span>原有模型</span></div>
+              <div class="token-account-main"><div><span>输入</span><strong id="token-a-input">—</strong></div><div><span>输出</span><strong id="token-a-output">—</strong></div></div>
+              <div class="token-account-subsets"><span>缓存命中 <strong id="token-a-cached">—</strong></span><span>思考 <strong id="token-a-reasoning">—</strong></span></div>
+            </section>
+            <section class="token-account" aria-label="账号 B Token 用量">
+              <div class="account-usage-heading"><strong>账号 B</strong><span>两个 B 模型</span></div>
+              <div class="token-account-main"><div><span>输入</span><strong id="token-b-input">—</strong></div><div><span>输出</span><strong id="token-b-output">—</strong></div></div>
+              <div class="token-account-subsets"><span>缓存命中 <strong id="token-b-cached">—</strong></span><span>思考 <strong id="token-b-reasoning">—</strong></span></div>
+            </section>
+            <section class="token-account" aria-label="With Token 用量">
+              <div class="account-usage-heading"><strong>With</strong><span>Opus 5.5</span></div>
+              <div class="token-account-main"><div><span>输入</span><strong id="token-with-input">—</strong></div><div><span>输出</span><strong id="token-with-output">—</strong></div></div>
+              <div class="token-account-subsets"><span>缓存命中 <strong id="token-with-cached">—</strong></span><span>思考 <strong id="token-with-reasoning">—</strong></span></div>
+            </section>
+            <section class="token-account" aria-label="CodeBuddy Token 用量">
+              <div class="account-usage-heading"><strong>CodeBuddy</strong><span>账号模型合计</span></div>
+              <div class="token-account-main"><div><span>输入</span><strong id="token-codebuddy-input">—</strong></div><div><span>输出</span><strong id="token-codebuddy-output">—</strong></div></div>
+              <div class="token-account-subsets"><span>缓存命中 <strong id="token-codebuddy-cached">—</strong></span><span>思考 <strong id="token-codebuddy-reasoning">—</strong></span></div>
+            </section>
+            <section class="token-account" id="token-claude-row" aria-label="Claude 订阅 Token 用量" hidden>
+              <div class="account-usage-heading"><strong>Claude 订阅</strong><span>CLI 后端</span></div>
+              <div class="token-account-main"><div><span>输入</span><strong id="token-claude-input">—</strong></div><div><span>输出</span><strong id="token-claude-output">—</strong></div></div>
+              <div class="token-account-subsets"><span>缓存命中 <strong id="token-claude-cached">—</strong></span><span>思考 <strong id="token-claude-reasoning">—</strong></span></div>
+            </section>
+          </div>
+          <div class="token-record-meta"><span id="token-started-at">等待服务端记录时间</span><span id="token-coverage"></span></div>
+          <div class="gateway-error" id="token-error" role="status" hidden></div>
+          <details class="token-recent" open>
+            <summary>最近 10 次请求</summary>
+            <div class="token-table-scroll" tabindex="0" role="region" aria-label="最近请求 Token 明细">
+              <table class="token-table"><thead><tr><th scope="col">时间</th><th scope="col">账号</th><th scope="col">模型</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">状态</th></tr></thead><tbody id="token-recent-body"><tr><td colspan="6" class="empty-table">等待用量记录</td></tr></tbody></table>
+            </div>
+          </details>
+          <p class="footnote">未返回用量的请求显示“未返回”，不计入 Token 合计。用量数据每 3 秒更新。</p>
+        </section>
+      </section>
+
+      <section class="workspace-panel" id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts" tabindex="0" hidden>
+        <p class="accounts-intro">集中管理登录与授权。在控制台选择开放模型、查看运行状态与额度。</p>
+        <div class="accounts-grid">
+          <section class="panel account-provider-card" aria-labelledby="account-a-title">
+            <div class="panel-heading"><div><div class="eyebrow">ACCOUNT A</div><h2 id="account-a-title">账号 A</h2></div></div>
+            <dl class="account-summary">
+              <div><dt>登录状态</dt><dd><span class="pill pending" id="account-a-state">读取中</span></dd></div>
+              <div><dt>登录账号</dt><dd id="account-a-identity">账号信息未返回</dd></div>
+              <div><dt>套餐</dt><dd id="account-a-plan">套餐未返回</dd></div>
+              <div><dt>授权方式</dt><dd id="account-a-method">读取中</dd></div>
+              <div><dt>账号模型目录</dt><dd id="account-a-catalog">尚未读取</dd></div>
+              <div><dt>已开放模型</dt><dd id="account-a-enabled">尚未读取</dd></div>
+            </dl>
+            <p class="footnote">沿用当前 Codex 的登录，由 Codex 管理登录与退出。</p>
+            <p class="footnote">状态来自最近一次额度查询；切换 Codex 账号后，请在控制台刷新额度。</p>
+          </section>
+
+          <section class="panel account-provider-card setup-panel" aria-labelledby="account-b-title">
+            <div class="panel-heading"><div><div class="eyebrow">ACCOUNT B</div><h2 id="account-b-title">账号 B</h2></div></div>
+            <dl class="account-summary">
+              <div><dt>登录状态</dt><dd><span class="pill pending" id="account-b-state">读取中</span></dd></div>
+              <div><dt>登录账号</dt><dd id="account-b-identity">账号信息未返回</dd></div>
+              <div><dt>套餐</dt><dd id="account-b-plan">套餐未返回</dd></div>
+              <div><dt>授权方式</dt><dd id="account-b-method">读取中</dd></div>
+              <div><dt>账号模型目录</dt><dd id="account-b-catalog">尚未读取</dd></div>
+              <div><dt>已开放模型</dt><dd id="account-b-enabled">尚未读取</dd></div>
+            </dl>
             <section class="step" id="step-login">
               <div class="step-body">
-                <h3>账号登录</h3>
-                <p>使用提供额度的账号 B 完成官方授权。</p>
+                <p class="account-login-note">使用账号 B 完成官方授权，登录后确认订阅身份。</p>
                 <div class="button-row"><button class="button primary" id="login-button" type="button">浏览器登录</button><button class="button secondary" id="device-login-button" type="button">手机授权</button><a id="authorization-link" class="text-link" target="_blank" rel="noopener noreferrer" hidden>打开授权页面</a></div>
                 <p class="inline-status" id="login-state"></p>
                 <div class="device-authorization" id="device-authorization" hidden>
@@ -77,33 +225,127 @@
                   <a id="device-authorization-link" class="text-link" target="_blank" rel="noopener noreferrer"></a>
                   <p>在手机打开官方链接，输入上方代码，使用账号 B 完成授权。</p>
                 </div>
-                <div class="account-card" id="account-card" hidden>
-                  <div class="avatar" aria-hidden="true">B</div>
-                  <div class="account-details"><strong id="account-email"></strong><span id="account-plan"></span></div>
-                  <button class="button quiet small" id="logout-button" type="button">退出 B</button>
+                <div class="button-row account-session" id="account-card" hidden>
+                  <span hidden><strong id="account-email"></strong><span id="account-plan"></span></span>
+                  <button class="button quiet" id="logout-button" type="button">退出 B</button>
                 </div>
               </div>
             </section>
-            <section class="step" id="step-bind">
-              <div class="step-body">
-                <h3>推理身份</h3>
-                <p id="bind-description">核对上方邮箱，确认它就是你要使用订阅额度的账号 B。</p>
-                <button class="button secondary" id="bind-button" type="button" disabled>确认此账号为 B</button>
-                <p class="inline-status" id="bound-account"></p>
+            <details class="account-provider-details">
+              <summary><span>身份确认与验证</span><span class="pill" id="setup-state">准备中</span></summary>
+              <div class="account-detail-body">
+                <h3 class="account-detail-title" id="setup-title">确认订阅身份</h3>
+                <section class="step" id="step-bind">
+                  <div class="step-body">
+                    <h3>推理身份</h3>
+                    <p id="bind-description">核对上方邮箱，确认它就是你要使用订阅额度的账号 B。</p>
+                    <button class="button secondary" id="bind-button" type="button" disabled>确认此账号为 B</button>
+                    <p class="inline-status" id="bound-account"></p>
+                  </div>
+                </section>
+                <section class="step" id="step-verify">
+                  <div class="step-body">
+                    <h3>连通性验证</h3>
+                    <p>手动发送一次简短请求，验证所选 B 模型。</p>
+                    <div class="verification-controls"><label class="sr-only" for="model-select">验证使用的 B 模型</label><select id="model-select" disabled><option value="">使用默认 B 模型</option></select><button class="button secondary" id="verify-button" type="button" disabled>验证推理</button></div>
+                    <div class="verification-result" id="verification-result" hidden><span class="result-label" id="verification-label"></span><p id="verification-text"></p><small id="verification-meta"></small></div>
+                  </div>
+                </section>
               </div>
-            </section>
-            <section class="step" id="step-verify">
-              <div class="step-body">
-                <h3>连通性验证</h3>
-                <p>手动发送一次简短请求，验证所选 B 模型。</p>
-                <div class="verification-controls"><label class="sr-only" for="model-select">验证使用的 B 模型</label><select id="model-select" disabled><option value="">使用默认 B 模型</option></select><button class="button secondary" id="verify-button" type="button" disabled>验证推理</button></div>
-                <div class="verification-result" id="verification-result" hidden><span class="result-label" id="verification-label"></span><p id="verification-text"></p><small id="verification-meta"></small></div>
-              </div>
-            </section>
-          </div>
-        </section>
+            </details>
+          </section>
 
-        <aside class="side-column">
+          <section class="panel account-provider-card codebuddy-panel" aria-labelledby="codebuddy-title">
+            <div class="panel-heading"><div><div class="eyebrow">CODEBUDDY</div><h2 id="codebuddy-title">CodeBuddy</h2></div></div>
+            <dl class="account-summary">
+              <div><dt>登录状态</dt><dd><span class="pill pending" id="account-codebuddy-state">读取中</span></dd></div>
+              <div><dt>登录账号</dt><dd id="account-codebuddy-identity">账号信息未返回</dd></div>
+              <div><dt>套餐</dt><dd id="account-codebuddy-plan">套餐未返回</dd></div>
+              <div><dt>授权方式</dt><dd id="account-codebuddy-method">读取中</dd></div>
+              <div><dt>账号模型目录</dt><dd id="account-codebuddy-catalog">尚未读取</dd></div>
+              <div><dt>已开放模型</dt><dd id="account-codebuddy-enabled">尚未读取</dd></div>
+            </dl>
+            <div class="button-row">
+              <button class="button primary" id="codebuddy-login-button" type="button" disabled>官方网页登录</button>
+              <a class="text-link" id="codebuddy-authorization-link" target="_blank" rel="noopener noreferrer" hidden>打开官方授权页面</a>
+              <button class="button quiet" id="codebuddy-logout-button" type="button" disabled>退出本网关会话</button>
+            </div>
+            <p class="footnote" id="codebuddy-login-state">读取接入状态。</p>
+            <div class="gateway-error" id="codebuddy-error" role="status" hidden></div>
+            <details class="account-provider-details">
+              <summary><span>目录与接入详情</span><span class="pill" id="codebuddy-state">读取中</span></summary>
+              <div class="account-detail-body">
+                <p class="panel-copy">Codex 与 Claude 共用独立 CodeBuddy 授权。控制台展示账号模型目录，由你勾选开放；客户端工具、媒体与思考能力以各模型实际适配为准。OpenAI 内置联网搜索不可用。</p>
+                <p class="footnote">目录可见不代表已经完成适配、真实聊天、工具或扣费验证。</p>
+
+                <p class="footnote">在官方页面由本人完成登录与协议确认。退出仅清除本网关的 CodeBuddy 会话。</p>
+                <div class="with-details">
+                  <div class="endpoint"><span>登录账号</span><code id="codebuddy-username">读取中</code></div>
+                  <div class="endpoint"><span>提供方登录</span><code id="codebuddy-authentication">读取中</code></div>
+                  <div class="endpoint"><span>账号模型目录</span><code id="codebuddy-model-available">读取中</code></div>
+                  <div class="endpoint"><span>已开放模型</span><code id="codebuddy-enabled-models">尚未读取</code></div>
+                  <div class="endpoint"><span>网关地址</span><code id="codebuddy-gateway-url">读取中</code></div>
+                  <div class="endpoint"><span>Codex 入口</span><code id="codebuddy-codex-url">读取中</code></div>
+                  <div class="endpoint"><span>连接方式</span><code id="codebuddy-transport">读取中</code></div>
+                  <div class="endpoint"><span>员工 Token 倍率</span><code id="codebuddy-billing-multiplier">待服务端确认</code></div>
+                </div>
+                <div class="codebuddy-catalog">
+                  <div class="endpoint"><span>目录来源</span><code id="codebuddy-catalog-source">读取中</code></div>
+                  <div class="endpoint"><span>目录保存时间</span><code id="codebuddy-catalog-saved-at">未返回</code></div>
+                  <p class="footnote" id="codebuddy-catalog-note">实际可用性与计费待本人实测。</p>
+                </div>
+                <div class="codebuddy-source-metadata">
+                  <span>目录 credits（源数据）<strong id="codebuddy-source-credits">未返回</strong></span>
+                  <span>目录活动说明<strong id="codebuddy-source-promotion">未返回</strong></span>
+                </div>
+                <p class="footnote">credits、promotion 是目录源元数据，不能据此推导员工 Token 倍率。</p>
+                <details class="token-recent">
+                  <summary>Opus 5.5 的图片、附件与思考支持范围</summary>
+                  <p class="footnote">图片支持 JPEG、PNG、GIF、WebP。嵌入图片每张最多 5 MiB，每次请求最多 100 张，包含历史及工具返回的图片。</p>
+                  <p class="footnote">原始 PDF、Office、视频和音频须先解析为文本或图片。未支持的附件会明确报错。</p>
+                  <p class="footnote">思考强度支持 low、medium、high、xhigh，默认 high。不支持关闭内部思考或指定精确预算。</p>
+                </details>
+              </div>
+            </details>
+          </section>
+
+          <section class="panel account-provider-card cursor-panel" aria-labelledby="cursor-title">
+            <div class="panel-heading"><div><div class="eyebrow">CURSOR</div><h2 id="cursor-title">Cursor</h2></div></div>
+            <dl class="account-summary">
+              <div><dt>登录状态</dt><dd><span class="pill pending" id="account-cursor-state">读取中</span></dd></div>
+              <div><dt>登录账号</dt><dd id="account-cursor-identity">账号信息未返回</dd></div>
+              <div><dt>套餐</dt><dd id="account-cursor-plan">套餐未返回</dd></div>
+              <div><dt>授权方式</dt><dd id="account-cursor-method">读取中</dd></div>
+              <div><dt>账号模型目录</dt><dd id="account-cursor-catalog">尚未读取</dd></div>
+              <div><dt>已开放模型</dt><dd id="account-cursor-enabled">尚未读取</dd></div>
+            </dl>
+            <div class="button-row"><button class="button primary" id="cursor-login-button" type="button" disabled>官方网页登录</button><a class="text-link" id="cursor-authorization-link" target="_blank" rel="noopener noreferrer" hidden>打开官方授权页面</a><button class="button quiet" id="cursor-logout-button" type="button" disabled>退出本网关会话</button></div>
+            <p class="footnote" id="cursor-login-state">授权入口准备中。</p>
+            <div class="gateway-error" id="cursor-error" role="status" hidden></div>
+            <details class="account-provider-details">
+              <summary><span>SDK 与接入详情</span><span class="pill pending" id="cursor-state">待配置</span></summary>
+              <div class="account-detail-body">
+                <p class="panel-copy">完成账号授权后，在控制台刷新完整账号目录，勾选并保存要开放的模型。不同模型的参数与能力以目录和实际适配为准。</p>
+
+                <div class="with-details">
+                  <div class="endpoint"><span>登录账号</span><code id="cursor-account">读取中</code></div>
+                  <div class="endpoint"><span>套餐归属</span><code id="cursor-plan">待核实</code></div>
+                  <div class="endpoint"><span>接入模式</span><code id="cursor-prompt-mode">未返回</code></div>
+                  <div class="endpoint"><span>指令优先级</span><code id="cursor-prompt-priority">未返回</code></div>
+                  <div class="endpoint"><span>账号模型目录</span><code id="cursor-catalog-models">登录后读取</code></div>
+                  <div class="endpoint"><span>已开放模型</span><code id="cursor-enabled-models">尚未读取</code></div>
+                </div>
+
+                <p class="footnote">请本人在 Cursor 官方页面授权。模型目录不代表已完成真实聊天或扣费验证。</p>
+                <p class="footnote" id="cursor-prompt-note">服务返回接入模式后显示指令处理方式。</p>
+                <p class="footnote">上游未提供思考强度控制时，使用 Cursor 默认思考。跨工具回合的单条请求 Token 用量可能未知，以 Cursor 账单为准。</p>
+              </div>
+            </details>
+          </section>
+        </div>
+
+        <details class="account-foldout">
+          <summary>Codex 接入配置<span>安装、复制与还原</span></summary>
           <section class="panel" aria-labelledby="integration-title">
             <div class="panel-heading"><div><div class="eyebrow">INTEGRATION</div><h2 id="integration-title">接入当前 Codex</h2></div><span class="pill" id="integration-state">未接入</span></div>
             <p class="panel-copy" id="integration-description">管理当前 Codex 的网关接入。</p>
@@ -112,192 +354,22 @@
             <div class="stacked-buttons"><button class="button primary" id="install-button" type="button" disabled>接入本机 Codex</button><button class="button secondary" id="copy-button" type="button" disabled>复制接入配置</button><button class="button quiet" id="restore-button" type="button" hidden>恢复接入前配置</button></div>
             <p class="footnote">网关密钥仅在复制配置时读取，不在页面展示。</p>
           </section>
-        </aside>
-        </div>
-      </details>
+        </details>
 
-          <section class="panel gateway-panel" aria-labelledby="gateway-title">
-            <div class="panel-heading"><div><div class="eyebrow">GATEWAY</div><h2 id="gateway-title">运行状态</h2></div><span class="pill" id="gateway-state">等待连接</span></div>
-            <div class="endpoint"><span>网关地址</span><code id="gateway-url">读取中</code></div>
-            <div class="metrics"><div><strong id="metric-requests">0</strong><span>收到请求</span></div><div><strong id="metric-completed">0</strong><span>完成</span></div><div><strong id="metric-failed">0</strong><span>失败</span></div></div>
-            <div class="account-usage">
-              <section class="account-usage-row" aria-label="账号 A 请求统计">
-                <div class="account-usage-heading"><strong>账号 A</strong><span>原有模型</span></div>
-                <div class="metrics"><div><strong id="metric-a-requests">0</strong><span>收到请求</span></div><div><strong id="metric-a-completed">0</strong><span>完成</span></div><div><strong id="metric-a-failed">0</strong><span>失败</span></div></div>
-                <div class="last-model"><span>最近模型</span><code id="account-a-last-model">尚无请求</code></div>
-              </section>
-              <section class="account-usage-row" aria-label="账号 B 请求统计">
-                <div class="account-usage-heading"><strong>账号 B</strong><span>两个 B 模型</span></div>
-                <div class="metrics"><div><strong id="metric-b-requests">0</strong><span>收到请求</span></div><div><strong id="metric-b-completed">0</strong><span>完成</span></div><div><strong id="metric-b-failed">0</strong><span>失败</span></div></div>
-                <div class="last-model"><span>最近模型</span><code id="account-b-last-model">尚无请求</code></div>
-              </section>
+        <details class="account-foldout">
+          <summary>其他渠道<span>With</span></summary>
+          <section class="panel with-panel" aria-labelledby="with-title">
+            <div class="panel-heading"><div><div class="eyebrow">WITH / VM</div><h2 id="with-title">With · Opus 5.5</h2></div><span class="pill" id="with-state">读取中</span></div>
+            <p class="panel-copy">仅接入 Opus 5.5。真实聊天和工具回合由用户验收。</p>
+            <div class="with-details">
+              <div class="endpoint"><span>VM 地址 <small id="with-vm-state"></small></span><code id="with-vm-address">读取中</code></div>
+              <div class="endpoint"><span>网关地址</span><code id="with-gateway-url">读取中</code></div>
+              <div class="endpoint"><span>提供方登录</span><code id="with-authentication">读取中</code></div>
             </div>
-            <div class="gateway-error" id="gateway-error" hidden></div>
-            <p class="footnote">页面每 3 秒更新。原有模型使用 A；仅 B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用已确认的账号 B。</p>
+            <div class="metrics with-metrics"><div><strong id="with-requests">—</strong><span>收到请求</span></div><div><strong id="with-completed">—</strong><span>完成</span></div><div><strong id="with-failed">—</strong><span>失败</span></div><div><strong id="with-active">—</strong><span>进行中</span></div></div>
+            <div class="gateway-error" id="with-error" role="status" hidden></div>
           </section>
-      <section class="panel with-panel" aria-labelledby="with-title">
-        <div class="panel-heading"><div><div class="eyebrow">WITH / VM</div><h2 id="with-title">With · Opus 5.5</h2></div><span class="pill" id="with-state">读取中</span></div>
-        <p class="panel-copy">仅接入 Opus 5.5。真实聊天和工具回合由用户验收。</p>
-        <div class="with-details">
-          <div class="endpoint"><span>VM 地址 <small id="with-vm-state"></small></span><code id="with-vm-address">读取中</code></div>
-          <div class="endpoint"><span>网关地址</span><code id="with-gateway-url">读取中</code></div>
-          <div class="endpoint"><span>提供方登录</span><code id="with-authentication">读取中</code></div>
-        </div>
-        <div class="metrics with-metrics"><div><strong id="with-requests">—</strong><span>收到请求</span></div><div><strong id="with-completed">—</strong><span>完成</span></div><div><strong id="with-failed">—</strong><span>失败</span></div><div><strong id="with-active">—</strong><span>进行中</span></div></div>
-        <div class="gateway-error" id="with-error" role="status" hidden></div>
-      </section>
-      <section class="panel with-panel codebuddy-panel" aria-labelledby="codebuddy-title">
-        <div class="panel-heading"><div><div class="eyebrow">CODEBUDDY</div><h2 id="codebuddy-title">CodeBuddy</h2></div><span class="pill" id="codebuddy-state">读取中</span></div>
-        <p class="panel-copy">Codex 与 Claude 共用独立 CodeBuddy 授权。上方展示账号模型目录，由你勾选开放；客户端工具、媒体与思考能力以各模型实际适配为准。OpenAI 内置联网搜索不可用。</p>
-        <p class="footnote">目录可见不代表已经完成适配、真实聊天、工具或扣费验证。</p>
-        <div class="button-row">
-          <button class="button primary" id="codebuddy-login-button" type="button" disabled>官方网页登录</button>
-          <a class="text-link" id="codebuddy-authorization-link" target="_blank" rel="noopener noreferrer" hidden>打开官方授权页面</a>
-          <button class="button quiet" id="codebuddy-logout-button" type="button" disabled>退出本网关会话</button>
-        </div>
-        <p class="footnote" id="codebuddy-login-state">读取接入状态。</p>
-        <p class="footnote">在官方页面由本人完成登录与协议确认。退出仅清除本网关的 CodeBuddy 会话。</p>
-        <div class="with-details">
-          <div class="endpoint"><span>登录账号</span><code id="codebuddy-username">读取中</code></div>
-          <div class="endpoint"><span>提供方登录</span><code id="codebuddy-authentication">读取中</code></div>
-          <div class="endpoint"><span>账号模型目录</span><code id="codebuddy-model-available">读取中</code></div>
-          <div class="endpoint"><span>已开放模型</span><code id="codebuddy-enabled-models">尚未读取</code></div>
-          <div class="endpoint"><span>网关地址</span><code id="codebuddy-gateway-url">读取中</code></div>
-          <div class="endpoint"><span>Codex 入口</span><code id="codebuddy-codex-url">读取中</code></div>
-          <div class="endpoint"><span>连接方式</span><code id="codebuddy-transport">读取中</code></div>
-          <div class="endpoint"><span>员工 Token 倍率</span><code id="codebuddy-billing-multiplier">待服务端确认</code></div>
-        </div>
-        <div class="codebuddy-catalog">
-          <div class="endpoint"><span>目录来源</span><code id="codebuddy-catalog-source">读取中</code></div>
-          <div class="endpoint"><span>目录保存时间</span><code id="codebuddy-catalog-saved-at">未返回</code></div>
-          <p class="footnote" id="codebuddy-catalog-note">实际可用性与计费待本人实测。</p>
-        </div>
-        <div class="codebuddy-source-metadata">
-          <span>目录 credits（源数据）<strong id="codebuddy-source-credits">未返回</strong></span>
-          <span>目录活动说明<strong id="codebuddy-source-promotion">未返回</strong></span>
-        </div>
-        <p class="footnote">credits、promotion 是目录源元数据，不能据此推导员工 Token 倍率。</p>
-        <details class="token-recent">
-          <summary>Opus 5.5 的图片、附件与思考支持范围</summary>
-          <p class="footnote">图片支持 JPEG、PNG、GIF、WebP。嵌入图片每张最多 5 MiB，每次请求最多 100 张，包含历史及工具返回的图片。</p>
-          <p class="footnote">原始 PDF、Office、视频和音频须先解析为文本或图片。未支持的附件会明确报错。</p>
-          <p class="footnote">思考强度支持 low、medium、high、xhigh，默认 high。不支持关闭内部思考或指定精确预算。</p>
         </details>
-        <div class="metrics with-metrics"><div><strong id="codebuddy-requests">—</strong><span>收到请求</span></div><div><strong id="codebuddy-completed">—</strong><span>完成</span></div><div><strong id="codebuddy-failed">—</strong><span>失败</span></div><div><strong id="codebuddy-active">—</strong><span>进行中</span></div></div>
-        <div class="gateway-error" id="codebuddy-error" role="status" hidden></div>
-      </section>
-      <section class="panel cursor-panel" aria-labelledby="cursor-title">
-        <div class="panel-heading"><div><div class="eyebrow">CURSOR TEAMS</div><h2 id="cursor-title">Cursor Teams</h2></div><span class="pill pending" id="cursor-state">待配置</span></div>
-        <p class="panel-copy">完成账号授权后，在上方刷新完整账号目录，勾选并保存要开放的模型。不同模型的参数与能力以目录和实际适配为准。</p>
-        <div class="button-row"><button class="button primary" id="cursor-login-button" type="button" disabled>官方网页登录</button><a class="text-link" id="cursor-authorization-link" target="_blank" rel="noopener noreferrer" hidden>打开官方授权页面</a><button class="button quiet" id="cursor-logout-button" type="button" disabled>退出本网关会话</button></div>
-        <p class="footnote" id="cursor-login-state">授权入口准备中。</p>
-        <div class="with-details">
-          <div class="endpoint"><span>登录账号</span><code id="cursor-account">读取中</code></div>
-          <div class="endpoint"><span>套餐归属</span><code id="cursor-plan">待核实</code></div>
-          <div class="endpoint"><span>接入模式</span><code id="cursor-prompt-mode">未返回</code></div>
-          <div class="endpoint"><span>指令优先级</span><code id="cursor-prompt-priority">未返回</code></div>
-          <div class="endpoint"><span>账号模型目录</span><code id="cursor-catalog-models">登录后读取</code></div>
-          <div class="endpoint"><span>已开放模型</span><code id="cursor-enabled-models">尚未读取</code></div>
-        </div>
-        <div class="metrics with-metrics"><div><strong id="cursor-requests">—</strong><span>收到请求</span></div><div><strong id="cursor-completed">—</strong><span>完成</span></div><div><strong id="cursor-failed">—</strong><span>失败</span></div><div><strong id="cursor-active">—</strong><span>进行中</span></div></div>
-        <p class="footnote">请本人在 Cursor 官方页面授权。模型目录不代表已完成真实聊天或扣费验证。</p>
-        <p class="footnote" id="cursor-prompt-note">服务返回接入模式后显示指令处理方式。</p>
-          <p class="footnote">上游未提供思考强度控制时，使用 Cursor 默认思考。跨工具回合的单条请求 Token 用量可能未知，以 Cursor 账单为准。</p>
-        <div class="gateway-error" id="cursor-error" role="status" hidden></div>
-      </section>
-      <section class="panel quota-panel" aria-labelledby="quota-title">
-        <div class="panel-heading"><div><div class="eyebrow">ACCOUNT QUOTAS</div><h2 id="quota-title">账号剩余额度</h2></div><button class="button secondary small" id="quota-refresh-button" type="button">刷新额度</button></div>
-        <p class="panel-copy">按渠道查看已绑定账号与官方套餐额度。未提供的剩余额度显示未知，不按 0% 或 100% 计算，也不从本网关 Token 统计推算。</p>
-        <div class="quota-accounts">
-          <section class="quota-account" aria-labelledby="quota-a-title">
-            <div class="quota-account-heading"><div><h3 id="quota-a-title">账号 A</h3><span id="quota-a-plan">套餐未返回</span></div><span class="pill pending" id="quota-a-state">等待查询</span></div>
-            <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-a-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-a-source">来源未返回</dd></div></dl>
-            <div class="quota-windows" id="quota-a-windows"><p class="quota-empty">等待官方额度</p></div>
-            <p class="quota-credits" id="quota-a-credits" hidden></p>
-            <p class="quota-notice" id="quota-a-notice" hidden></p>
-            <a class="text-link quota-usage-link" id="quota-a-usage-link" target="_blank" rel="noopener noreferrer" hidden>打开官方用量页</a>
-            <div class="gateway-error" id="quota-a-error" role="status" hidden></div>
-            <p class="quota-updated" id="quota-a-updated">尚未查询</p>
-          </section>
-          <section class="quota-account" aria-labelledby="quota-b-title">
-            <div class="quota-account-heading"><div><h3 id="quota-b-title">账号 B</h3><span id="quota-b-plan">套餐未返回</span></div><span class="pill pending" id="quota-b-state">等待查询</span></div>
-            <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-b-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-b-source">来源未返回</dd></div></dl>
-            <div class="quota-windows" id="quota-b-windows"><p class="quota-empty">等待官方额度</p></div>
-            <p class="quota-credits" id="quota-b-credits" hidden></p>
-            <p class="quota-notice" id="quota-b-notice" hidden></p>
-            <a class="text-link quota-usage-link" id="quota-b-usage-link" target="_blank" rel="noopener noreferrer" hidden>打开官方用量页</a>
-            <div class="gateway-error" id="quota-b-error" role="status" hidden></div>
-            <p class="quota-updated" id="quota-b-updated">尚未查询</p>
-          </section>
-          <section class="quota-account" aria-labelledby="quota-codebuddy-title">
-            <div class="quota-account-heading"><div><h3 id="quota-codebuddy-title">CodeBuddy</h3><span id="quota-codebuddy-plan">套餐未返回</span></div><span class="pill pending" id="quota-codebuddy-state">等待查询</span></div>
-            <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-codebuddy-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-codebuddy-source">来源未返回</dd></div></dl>
-            <div class="quota-windows" id="quota-codebuddy-windows"><p class="quota-empty">等待官方额度</p></div>
-            <p class="quota-credits" id="quota-codebuddy-credits" hidden></p>
-            <p class="quota-notice" id="quota-codebuddy-notice" hidden></p>
-            <a class="text-link quota-usage-link" id="quota-codebuddy-usage-link" target="_blank" rel="noopener noreferrer" hidden>打开官方用量页</a>
-            <div class="gateway-error" id="quota-codebuddy-error" role="status" hidden></div>
-            <p class="quota-updated" id="quota-codebuddy-updated">尚未查询</p>
-          </section>
-          <section class="quota-account" aria-labelledby="quota-cursor-title">
-            <div class="quota-account-heading"><div><h3 id="quota-cursor-title">Cursor</h3><span id="quota-cursor-plan">套餐未返回</span></div><span class="pill pending" id="quota-cursor-state">等待查询</span></div>
-            <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-cursor-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-cursor-source">来源未返回</dd></div></dl>
-            <div class="quota-windows" id="quota-cursor-windows"><p class="quota-empty">等待官方额度</p></div>
-            <p class="quota-credits" id="quota-cursor-credits" hidden></p>
-            <p class="quota-notice" id="quota-cursor-notice" hidden></p>
-            <a class="text-link quota-usage-link" id="quota-cursor-usage-link" target="_blank" rel="noopener noreferrer" hidden>打开官方用量页</a>
-            <div class="gateway-error" id="quota-cursor-error" role="status" hidden></div>
-            <p class="quota-updated" id="quota-cursor-updated">尚未查询</p>
-          </section>
-        </div>
-        <p class="footnote">打开页面、账号授权变化或点击“刷新额度”时查询，不定时轮询。重置时间与更新时间使用洛杉矶时间（America/Los_Angeles）。个人限额不代表团队总余额；各渠道费用以其官方用量页为准。</p>
-      </section>
-      <section class="panel token-panel" aria-labelledby="token-title">
-        <div class="panel-heading"><div><div class="eyebrow">TOKEN USAGE</div><h2 id="token-title">Token 用量</h2></div><span class="pill" id="token-state">读取中</span></div>
-        <p class="panel-copy">仅统计网关启用记录后的服务端用量；不换算订阅剩余额度。</p>
-        <div class="token-totals">
-          <div><span>总输入 Token</span><strong id="token-total-input">—</strong></div>
-          <div><span>总输出 Token</span><strong id="token-total-output">—</strong></div>
-          <div><span>服务端总 Token</span><strong id="token-total-all">—</strong></div>
-        </div>
-        <div class="token-subsets"><span>缓存命中 <strong id="token-total-cached">—</strong><small>输入子集</small></span><span>思考 Token <strong id="token-total-reasoning">—</strong><small>输出子集</small></span></div>
-        <p class="footnote token-subset-note">缓存命中已包含在输入中，思考 Token 已包含在输出中，不重复相加。</p>
-        <div class="token-accounts with-token-accounts">
-          <section class="token-account" aria-label="账号 A Token 用量">
-            <div class="account-usage-heading"><strong>账号 A</strong><span>原有模型</span></div>
-            <div class="token-account-main"><div><span>输入</span><strong id="token-a-input">—</strong></div><div><span>输出</span><strong id="token-a-output">—</strong></div></div>
-            <div class="token-account-subsets"><span>缓存命中 <strong id="token-a-cached">—</strong></span><span>思考 <strong id="token-a-reasoning">—</strong></span></div>
-          </section>
-          <section class="token-account" aria-label="账号 B Token 用量">
-            <div class="account-usage-heading"><strong>账号 B</strong><span>两个 B 模型</span></div>
-            <div class="token-account-main"><div><span>输入</span><strong id="token-b-input">—</strong></div><div><span>输出</span><strong id="token-b-output">—</strong></div></div>
-            <div class="token-account-subsets"><span>缓存命中 <strong id="token-b-cached">—</strong></span><span>思考 <strong id="token-b-reasoning">—</strong></span></div>
-          </section>
-          <section class="token-account" aria-label="With Token 用量">
-            <div class="account-usage-heading"><strong>With</strong><span>Opus 5.5</span></div>
-            <div class="token-account-main"><div><span>输入</span><strong id="token-with-input">—</strong></div><div><span>输出</span><strong id="token-with-output">—</strong></div></div>
-            <div class="token-account-subsets"><span>缓存命中 <strong id="token-with-cached">—</strong></span><span>思考 <strong id="token-with-reasoning">—</strong></span></div>
-          </section>
-          <section class="token-account" aria-label="CodeBuddy Token 用量">
-            <div class="account-usage-heading"><strong>CodeBuddy</strong><span>账号模型合计</span></div>
-            <div class="token-account-main"><div><span>输入</span><strong id="token-codebuddy-input">—</strong></div><div><span>输出</span><strong id="token-codebuddy-output">—</strong></div></div>
-            <div class="token-account-subsets"><span>缓存命中 <strong id="token-codebuddy-cached">—</strong></span><span>思考 <strong id="token-codebuddy-reasoning">—</strong></span></div>
-          </section>
-          <section class="token-account" id="token-claude-row" aria-label="Claude 订阅 Token 用量" hidden>
-            <div class="account-usage-heading"><strong>Claude 订阅</strong><span>CLI 后端</span></div>
-            <div class="token-account-main"><div><span>输入</span><strong id="token-claude-input">—</strong></div><div><span>输出</span><strong id="token-claude-output">—</strong></div></div>
-            <div class="token-account-subsets"><span>缓存命中 <strong id="token-claude-cached">—</strong></span><span>思考 <strong id="token-claude-reasoning">—</strong></span></div>
-          </section>
-        </div>
-        <div class="token-record-meta"><span id="token-started-at">等待服务端记录时间</span><span id="token-coverage"></span></div>
-        <div class="gateway-error" id="token-error" role="status" hidden></div>
-        <details class="token-recent" open>
-          <summary>最近 10 次请求</summary>
-          <div class="token-table-scroll" tabindex="0" role="region" aria-label="最近请求 Token 明细">
-            <table class="token-table"><thead><tr><th scope="col">时间</th><th scope="col">账号</th><th scope="col">模型</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">状态</th></tr></thead><tbody id="token-recent-body"><tr><td colspan="6" class="empty-table">等待用量记录</td></tr></tbody></table>
-          </div>
-        </details>
-        <p class="footnote">未返回用量的请求显示“未返回”，不计入 Token 合计。用量数据每 3 秒更新。</p>
       </section>
       <footer><span>Bifröst</span><span>Codex · Claude · 多渠道接入</span></footer>
     </main>

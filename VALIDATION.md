@@ -310,3 +310,13 @@
 - 使用安全保存的账号目录 fixture，对真实 ModelDiscovery、ModelPolicy、CodeBuddy 目录处理及发布器完成 86 项目录集成检查：网页目录为 CodeBuddy 38/Cursor 48，首次仅发布原有三项选择，分别新选一项后发布五项；真实推理计数为零。证据为 `.state/full-model-catalog-integration-1792726244489/result.json`，未加载既有凭证。
 - 实际 Codex CLI `0.163.0-alpha.11.2` 搭配模拟 SDK，以新增别名 `Cursor-catalog-fixture-new` 完成三个 HTTP、同一 SDK Run 的两次本地工具回调和一次 send，21 项合成内部元数据未传入 SDK。证据为 `.state/cursor-codex-offline-1792725051786-8b1091/result.json`。空白临时配置未加载既有账号；四次外部 CONNECT 尝试被回环代理阻断，未建立隧道，不是实际 Cursor 模型验证。
 - 本次未授权账号、发送真实模型请求、重启生产服务或修改虚拟机、Claude、代理和 VPS。后台变化仍需用户在网页重启网关后加载；真实模型问答、工具质量及实际计费继续由用户验收。
+
+## 账号管理页签与统一摘要（2026-10-22，洛杉矶）
+
+- 网页新增“控制台”和“账号管理”页签。服务、模型选择、额度及请求统计留在控制台；A、B、CodeBuddy、Cursor 登录和授权集中到账号管理。四卡统一六项摘要，账号 B 的身份确认与验证、CodeBuddy/Cursor 专有元数据及 Codex 接入配置收进详情。原有功能元素全部保留；With 位于其他渠道详情中。
+- 公共摘要按各自可信状态源显示：A 仅使用最近额度响应的认证、身份及套餐，缺字段不从 B、请求统计或模型目录推断；B 的账号读取失败不显示残留身份；CodeBuddy/Cursor 的未认证、登录中、退出中或状态读取失败都会隐藏旧账号和套餐。CodeBuddy 套餐保持未返回，Cursor 的声明套餐保留待核实。
+- 页签支持左右方向键、Home/End、焦点和 ARIA 状态，支持 `#accounts` 深链接和浏览器 hash 导航。切换不重建模型列表、不改变未保存勾选或搜索、不发送请求。管理服务断连时仍能切换页签查看状态。
+- 独立复核发现退出成功后，旧状态 GET 可能迟到并恢复旧身份；已为 B、CodeBuddy、Cursor 添加独立状态代际。授权操作成功后同步清空身份，刷新只合并同代请求，旧成功、错误及 finally 均不会覆盖新状态。新增四项延迟回归覆盖退出前旧 GET、退出后新 GET 仍等待，以及 B 没有旧 GET 时的完成边界，最终复核通过。
+- 共新增 14 项交互回归，UI 专项 37/37 通过；完整离线测试最终 859/859、语法及 diff 检查通过。首轮全量中，原有 Cursor 10ms 超时用例未赶在超时前创建 SDK Run，触发“至少取消一个已创建 Run”的断言；独立重跑该用例及后续全量均通过，未改该测试或 Cursor 运行逻辑。日志为 `.state/account-tabs-tests.log`、`.state/account-tabs-verified-tests.log`。
+- 独立浏览器使用本机隔离 fixture 预览，不加载实际账号凭证；桌面与 390px iframe 视口检查通过，窄屏内容宽度等于可用宽度，无横向溢出。布局截图为 `.state/account-tabs-preview.jpg`、`.state/account-tabs-narrow.jpg`，其中账号均为示例资料，不是实际登录验证。
+- 本次只修改静态页面、UI 测试及文档，未重启生产服务、修改虚拟机或发送真实模型请求。用户刷新管理页即可加载本次布局和交互更新。

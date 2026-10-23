@@ -3,6 +3,9 @@
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'connection-dot', 'connection-label', 'version', 'notice', 'setup-state',
+  'tab-console', 'tab-accounts', 'panel-console', 'panel-accounts',
+  ...['a', 'b', 'codebuddy', 'cursor'].flatMap(account =>
+    ['state', 'identity', 'plan', 'method', 'catalog', 'enabled'].map(field => `account-${account}-${field}`)),
   'step-login', 'step-bind', 'step-verify', 'login-button', 'device-login-button', 'authorization-link',
   'device-authorization', 'device-user-code', 'device-authorization-link',
   'login-state', 'account-card', 'account-email', 'account-plan', 'logout-button',
@@ -43,6 +46,7 @@ const elements = Object.fromEntries([
 
 let status = null;
 let statusRequest = null;
+let statusRequestEpoch = -1;
 let busyAction = null;
 let modelsLoaded = false;
 let modelsRequest = null;
@@ -50,9 +54,14 @@ let noticeTimer = null;
 let tokenUsageRequest = null;
 let withRequest = null;
 let codeBuddyRequest = null;
+let codeBuddyRequestEpoch = -1;
 let codeBuddyStatus = null;
 let managementConnected = false;
 let accountQuotasRequest = null;
+let accountQuotaStatus = null;
+let managementStatusError = false;
+let codeBuddyReadError = '';
+let cursorReadError = '';
 let serviceStatus = null;
 let serviceRequest = null;
 let serviceUnavailable = false;
@@ -70,6 +79,9 @@ let modelGroupActions = [];
 let modelSettingsLoaded = false;
 let cursorStatus = null;
 let cursorRequest = null;
+let cursorRequestEpoch = -1;
+const accountStateEpoch = { b: 0, codebuddy: 0, cursor: 0 };
+const accountMetadataNeedsRefresh = new Set();
 
 function text(id, value) {
   elements[id].textContent = value == null ? '' : String(value);
@@ -78,6 +90,102 @@ function text(id, value) {
 function pill(id, label, kind = '') {
   text(id, label);
   elements[id].className = `pill${kind ? ` ${kind}` : ''}`;
+}
+
+function selectManagementTab(name, { focus = false, updateLocation = true } = {}) {
+  const selected = name === 'accounts' ? 'accounts' : 'console';
+  for (const tab of ['console', 'accounts']) {
+    const active = selected === tab;
+    elements[`tab-${tab}`].setAttribute('aria-selected', String(active));
+    elements[`tab-${tab}`].tabIndex = active ? 0 : -1;
+    elements[`panel-${tab}`].hidden = !active;
+  }
+  if (focus) elements[`tab-${selected}`].focus();
+  if (updateLocation && window.history?.replaceState) window.history.replaceState(null, '', `#${selected}`);
+}
+
+function channelModelCounts(channel, authenticated) {
+  if (authenticated !== true) return { catalog: authenticated === false ? '登录后读取' : '登录状态未确认', enabled: '登录后生效' };
+  const models = modelCatalogModels?.filter(model => modelChannel(model) === channel);
+  const discovery = modelSettings?.discovery?.[channel];
+  const currentCount = discovery?.state === 'ready' && Number.isSafeInteger(discovery.count) && discovery.count >= 0 ? discovery.count : null;
+  const catalog = currentCount !== null ? `${currentCount} 项（当前账号目录）`
+    : discovery ? '当前账号目录未读取'
+      : models ? channel === 'B' ? `${models.length} 项（网关别名）` : channel === 'A' ? `${models.length} 项（已发现）`
+        : `已发现 ${models.length} 项，当前账号目录未返回` : '请刷新账号目录';
+  return { catalog, enabled: models ? `${models.filter(model => model.enabled && model.available !== false).length} 项（已保存）` : '尚未读取' };
+}
+
+function renderAccountSummary(id, { authenticated, identity, plan, method, pending = false, loggingOut = false,
+  readError = '', loading = false }) {
+  const error = managementStatusError ? '连接中断' : readError;
+  const confirmed = !error && !pending && !loggingOut && authenticated === true;
+  const label = error || (loggingOut ? '正在退出' : pending ? '等待授权' : loading ? '读取中'
+    : authenticated === true ? '已登录' : authenticated === false ? '未登录' : '未确认');
+  pill(`account-${id}-state`, label, confirmed ? 'success' : error && error !== '待更新服务' ? 'error' : 'pending');
+  const display = value => typeof value === 'string' && value.trim() ? value : '未返回';
+  text(`account-${id}-identity`, confirmed ? display(identity) : authenticated === false && !error && !pending && !loggingOut ? '未登录' : '未确认');
+  text(`account-${id}-plan`, confirmed ? display(plan) : '未返回');
+  text(`account-${id}-method`, method);
+  const channels = { a: 'A', b: 'B', codebuddy: 'CodeBuddy', cursor: 'Cursor' };
+  const counts = channelModelCounts(channels[id], confirmed ? true : authenticated === false && !error ? false : null);
+  text(`account-${id}-catalog`, counts.catalog);
+  text(`account-${id}-enabled`, counts.enabled);
+}
+
+function renderAccountSummaries() {
+  const original = accountQuotaStatus?.accounts?.A;
+  renderAccountSummary('a', {
+    authenticated: original?.status !== 'error' ? original?.authenticated : null,
+    identity: original?.identity, plan: original?.planType, method: '由当前 Codex 管理（认证方式未返回）',
+    readError: original?.status === 'error' ? '读取失败' : '', loading: accountQuotaStatus === null,
+  });
+  const backend = status?.backend;
+  const account = backend?.error ? null : backend?.account;
+  renderAccountSummary('b', {
+    authenticated: backend && !backend.error ? Boolean(account) : null,
+    identity: account?.email, plan: account?.planType, method: '独立 Codex 官方授权',
+    pending: backend?.login?.state === 'pending' || ['login', 'device-login'].includes(busyAction),
+    loggingOut: busyAction === 'logout', readError: backend?.error ? '读取失败' : '', loading: !status,
+  });
+  const provider = codeBuddyStatus?.provider;
+  renderAccountSummary('codebuddy', {
+    authenticated: provider?.authenticated, identity: provider?.username, plan: null, method: '独立 CodeBuddy 员工授权',
+    pending: ['starting', 'pending'].includes(codeBuddyStatus?.login?.state) || busyAction === 'codebuddy-login',
+    loggingOut: busyAction === 'codebuddy-logout', readError: codeBuddyReadError, loading: !codeBuddyStatus && !codeBuddyReadError,
+  });
+  const plan = cursorStatus?.plan?.name || cursorStatus?.plan?.declared;
+  renderAccountSummary('cursor', {
+    authenticated: cursorStatus?.authReady, identity: cursorStatus?.profile?.email || cursorStatus?.profile?.userEmail || cursorStatus?.profile?.name,
+    plan: plan ? `${plan}${cursorStatus.plan.verified === true ? '（已核实）' : '（待核实）'}` : null,
+    method: '独立 Cursor 官方 SDK 授权',
+    pending: ['starting', 'pending'].includes(cursorStatus?.login?.state) || busyAction === 'cursor-login',
+    loggingOut: busyAction === 'cursor-logout', readError: cursorReadError, loading: !cursorStatus && !cursorReadError,
+  });
+}
+
+function invalidateAccountStatus(account) {
+  accountStateEpoch[account]++;
+  accountMetadataNeedsRefresh.add(account);
+  if (account === 'b' && status) {
+    status = { ...status, backend: { ...status.backend, account: null, pinnedAccount: null, login: {}, error: null },
+      gateway: { ...status.gateway, enabled: false }, verification: { status: 'not_run' } };
+  } else if (account === 'codebuddy') {
+    codeBuddyStatus = codeBuddyStatus ? { configured: codeBuddyStatus.configured, running: codeBuddyStatus.running,
+      provider: { authenticated: false }, login: {} } : null;
+    codeBuddyReadError = '';
+    text('codebuddy-username', '未确认'); text('codebuddy-authentication', '未确认');
+    elements['codebuddy-authorization-link'].hidden = true; elements['codebuddy-authorization-link'].removeAttribute('href');
+    pill('codebuddy-state', '读取中', 'pending');
+  } else if (account === 'cursor') {
+    cursorStatus = cursorStatus ? { configured: cursorStatus.configured, enabled: false, authReady: false,
+      promptMode: cursorStatus.promptMode, preservesSystemPromptPriority: cursorStatus.preservesSystemPromptPriority, login: {} } : null;
+    cursorReadError = '';
+    text('cursor-account', '未确认'); text('cursor-plan', '未返回');
+    elements['cursor-authorization-link'].hidden = true; elements['cursor-authorization-link'].removeAttribute('href');
+    pill('cursor-state', '读取中', 'pending');
+  }
+  renderChannelModelCounts();
 }
 
 function notify(message, isError = false) {
@@ -103,11 +211,16 @@ async function request(path, options = {}) {
 async function post(path, body = {}) {
   if (!status?.csrfToken) await refreshStatus();
   if (!status?.csrfToken) throw new Error('本机服务尚未就绪，请稍后重试。');
-  return request(path, {
+  const data = await request(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Bridge-CSRF': status.csrfToken },
     body: JSON.stringify(body)
   });
+  const mutatedAccounts = { '/api/login': 'b', '/api/logout': 'b',
+    '/api/codebuddy/login': 'codebuddy', '/api/codebuddy/logout': 'codebuddy',
+    '/api/cursor/login': 'cursor', '/api/cursor/logout': 'cursor' };
+  if (Object.hasOwn(mutatedAccounts, path)) invalidateAccountStatus(mutatedAccounts[path]);
+  return data;
 }
 
 function renderServiceControl() {
@@ -168,16 +281,15 @@ function filteredModels() {
 }
 function renderChannelModelCounts() {
   for (const [channel, catalogId, enabledId, authenticated] of [
-    ['CodeBuddy', 'codebuddy-model-available', 'codebuddy-enabled-models', codeBuddyStatus?.provider?.authenticated === true],
-    ['Cursor', 'cursor-catalog-models', 'cursor-enabled-models', cursorStatus?.authReady === true],
+    ['CodeBuddy', 'codebuddy-model-available', 'codebuddy-enabled-models', codeBuddyStatus?.provider?.authenticated === true
+      && !['starting', 'pending'].includes(codeBuddyStatus?.login?.state) && !['codebuddy-login', 'codebuddy-logout'].includes(busyAction)],
+    ['Cursor', 'cursor-catalog-models', 'cursor-enabled-models', cursorStatus?.authReady === true
+      && !['starting', 'pending'].includes(cursorStatus?.login?.state) && !['cursor-login', 'cursor-logout'].includes(busyAction)],
   ]) {
-    const models = modelCatalogModels?.filter(model => modelChannel(model) === channel);
-    const discovery = modelSettings?.discovery?.[channel];
-    const currentCount = discovery?.state === 'ready' && Number.isSafeInteger(discovery.count) && discovery.count >= 0 ? discovery.count : null;
-    text(catalogId, !authenticated ? '登录后读取' : currentCount !== null ? `${currentCount} 项（当前账号目录）`
-      : discovery ? '当前账号目录未读取' : models ? `已发现 ${models.length} 项，当前账号目录未返回` : '请刷新账号目录');
-    text(enabledId, models ? `${models.filter(model => model.enabled && model.available !== false).length} 项（已保存）` : '尚未读取');
+    const counts = channelModelCounts(channel, authenticated);
+    text(catalogId, counts.catalog); text(enabledId, counts.enabled);
   }
+  renderAccountSummaries();
 }
 
 function renderModelSettingsControls() {
@@ -412,11 +524,11 @@ function safeCursorAuthorizationUrl(value) {
 function renderCursor(data) {
   const login = data.login || {}, gateway = data.gateway || {};
   const pending = ['starting', 'pending'].includes(login.state) || busyAction === 'cursor-login';
-  const authenticated = data.authReady === true;
+  const authenticated = data.authReady === true && !pending && busyAction !== 'cursor-logout';
   const idle = managementConnected && !busyAction && !restartInProgress;
   const url = safeCursorAuthorizationUrl(login.url);
-  text('cursor-account', data.profile?.email || data.profile?.userEmail || data.profile?.name || (authenticated ? '已授权（未返回账号资料）' : '待授权'));
-  const plan = data.plan?.name || data.plan?.declared;
+  text('cursor-account', authenticated ? data.profile?.email || data.profile?.userEmail || data.profile?.name || '已登录（账号资料未返回）' : '未登录');
+  const plan = authenticated && (data.plan?.name || data.plan?.declared);
   text('cursor-plan', plan ? `${plan}${data.plan?.verified === true ? '（已核实）' : '（待核实）'}` : '未返回');
   const promptModes = {
     'project-rules': { name: '项目规则兼容模式', note: '保留 Cursor 内置系统提示；Codex 指令写入本次隔离目录的 AGENTS.md，按项目规则读取，不能保证原 system/developer 优先级。' },
@@ -440,7 +552,7 @@ function renderCursor(data) {
   const expiry = login.expiresAt ? ` 有效期至 ${tokenTime(login.expiresAt, 'America/Los_Angeles')}。` : '';
   text('cursor-login-state', !data.configured ? 'Cursor 渠道尚未配置。'
     : pending ? `请在 Cursor 官方页面由本人完成账号授权，此处会自动更新。${expiry}`
-      : authenticated ? data.enabled ? 'Cursor 已授权。请刷新上方账号目录，勾选并保存要开放的模型。' : 'Cursor 已授权，渠道尚未启用。'
+      : authenticated ? data.enabled ? 'Cursor 已授权。请在控制台刷新账号目录，勾选并保存要开放的模型。' : 'Cursor 已授权，渠道尚未启用。'
         : login.state === 'complete' ? '官方授权已完成，等待账号目录更新。'
           : login.state === 'error' || login.state === 'expired' ? login.error || '本次授权未完成，请重新登录。' : '通过官方页面登录提供额度的 Cursor Teams 账号。');
   const errors = [data.error, login.error].map(error => typeof error === 'string' ? error : error?.message).filter(Boolean);
@@ -453,17 +565,25 @@ function renderCursor(data) {
 }
 
 async function refreshCursor() {
-  if (cursorRequest) return cursorRequest;
-  cursorRequest = (async () => {
+  const epoch = accountStateEpoch.cursor;
+  if (cursorRequest && cursorRequestEpoch === epoch) return cursorRequest;
+  const pending = (async () => {
     try {
       const previous = cursorStatus;
-      cursorStatus = await request('/api/cursor', { signal: AbortSignal.timeout(20000) }); renderCursor(cursorStatus);
-      if (previous && (previous.authReady !== cursorStatus.authReady || previous.profile?.email !== cursorStatus.profile?.email)) {
+      const incoming = await request('/api/cursor', { signal: AbortSignal.timeout(20000) });
+      if (epoch !== accountStateEpoch.cursor) return;
+      cursorStatus = incoming; cursorReadError = ''; renderCursor(cursorStatus);
+      const refreshMetadata = accountMetadataNeedsRefresh.delete('cursor');
+      if (refreshMetadata || previous && (previous.authReady !== cursorStatus.authReady || previous.profile?.email !== cursorStatus.profile?.email)) {
         void refreshAuthorizedModelSettings(); void refreshAuthorizedAccountQuotas();
       }
     }
     catch (error) {
+      if (epoch !== accountStateEpoch.cursor) return;
+      cursorReadError = error.status === 404 ? '待更新服务' : '读取失败';
       cursorStatus = null; pill('cursor-state', error.status === 404 ? '待更新服务' : '读取失败', error.status === 404 ? 'pending' : 'error');
+      text('cursor-account', '未确认'); text('cursor-plan', '未返回');
+      text('cursor-catalog-models', '登录状态未确认'); text('cursor-enabled-models', '登录后生效');
       text('cursor-login-state', error.status === 404 ? '重启服务后可用。' : 'Cursor 状态暂时无法读取。');
       text('cursor-prompt-mode', error.status === 404 ? '待重启服务' : '未返回');
       text('cursor-prompt-priority', '未返回');
@@ -472,9 +592,10 @@ async function refreshCursor() {
       elements['cursor-error'].hidden = false;
       elements['cursor-login-button'].disabled = true; elements['cursor-logout-button'].disabled = true;
       elements['cursor-authorization-link'].hidden = true; elements['cursor-authorization-link'].removeAttribute('href');
-    } finally { cursorRequest = null; }
+    } finally { if (cursorRequest === pending) cursorRequest = null; if (epoch === accountStateEpoch.cursor) renderAccountSummaries(); }
   })();
-  return cursorRequest;
+  cursorRequest = pending; cursorRequestEpoch = epoch;
+  return pending;
 }
 
 function render() {
@@ -485,7 +606,7 @@ function render() {
   const needsUpgrade = Boolean(integration.installed && integration.needsUpgrade);
   const verification = status.verification || {};
   const login = backend.login || {};
-  const account = backend.account;
+  const account = backend.error ? null : backend.account;
   const pinned = backend.pinnedAccount;
   const hasAccount = Boolean(account);
   const bound = Boolean(pinned && account && pinned.email === account.email);
@@ -577,20 +698,28 @@ function render() {
   if (cursorStatus) renderCursor(cursorStatus);
   renderServiceControl();
   renderModelSettingsControls();
+  renderAccountSummaries();
 }
 
 async function refreshStatus({ duringRestart = false, signal } = {}) {
   if (restartInProgress && !duringRestart) return status;
-  if (statusRequest) return statusRequest;
-  statusRequest = (async () => {
+  const epoch = accountStateEpoch.b;
+  if (statusRequest && statusRequestEpoch === epoch) return statusRequest;
+  const pending = (async () => {
     try {
-      try { status = await request('/api/status', { signal: signal ?? AbortSignal.timeout(5000) }); }
+      let incoming;
+      try { incoming = await request('/api/status', { signal: signal ?? AbortSignal.timeout(5000) }); }
       catch (error) {
+        if (epoch !== accountStateEpoch.b) return status;
         if (error.status !== 401 || restartInProgress) throw error;
         await bootstrapManagementSession(AbortSignal.timeout(5000));
-        status = await request('/api/status', { signal: AbortSignal.timeout(5000) });
+        if (epoch !== accountStateEpoch.b) return status;
+        incoming = await request('/api/status', { signal: AbortSignal.timeout(5000) });
       }
+      if (epoch !== accountStateEpoch.b) return status;
+      status = incoming;
       managementConnected = true;
+      managementStatusError = false;
       render();
       if (!restartInProgress) {
         if (status.backend?.account && !modelsLoaded) void loadModels();
@@ -601,19 +730,26 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         void refreshCursor();
         void refreshServiceStatus();
         if (!modelSettingsLoaded) void refreshModelSettings();
+        if (!status.backend?.error && accountMetadataNeedsRefresh.delete('b')) {
+          void refreshAuthorizedModelSettings(); void refreshAuthorizedAccountQuotas();
+        }
       }
       return status;
     } catch (error) {
+      if (epoch !== accountStateEpoch.b) return status;
       managementConnected = false;
+      managementStatusError = true;
       elements['connection-dot'].className = 'status-dot failed';
       text('connection-label', restartInProgress ? '正在等待网关恢复连接' : '本机服务连接中断，正在重试');
-      document.querySelectorAll('button:not(#quota-refresh-button)').forEach((button) => { button.disabled = true; });
+      document.querySelectorAll('button:not(#quota-refresh-button):not([role="tab"])').forEach((button) => { button.disabled = true; });
+      renderAccountSummaries();
       throw error;
     } finally {
-      statusRequest = null;
+      if (statusRequest === pending) statusRequest = null;
     }
   })();
-  return statusRequest;
+  statusRequest = pending; statusRequestEpoch = epoch;
+  return pending;
 }
 
 function tokenCount(value) {
@@ -653,6 +789,7 @@ function safeQuotaUsageUrl(accountId, value) {
 }
 
 function renderAccountQuotas(data) {
+  accountQuotaStatus = data;
   const timeZone = data.timeZone || 'America/Los_Angeles';
   for (const accountId of ['A', 'B', 'CodeBuddy', 'Cursor']) {
     const prefix = `quota-${accountId.toLowerCase()}`;
@@ -728,6 +865,7 @@ function renderAccountQuotas(data) {
     pill(`${prefix}-state`, missing ? '待更新服务' : unknown ? '未提供余额' : notConnected ? '未绑定' : succeeded ? '已更新' : '需检查',
       succeeded ? 'success' : missing || unknown || notConnected ? 'pending' : 'error');
   }
+  renderAccountSummaries();
 }
 
 async function refreshAccountQuotas() {
@@ -806,11 +944,11 @@ function renderCodeBuddy(data) {
   const nativeCatalog = catalog.source === 'native-cache';
   const liveCatalog = catalog.source === 'remote' && catalog.liveVerified === true;
   const pending = login.state === 'pending' || busyAction === 'codebuddy-login';
-  const authenticated = provider.authenticated === true;
+  const authenticated = provider.authenticated === true && !pending && busyAction !== 'codebuddy-logout';
   const idle = managementConnected && !busyAction;
   const url = safeCodeBuddyAuthorizationUrl(login.url);
   text('codebuddy-title', 'CodeBuddy');
-  text('codebuddy-username', provider.username || (authenticated ? '已登录（未返回账号名）' : '待登录'));
+  text('codebuddy-username', authenticated ? provider.username || '已登录（账号资料未返回）' : '未登录');
   text('codebuddy-authentication', authenticated ? '已登录' : provider.authenticated === false ? '待登录' : '未返回');
   renderChannelModelCounts();
   text('codebuddy-catalog-source', nativeCatalog ? '本机 CodeBuddy 目录缓存' : catalog.source === 'remote' ? '远程模型目录' : '未返回');
@@ -856,28 +994,40 @@ function renderCodeBuddy(data) {
 }
 
 async function refreshCodeBuddy() {
-  if (codeBuddyRequest) return codeBuddyRequest;
-  codeBuddyRequest = (async () => {
+  const epoch = accountStateEpoch.codebuddy;
+  if (codeBuddyRequest && codeBuddyRequestEpoch === epoch) return codeBuddyRequest;
+  const pending = (async () => {
     try {
       const previous = codeBuddyStatus;
-      codeBuddyStatus = await request('/api/codebuddy');
+      const incoming = await request('/api/codebuddy', { signal: AbortSignal.timeout(20000) });
+      if (epoch !== accountStateEpoch.codebuddy) return;
+      codeBuddyStatus = incoming;
+      codeBuddyReadError = '';
       renderCodeBuddy(codeBuddyStatus);
-      if (previous && (previous.provider?.authenticated !== codeBuddyStatus.provider?.authenticated
+      const refreshMetadata = accountMetadataNeedsRefresh.delete('codebuddy');
+      if (refreshMetadata || previous && (previous.provider?.authenticated !== codeBuddyStatus.provider?.authenticated
         || previous.provider?.username !== codeBuddyStatus.provider?.username)) {
         void refreshAuthorizedModelSettings(); void refreshAuthorizedAccountQuotas();
       }
     } catch (error) {
+      if (epoch !== accountStateEpoch.codebuddy) return;
+      codeBuddyReadError = error.status === 404 ? '待更新服务' : '读取失败';
       codeBuddyStatus = null;
+      text('codebuddy-username', '未确认'); text('codebuddy-authentication', '未确认');
+      text('codebuddy-model-available', '登录状态未确认'); text('codebuddy-enabled-models', '登录后生效');
+      elements['codebuddy-authorization-link'].hidden = true; elements['codebuddy-authorization-link'].removeAttribute('href');
       pill('codebuddy-state', '读取失败', 'error');
       elements['codebuddy-login-button'].disabled = true;
       elements['codebuddy-logout-button'].disabled = true;
       elements['codebuddy-error'].hidden = false;
       text('codebuddy-error', `CodeBuddy 状态暂时无法读取：${error.message || '请稍后重试。'}`);
     } finally {
-      codeBuddyRequest = null;
+      if (codeBuddyRequest === pending) codeBuddyRequest = null;
+      if (epoch === accountStateEpoch.codebuddy) renderAccountSummaries();
     }
   })();
-  return codeBuddyRequest;
+  codeBuddyRequest = pending; codeBuddyRequestEpoch = epoch;
+  return pending;
 }
 
 function renderTokenUsage(data) {
@@ -1095,6 +1245,17 @@ elements['copy-button'].addEventListener('click', () => {
 });
 
 elements['quota-refresh-button'].addEventListener('click', () => { void refreshAccountQuotas(); });
+
+for (const [index, name] of ['console', 'accounts'].entries()) {
+  elements[`tab-${name}`].addEventListener('click', () => selectManagementTab(name));
+  elements[`tab-${name}`].addEventListener('keydown', event => {
+    const next = event.key === 'Home' ? 'console' : event.key === 'End' ? 'accounts'
+      : ['ArrowLeft', 'ArrowRight'].includes(event.key) ? ['console', 'accounts'][1 - index] : null;
+    if (next) { event.preventDefault(); selectManagementTab(next, { focus: true }); }
+  });
+}
+window.addEventListener('hashchange', () => selectManagementTab(window.location.hash === '#accounts' ? 'accounts' : 'console', { updateLocation: false }));
+selectManagementTab(window.location?.hash === '#accounts' ? 'accounts' : 'console', { updateLocation: false });
 
 elements['cursor-login-button'].addEventListener('click', () => {
   if (busyAction || restartInProgress) return;

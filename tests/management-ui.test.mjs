@@ -14,35 +14,71 @@ const originalModels = () => ({ revision: 1, models: [
 class Element {
   constructor(tag = 'div', attributes = '') {
     this.tagName = tag.toUpperCase(); this.children = []; this.listeners = new Map(); this.attributes = new Map();
-    this.hidden = /\shidden(?:\s|$)/.test(attributes); this.disabled = /\sdisabled(?:\s|$)/.test(attributes);
+    this.hidden = false; this.disabled = false; this.tabIndex = this.tagName === 'BUTTON' ? 0 : -1;
     this.textContent = ''; this.className = ''; this.checked = false; this.style = {};
     this.options = []; this.value = '';
+    for (const [, name, doubleQuoted, singleQuoted, unquoted] of attributes.matchAll(/([^\s=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s]+)))?/g)) {
+      this.setAttribute(name, doubleQuoted ?? singleQuoted ?? unquoted ?? '');
+    }
   }
   addEventListener(type, listener) { this.listeners.set(type, listener); }
-  trigger(type) { return this.listeners.get(type)?.({ target: this }); }
+  trigger(type, options = {}) {
+    const event = { target: this, currentTarget: this, defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; }, ...options };
+    if (type !== 'click' || !this.disabled) this.listeners.get(type)?.(event);
+    return event;
+  }
+  focus() { this.ownerDocument.activeElement = this; }
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = nodes; if (this.tagName === 'SELECT') this.options = nodes; }
-  setAttribute(key, value) { this.attributes.set(key, value); }
+  setAttribute(key, value) {
+    this.attributes.set(key, String(value));
+    if (key === 'id') this.id = String(value);
+    if (key === 'tabindex') this.tabIndex = Number(value);
+    if (key === 'hidden') this.hidden = true;
+    if (key === 'disabled') this.disabled = true;
+  }
+  getAttribute(key) { return this.attributes.get(key) ?? null; }
+  hasAttribute(key) { return this.attributes.has(key); }
   removeAttribute(key) { this.attributes.delete(key); if (key === 'href') delete this.href; }
   add(option) { this.options.push(option); }
-  querySelectorAll(tag) {
-    return this.children.flatMap(node => node instanceof Element ? [...(node.tagName.toLowerCase() === tag ? [node] : []), ...node.querySelectorAll(tag)] : []);
+  matches(selector) {
+    const excluded = [...selector.matchAll(/:not\(([^)]+)\)/g)].map(match => match[1]);
+    if (excluded.some(value => this.matches(value))) return false;
+    const included = selector.replace(/:not\([^)]+\)/g, '');
+    const tag = included.match(/^[a-z][\w-]*/i)?.[0];
+    if (tag && this.tagName !== tag.toUpperCase()) return false;
+    const id = included.match(/#([\w-]+)/)?.[1];
+    if (id && this.id !== id) return false;
+    return [...included.matchAll(/\[([\w-]+)(?:=["']?([^\]"']+)["']?)?\]/g)]
+      .every(([, name, value]) => value === undefined ? this.hasAttribute(name) : this.getAttribute(name) === value);
+  }
+  querySelectorAll(selector) {
+    return this.children.flatMap(node => node instanceof Element ? [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)] : []);
   }
 }
 
 function harness(overrides = {}) {
   const elements = new Map([...html.matchAll(/<([A-Za-z][A-Za-z0-9-]*)\b([^>]*\bid="([^"]+)"[^>]*)>/g)]
     .map(([, tag, attributes, id]) => [id, new Element(tag, attributes)]));
-  const calls = [], intervals = [], tabs = [];
-  let clock = 0, token = 'old-service-csrf', models = originalModels(), cursor = { configured: true, enabled: false,
+  const calls = [], intervals = [], tabs = [], historyCalls = [], windowListeners = new Map();
+  const location = new URL(overrides.location ?? 'http://127.0.0.1:43155/');
+  let clock = 0, token = 'old-service-csrf', models = overrides.models ?? originalModels(), cursor = overrides.cursor ?? { configured: true, enabled: false,
     authReady: false, profile: null, plan: { declared: 'Teams', verified: false }, login: { state: 'not_started' }, catalog: { models: [] }, gateway: {} };
+  let backend = overrides.backend ?? { running: true, login: {} }, codebuddy = overrides.codebuddy ?? { configured: false };
+  let quotas = overrides.quotas ?? { accounts: { A: { status: 'ok', windows: [] }, B: { status: 'ok', windows: [] } } };
   const control = { supported: true, platform: 'win32', pending: false, activeRequests: 0, ready: true, independentOfCodex: true };
-  const document = { hidden: false, body: new Element('body'),
-    getElementById(id) { return elements.get(id) ?? null; }, createElement(tag) { return new Element(tag); },
-    addEventListener() {}, querySelectorAll() { return [...elements.values()].filter(element => element.tagName === 'BUTTON'); } };
+  const document = { hidden: false, body: new Element('body'), activeElement: null,
+    getElementById(id) { return elements.get(id) ?? null; },
+    createElement(tag) { const element = new Element(tag); element.ownerDocument = document; return element; },
+    addEventListener() {}, querySelectorAll(selector) {
+      return [...new Set([...elements.values()].flatMap(element => [element, ...element.querySelectorAll('*')]))]
+        .filter(element => element.matches(selector));
+    } };
+  for (const element of [...elements.values(), document.body]) element.ownerDocument = document;
   const snapshot = () => ({ csrfToken: token, ready: true, gateway: { requests: 12, completed: 11, failed: 1,
     accounts: { A: { requests: 7, completed: 7, failed: 0 }, B: { requests: 5, completed: 4, failed: 1 } } },
-    backend: { running: true, login: {} }, integration: {}, verification: {} });
+    backend, integration: {}, verification: {} });
   const fetch = async (path, options = {}) => {
     const call = { path, method: options.method ?? 'GET', headers: options.headers, body: options.body ? JSON.parse(options.body) : null };
     calls.push(call);
@@ -61,20 +97,26 @@ function harness(overrides = {}) {
     }
     if (path === '/api/cursor') return json(cursor);
     if (path === '/api/with') return json({ configured: false });
-    if (path === '/api/codebuddy') return json({ configured: false });
+    if (path === '/api/codebuddy') return json(codebuddy);
     if (path === '/api/token-usage') return json({ accounts: {}, totals: {}, recent: [] });
-    if (path === '/api/account-quotas') return json({ accounts: { A: { status: 'ok', windows: [] }, B: { status: 'ok', windows: [] } } });
+    if (path === '/api/account-quotas') return json(quotas);
     throw new Error(`Unexpected fixture endpoint: ${path}`);
   };
-  const api = { calls, elements, intervals, tabs, control,
+  const api = { calls, elements, intervals, tabs, control, document, location, historyCalls,
     set token(value) { token = value; }, get token() { return token; },
     set models(value) { models = value; }, get models() { return models; },
     set cursor(value) { cursor = value; }, get cursor() { return cursor; },
+    set backend(value) { backend = value; }, get backend() { return backend; },
+    set codebuddy(value) { codebuddy = value; }, get codebuddy() { return codebuddy; },
+    set quotas(value) { quotas = value; }, get quotas() { return quotas; },
+    changeHash(value) { location.hash = value; windowListeners.get('hashchange')?.({ type: 'hashchange' }); },
     get elapsed() { return clock; } };
   class Clock extends Date { static now() { return clock; } }
   const context = vm.createContext({ document, fetch, Response, Headers, AbortSignal, URL, navigator: {}, Date: Clock,
     Option: class extends Element { constructor(label, value) { super('option'); this.textContent = label; this.value = value; } },
-    window: { open() { const tab = { opener: {}, location: { replace(value) { tab.url = value; } }, close() { tab.closed = true; } }; tabs.push(tab); return tab; } },
+    window: { location, history: { replaceState(state, title, url) { historyCalls.push({ state, title, url }); location.href = new URL(url, location).href; } },
+      addEventListener(type, listener) { windowListeners.set(type, listener); },
+      open() { const tab = { opener: {}, location: { replace(value) { tab.url = value; } }, close() { tab.closed = true; } }; tabs.push(tab); return tab; } },
     clearTimeout() {}, setTimeout(callback, milliseconds) {
       if (milliseconds <= 2000) { clock += milliseconds; queueMicrotask(callback); }
       return 1;
@@ -474,4 +516,298 @@ test('provider quota identities refresh only on manual action or authorization c
   await page.run('refreshCursor()'); await settle();
   assert.equal(count(), 3); assert.equal(page.elements.get('quota-cursor-identity').textContent, 'after-login@example.test');
   for (const interval of page.intervals) interval.callback(); await settle(); assert.equal(count(), 3);
+});
+
+function assertSelectedTab(page, selected) {
+  for (const name of ['console', 'accounts']) {
+    const tab = page.elements.get(`tab-${name}`), panel = page.elements.get(`panel-${name}`);
+    assert.ok(tab && panel, `Missing management tab or panel: ${name}`);
+    assert.equal(tab.getAttribute('role'), 'tab');
+    assert.equal(panel.getAttribute('role'), 'tabpanel');
+    assert.equal(tab.getAttribute('aria-controls'), panel.id);
+    assert.equal(panel.getAttribute('aria-labelledby'), tab.id);
+    assert.equal(tab.getAttribute('aria-selected'), String(name === selected));
+    assert.equal(tab.tabIndex, name === selected ? 0 : -1);
+    assert.equal(panel.hidden, name !== selected);
+  }
+}
+
+test('management tab switches preserve unsaved model choices and search without requests or rebuilding rows', async () => {
+  const page = catalogPage(); await settle(); assertSelectedTab(page, 'console');
+  const search = page.elements.get('model-settings-search'); search.value = 'CodeBuddy'; search.trigger('input');
+  const checkbox = inputFor(page, 'cb-other'); checkbox.checked = true; checkbox.trigger('change');
+  const rows = [...page.elements.get('model-settings-list').children], beforeCalls = page.calls.length;
+  page.elements.get('tab-accounts').trigger('click'); assertSelectedTab(page, 'accounts');
+  assert.equal(page.location.hash, '#accounts');
+  page.elements.get('tab-console').trigger('click'); assertSelectedTab(page, 'console');
+  assert.equal(page.location.hash, '#console'); await settle();
+  assert.equal(page.calls.length, beforeCalls, 'Changing tabs must not query metadata or submit an action.');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+  assert.equal(search.value, 'CodeBuddy'); assert.equal(inputFor(page, 'cb-other'), checkbox);
+  assert.equal(checkbox.checked, true); assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  assert.deepEqual(page.elements.get('model-settings-list').children, rows);
+});
+
+test('management tabs support keyboard wrapping, Home and End with focus and roving tab stops', async () => {
+  const page = harness(); await settle();
+  const beforeCalls = page.calls.length;
+  for (const [from, key, to] of [['console', 'ArrowLeft', 'accounts'], ['accounts', 'ArrowRight', 'console'],
+    ['console', 'ArrowRight', 'accounts'], ['accounts', 'ArrowLeft', 'console'],
+    ['console', 'End', 'accounts'], ['accounts', 'Home', 'console']]) {
+    const event = page.elements.get(`tab-${from}`).trigger('keydown', { key });
+    assert.equal(event.defaultPrevented, true); assertSelectedTab(page, to);
+    assert.equal(page.document.activeElement, page.elements.get(`tab-${to}`));
+    assert.equal(page.location.hash, `#${to}`);
+  }
+  const ignored = page.elements.get('tab-console').trigger('keydown', { key: 'Escape' });
+  assert.equal(ignored.defaultPrevented, false); assertSelectedTab(page, 'console');
+  await settle(); assert.equal(page.calls.length, beforeCalls);
+});
+
+test('management tabs honor account deep links and hash navigation without rewriting browser history or requesting data', async () => {
+  const page = harness({ location: 'http://127.0.0.1:43155/#accounts' });
+  assertSelectedTab(page, 'accounts'); assert.equal(page.historyCalls.length, 0); await settle();
+  const beforeCalls = page.calls.length;
+  page.changeHash('#console'); assertSelectedTab(page, 'console');
+  page.changeHash('#accounts'); assertSelectedTab(page, 'accounts');
+  page.changeHash('#unknown'); assertSelectedTab(page, 'console');
+  assert.equal(page.historyCalls.length, 0);
+  page.run("selectManagementTab('accounts', { focus: true, updateLocation: false })");
+  assertSelectedTab(page, 'accounts'); assert.equal(page.location.hash, '#unknown');
+  assert.equal(page.document.activeElement, page.elements.get('tab-accounts'));
+  await settle(); assert.equal(page.calls.length, beforeCalls);
+});
+
+test('disconnected management service leaves tab navigation usable and clears stale account summaries', async () => {
+  let disconnected = false;
+  const page = allAccountsPage(call => {
+    if (disconnected && call.path === '/api/status') throw new Error('Fixture service disconnected');
+  }); await settle();
+  assert.equal(accountSummary(page, 'b').identity, 'backend-b@example.test');
+  disconnected = true; await page.run('refreshStatus().catch(() => {})'); await settle();
+  assert.equal(page.elements.get('service-restart-button').disabled, true);
+  const beforeCalls = page.calls.length;
+  for (const name of ['accounts', 'console']) {
+    assert.equal(page.elements.get(`tab-${name}`).disabled, false, 'Disconnected action controls must not disable navigation.');
+    page.elements.get(`tab-${name}`).trigger('click'); assertSelectedTab(page, name);
+  }
+  page.elements.get('tab-console').trigger('keydown', { key: 'End' }); assertSelectedTab(page, 'accounts');
+  for (const id of ['a', 'b', 'codebuddy', 'cursor']) {
+    assert.equal(accountSummary(page, id).state, '连接中断');
+    assert.equal(accountSummary(page, id).identity, '未确认');
+    assert.equal(accountSummary(page, id).plan, '未返回');
+  }
+  await settle(); assert.equal(page.calls.length, beforeCalls);
+});
+
+const summaryFields = ['state', 'identity', 'plan', 'method', 'catalog', 'enabled'];
+function accountSummary(page, account) {
+  return Object.fromEntries(summaryFields.map(field => {
+    const element = page.elements.get(`account-${account}-${field}`);
+    assert.ok(element, `Missing common account field: ${account}.${field}`);
+    return [field, element.textContent];
+  }));
+}
+function allAccountsPage(fetch) {
+  const models = completeModels();
+  models.discovery = { A: { state: 'ready', count: 1 }, B: { state: 'ready', count: 1 },
+    CodeBuddy: { state: 'ready', count: 1 }, Cursor: { state: 'ready', count: 2 } };
+  models.models.find(model => model.id === 'cursor-first').enabled = true;
+  const quotas = quotaSnapshot();
+  Object.assign(quotas.accounts.B, { identity: 'quota-b-must-not-be-borrowed@example.test', planType: 'Quota-only B plan' });
+  quotas.accounts.CodeBuddy.identity = 'quota-codebuddy-must-not-be-borrowed';
+  quotas.accounts.Cursor.identity = 'quota-cursor-must-not-be-borrowed@example.test';
+  return harness({ models, quotas,
+    backend: { running: true, account: { email: 'backend-b@example.test', planType: 'Business' }, login: {} },
+    codebuddy: { configured: true, running: true, login: {}, provider: { authenticated: true, username: 'codebuddy-session-user', ready: true, modelAvailable: true } },
+    cursor: { configured: true, enabled: true, authReady: true, profile: { email: 'cursor-session@example.test' },
+      plan: { declared: 'Teams', verified: false }, login: {}, catalog: { models: [{ id: 'current-cursor-1' }, { id: 'current-cursor-2' }] }, gateway: {} },
+    fetch(call, api) {
+      const overridden = fetch?.(call, api);
+      if (overridden !== undefined) return overridden;
+      if (call.path === '/api/models') return json({ models: [] });
+    } });
+}
+
+test('four account summaries share common fields while binding identity, plan and authorization to their own current source', async () => {
+  const page = allAccountsPage(); await settle();
+  for (const [id, identity, plan, method, count, enabled] of [
+    ['a', 'account-a@example.test', 'Pro', /Codex.*未返回/, 1, 1],
+    ['b', 'backend-b@example.test', 'Business', /Codex.*授权/, 1, 0],
+    ['codebuddy', 'codebuddy-session-user', '未返回', /CodeBuddy.*授权/, 1, 1],
+    ['cursor', 'cursor-session@example.test', 'Teams（待核实）', /Cursor.*SDK.*授权/, 2, 1],
+  ]) {
+    const summary = accountSummary(page, id);
+    assert.equal(summary.state, '已登录'); assert.equal(summary.identity, identity); assert.equal(summary.plan, plan);
+    assert.match(summary.method, method); assert.equal(summary.catalog, `${count} 项（当前账号目录）`);
+    assert.equal(summary.enabled, `${enabled} 项（已保存）`);
+  }
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('account summary counts distinguish saved available choices from drafts and historical directory records', async () => {
+  const page = allAccountsPage(); await settle();
+  assert.equal(modelInputs(page).filter(input => input.value.startsWith('cb-')).length, 3);
+  assert.equal(accountSummary(page, 'codebuddy').catalog, '1 项（当前账号目录）');
+  const edit = inputFor(page, 'cb-other'); edit.checked = true; edit.trigger('change');
+  assert.equal(accountSummary(page, 'codebuddy').enabled, '1 项（已保存）');
+  assert.equal(accountSummary(page, 'cursor').catalog, '2 项（当前账号目录）');
+  page.models = { ...page.models, revision: 8, discovery: { ...page.models.discovery,
+    CodeBuddy: { state: 'error', count: 1, message: 'Fixture directory timeout' } } };
+  await page.run('refreshModelSettings()'); await settle();
+  assert.equal(accountSummary(page, 'codebuddy').catalog, '当前账号目录未读取');
+  assert.equal(accountSummary(page, 'codebuddy').enabled, '1 项（已保存）');
+  assert.equal(inputFor(page, 'cb-other').checked, true);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('unknown account A authentication is never inferred from traffic, model records or other bound accounts', async () => {
+  const page = allAccountsPage(); await settle();
+  page.quotas = { accounts: { ...page.quotas.accounts, A: { status: 'unknown', authenticated: null,
+    identity: 'unconfirmed-a-must-not-display', planType: 'Unconfirmed plan', windows: [] } } };
+  await page.run('refreshAccountQuotas()'); await settle();
+  const summary = accountSummary(page, 'a');
+  assert.equal(summary.state, '未确认'); assert.equal(summary.identity, '未确认'); assert.equal(summary.plan, '未返回');
+  assert.equal(summary.catalog, '登录状态未确认'); assert.equal(summary.enabled, '登录后生效');
+  assert.equal(page.elements.get('metric-a-requests').textContent, '7');
+  assert.equal(accountSummary(page, 'b').identity, 'backend-b@example.test');
+  page.quotas = { accounts: { ...page.quotas.accounts, A: { status: 'error', authenticated: true,
+    identity: 'stale-a-must-not-display', planType: 'Stale plan', error: 'Fixture metadata failure' } } };
+  await page.run('refreshAccountQuotas()'); await settle();
+  assert.equal(accountSummary(page, 'a').state, '读取失败');
+  assert.equal(accountSummary(page, 'a').identity, '未确认'); assert.equal(accountSummary(page, 'a').plan, '未返回');
+});
+
+test('missing current identity fields never borrow names from quota cards or another account', async () => {
+  const page = allAccountsPage(); await settle();
+  page.backend = { ...page.backend, account: { planType: 'Business' } };
+  page.codebuddy = { ...page.codebuddy, provider: { ...page.codebuddy.provider, username: null } };
+  page.cursor = { ...page.cursor, profile: null };
+  page.quotas.accounts.A.identity = null;
+  await page.run('Promise.all([refreshStatus(), refreshAccountQuotas()])'); await settle();
+  for (const id of ['a', 'b', 'codebuddy', 'cursor']) {
+    assert.equal(accountSummary(page, id).state, '已登录');
+    assert.equal(accountSummary(page, id).identity, '未返回');
+  }
+  assert.equal(page.elements.get('quota-b-identity').textContent, 'quota-b-must-not-be-borrowed@example.test');
+  assert.equal(page.elements.get('quota-codebuddy-identity').textContent, 'quota-codebuddy-must-not-be-borrowed');
+  assert.equal(page.elements.get('quota-cursor-identity').textContent, 'quota-cursor-must-not-be-borrowed@example.test');
+});
+
+test('backend and provider read failures clear old identities and plans while leaving healthy accounts intact', async () => {
+  let providerFailure = false;
+  const page = allAccountsPage(call => {
+    if (providerFailure && ['/api/codebuddy', '/api/cursor'].includes(call.path)) return json({ error: { message: 'Fixture provider unavailable' } }, 503);
+  }); await settle();
+  providerFailure = true;
+  page.backend = { ...page.backend, error: { message: 'Fixture backend unavailable' } };
+  await page.run('refreshStatus()'); await settle();
+  for (const id of ['b', 'codebuddy', 'cursor']) {
+    assert.equal(accountSummary(page, id).state, '读取失败'); assert.equal(accountSummary(page, id).identity, '未确认');
+    assert.equal(accountSummary(page, id).plan, '未返回');
+  }
+  assert.equal(accountSummary(page, 'a').identity, 'account-a@example.test');
+  assert.equal(page.elements.get('account-card').hidden, true);
+  assert.equal(page.elements.get('codebuddy-username').textContent, '未确认');
+  assert.equal(page.elements.get('cursor-account').textContent, '未确认'); assert.equal(page.elements.get('cursor-plan').textContent, '未返回');
+});
+
+test('unauthenticated and pending account statuses hide retained source profiles and old plans', async () => {
+  const page = allAccountsPage(); await settle();
+  page.backend = { ...page.backend, login: { state: 'pending' } };
+  page.codebuddy = { ...page.codebuddy, login: { state: 'pending' } };
+  page.cursor = { ...page.cursor, login: { state: 'pending' } };
+  await page.run('refreshStatus()'); await settle();
+  for (const id of ['b', 'codebuddy', 'cursor']) {
+    assert.equal(accountSummary(page, id).state, '等待授权');
+    assert.equal(accountSummary(page, id).identity, '未确认'); assert.equal(accountSummary(page, id).plan, '未返回');
+  }
+  page.backend = { ...page.backend, account: null, pinnedAccount: { email: 'old-pinned-b@example.test' }, login: {} };
+  page.codebuddy = { ...page.codebuddy, login: {}, provider: { ...page.codebuddy.provider, authenticated: false } };
+  page.cursor = { ...page.cursor, login: {}, authReady: false };
+  page.quotas.accounts.A = { ...page.quotas.accounts.A, status: 'not_connected', authenticated: false };
+  await page.run('Promise.all([refreshStatus(), refreshAccountQuotas()])'); await settle();
+  for (const id of ['a', 'b', 'codebuddy', 'cursor']) {
+    assert.equal(accountSummary(page, id).state, '未登录'); assert.equal(accountSummary(page, id).identity, '未登录');
+    assert.equal(accountSummary(page, id).plan, '未返回'); assert.equal(accountSummary(page, id).enabled, '登录后生效');
+  }
+  assert.equal(page.elements.get('codebuddy-username').textContent, '未登录');
+  assert.equal(page.elements.get('cursor-account').textContent, '未登录'); assert.equal(page.elements.get('cursor-plan').textContent, '未返回');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(accept => { resolve = accept; });
+  return { promise, resolve };
+}
+
+async function verifyLogoutRefreshIsolation(account, { oldRequest = true } = {}) {
+  const routes = {
+    b: { status: '/api/status', logout: '/api/logout', button: 'logout-button', refresh: 'refreshStatus', identity: 'backend-b@example.test' },
+    codebuddy: { status: '/api/codebuddy', logout: '/api/codebuddy/logout', button: 'codebuddy-logout-button', refresh: 'refreshCodeBuddy', identity: 'codebuddy-session-user' },
+    cursor: { status: '/api/cursor', logout: '/api/cursor/logout', button: 'cursor-logout-button', refresh: 'refreshCursor', identity: 'cursor-session@example.test' },
+  };
+  const route = routes[account], oldRead = deferred(), freshRead = deferred();
+  let controlled = false, logoutSucceeded = false, freshGets = 0, oldGets = 0;
+  const payload = api => account === 'b'
+    ? { csrfToken: api.token, ready: true, gateway: { accounts: {} }, backend: structuredClone(api.backend), integration: {}, verification: {} }
+    : structuredClone(account === 'codebuddy' ? api.codebuddy : api.cursor);
+  const page = allAccountsPage((call, api) => {
+    if (call.method === 'POST' && call.path === route.logout) {
+      logoutSucceeded = true;
+      if (account === 'b') api.backend = { ...api.backend, account: null, pinnedAccount: null, login: {} };
+      if (account === 'codebuddy') api.codebuddy = { ...api.codebuddy, provider: { ...api.codebuddy.provider, authenticated: false } };
+      if (account === 'cursor') api.cursor = { ...api.cursor, authReady: false };
+      return json({ ok: true });
+    }
+    if (controlled && call.method === 'GET' && call.path === route.status) {
+      if (logoutSucceeded) { freshGets++; return freshRead.promise.then(data => json(data)); }
+      oldGets++; return oldRead.promise.then(data => json(data));
+    }
+  }); await settle();
+  assert.equal(accountSummary(page, account).identity, route.identity);
+  assert.equal(accountSummary(page, account).state, '已登录');
+  const oldPayload = payload(page);
+  let pendingOldRead;
+  const assertCleared = () => {
+    const summary = accountSummary(page, account);
+    assert.notEqual(summary.identity, route.identity, 'A successful logout must immediately stop presenting the previous account.');
+    assert.notEqual(summary.state, '已登录', 'An unresolved fresh read cannot restore an authenticated state after logout.');
+    assert.doesNotMatch(page.elements.get(`account-${account}-state`).className, /\bsuccess\b/);
+    assert.equal(summary.plan, '未返回');
+  };
+  try {
+    controlled = true;
+    if (oldRequest) {
+      pendingOldRead = page.run(`${route.refresh}()`); await settle();
+      assert.equal(oldGets, 1, 'The fixture must hold a read started before the logout mutation.');
+    }
+    page.elements.get(route.button).trigger('click'); await settle();
+    assert.equal(logoutSucceeded, true); assertCleared();
+    if (oldRequest) {
+      oldRead.resolve(oldPayload); await pendingOldRead; await settle();
+    }
+    assert.ok(freshGets >= 1, 'Logout must query status again instead of adopting an earlier in-flight result.');
+    assertCleared();
+    assert.equal(accountSummary(page, 'a').identity, 'account-a@example.test');
+    freshRead.resolve(payload(page)); await settle();
+    assert.equal(accountSummary(page, account).state, '未登录');
+    assert.equal(accountSummary(page, account).identity, '未登录');
+    assert.equal(accountSummary(page, account).plan, '未返回');
+    assert.equal(page.calls.filter(call => call.method === 'POST' && call.path === route.logout).length, 1);
+  } finally {
+    oldRead.resolve(oldPayload); freshRead.resolve(payload(page));
+    await pendingOldRead?.catch(() => {}); await settle();
+  }
+}
+
+for (const [account, label] of [['b', 'account B'], ['codebuddy', 'CodeBuddy'], ['cursor', 'Cursor']]) {
+  test(`${label} logout ignores an older authenticated read while the fresh unauthenticated read is pending`, async () => {
+    await verifyLogoutRefreshIsolation(account);
+  });
+}
+
+test('account B logout clears its identity before a fresh status response even without an older in-flight read', async () => {
+  await verifyLogoutRefreshIsolation('b', { oldRequest: false });
 });
