@@ -320,3 +320,9 @@
 - 共新增 14 项交互回归，UI 专项 37/37 通过；完整离线测试最终 859/859、语法及 diff 检查通过。首轮全量中，原有 Cursor 10ms 超时用例未赶在超时前创建 SDK Run，触发“至少取消一个已创建 Run”的断言；独立重跑该用例及后续全量均通过，未改该测试或 Cursor 运行逻辑。日志为 `.state/account-tabs-tests.log`、`.state/account-tabs-verified-tests.log`。
 - 独立浏览器使用本机隔离 fixture 预览，不加载实际账号凭证；桌面与 390px iframe 视口检查通过，窄屏内容宽度等于可用宽度，无横向溢出。布局截图为 `.state/account-tabs-preview.jpg`、`.state/account-tabs-narrow.jpg`，其中账号均为示例资料，不是实际登录验证。
 - 本次只修改静态页面、UI 测试及文档，未重启生产服务、修改虚拟机或发送真实模型请求。用户刷新管理页即可加载本次布局和交互更新。
+
+## 旧后台完整目录加载提示
+
+- 用户反馈 CodeBuddy 仍只有一项。只读查询实际运行接口确认 `/api/model-settings` 没有 `discovery` 字段，返回 CodeBuddy 一项、Cursor 两项；`/api/codebuddy` 的目录只有旧版元信息。当前进程启动早于完整目录实现提交，磁盘新版链路没有仅保留 Opus 的过滤。安全诊断为 `.state/codebuddy-one-model-diagnosis.json`，诊断文件不含凭证。
+- 前端现在识别旧目录接口，显示“待重启加载目录”和明确操作提示。手动刷新旧接口不再宣称完整目录已刷新；新版目录恢复后移除提示，保留未保存的模型勾选。现有重启按钮仍由用户操作，没有自动重启或触发模型请求。
+- 新增三项交互回归，UI 专项 40/40、语法及 diff 检查通过；日志为 `.state/legacy-catalog-ui-tests.log`。用户实际目录数量仍需在自行重启网关后复查，本轮没有将磁盘实现或离线目录证据当成运行中完整目录已经加载。

@@ -269,6 +269,10 @@ function modelSettingsDirty() {
   return modelSettings?.models.some(model => modelDraft.get(model.id) !== model.enabled) === true;
 }
 
+function completeModelDiscoverySupported() {
+  return modelSettings?.discovery !== null && typeof modelSettings?.discovery === 'object' && !Array.isArray(modelSettings.discovery);
+}
+
 const modelChannel = model => model.channel === 'CursorTeams' ? 'Cursor' : model.channel || '其他渠道';
 const modelChannelLabels = { A: '账号 A', B: '账号 B', CodeBuddy: 'CodeBuddy', Cursor: 'Cursor Teams' };
 function modelSettingsEditable() {
@@ -310,7 +314,8 @@ function renderModelSettingsControls() {
   else if (modelSettingsError) pill('model-settings-state', '读取失败', 'error');
   else if (modelSettings) {
     const selected = modelSettings.models.filter(model => modelDraft.get(model.id) && model.available !== false).length;
-    pill('model-settings-state', dirty ? '有未保存更改' : `${selected} / ${modelSettings.models.length} 已开放`, dirty ? 'pending' : 'success');
+    const legacy = !completeModelDiscoverySupported();
+    pill('model-settings-state', dirty ? '有未保存更改' : legacy ? '待重启加载目录' : `${selected} / ${modelSettings.models.length} 已开放`, dirty || legacy ? 'pending' : 'success');
     const visible = filteredModels().length, unavailable = modelSettings.models.filter(model => model.available === false).length;
     text('model-settings-summary', `显示 ${visible} / ${modelSettings.models.length} 项 · 当前勾选可用 ${selected} 项${unavailable ? ` · ${unavailable} 项源端不可用或尚未适配` : ''}`);
   }
@@ -400,6 +405,7 @@ async function refreshModelSettings({ replaceDraft = false } = {}) {
       }
       const discovery = Object.entries(data.discovery ?? {}).filter(([, value]) => value?.state === 'error')
         .map(([channel, value]) => `${modelChannelLabels[channel] || channel}：${typeof value.message === 'string' ? value.message : '目录暂不可用'}`);
+      if (!completeModelDiscoverySupported()) discovery.unshift('当前后台尚未加载完整模型目录功能，下面仅显示旧目录中的已保存模型。请先重启网关服务，恢复后再刷新账号目录；仅刷新网页不会更新后台。');
       text('model-settings-discovery', discovery.join(' · ')); elements['model-settings-discovery'].hidden = !discovery.length;
     } catch (error) {
       modelSettingsUnavailable = error.status === 404;
@@ -1315,9 +1321,10 @@ elements['model-settings-refresh-button'].addEventListener('click', () => {
   if (busyAction || restartInProgress) return;
   text('model-settings-message', '正在读取各账号模型目录，只查询元数据。');
   void refreshModelSettings().then(() => {
-    if (!modelSettingsError && !modelSettingsUnavailable) text('model-settings-message', modelSettingsDirty()
-      ? '账号目录已刷新，未保存的可用勾选已保留；不可用的未保存启用已撤回。保存时仍会核对目录版本。'
-      : '账号目录已刷新。新增模型默认关闭，勾选并保存后在 Codex 中刷新模型目录。');
+    if (!modelSettingsError && !modelSettingsUnavailable) text('model-settings-message', !completeModelDiscoverySupported()
+      ? '当前后台仍使用旧目录接口。请先点击“重启网关服务”，恢复后再刷新账号目录。'
+      : modelSettingsDirty() ? '账号目录已刷新，未保存的可用勾选已保留；不可用的未保存启用已撤回。保存时仍会核对目录版本。'
+        : '账号目录已刷新。新增模型默认关闭，勾选并保存后在 Codex 中刷新模型目录。');
   });
 });
 elements['model-settings-search'].addEventListener('input', renderModelSettingsList);

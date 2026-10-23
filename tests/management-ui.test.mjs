@@ -348,7 +348,7 @@ test('manual catalog refresh updates all rows and unavailability while retaining
   const page = catalogPage(); await settle();
   const edit = inputFor(page, 'original-a'); edit.checked = false; edit.trigger('change');
   const enabling = inputFor(page, 'cb-other'); enabling.checked = true; enabling.trigger('change');
-  page.models = { revision: 8, models: [...completeModels().models.map(model => model.id === 'cb-other'
+  page.models = { revision: 8, discovery: {}, models: [...completeModels().models.map(model => model.id === 'cb-other'
     ? { ...model, available: false, reason: '提供方暂时停止服务。' } : model),
     { id: 'cursor-new', name: 'New Cursor model', channel: 'Cursor', enabled: false, available: true }] };
   page.elements.get('model-settings-refresh-button').trigger('click'); await settle();
@@ -404,6 +404,58 @@ test('account card directory counts use current discovery instead of accumulated
   assert.equal(page.elements.get('codebuddy-model-available').textContent, '当前账号目录未读取');
   assert.equal(page.elements.get('cursor-catalog-models').textContent, '当前账号目录未读取');
   assert.equal(modelInputs(page).length, 8, 'Historical records remain in the selectable directory with their availability reasons.');
+});
+
+const legacyModelSettings = () => ({ revision: 5, models: [...originalModels().models,
+  { id: 'Cursor-gemini-4-argon', name: 'Cursor Gemini 4', channel: 'Cursor', enabled: false, available: true },
+  { id: 'Cursor-grok-4.7', name: 'Cursor Grok 4.7', channel: 'Cursor', enabled: false, available: true },
+] });
+
+test('legacy model settings keep existing rows visible and explicitly require a gateway restart for full catalogs', async () => {
+  for (const discovery of [undefined, null, [], 'legacy']) {
+    const data = legacyModelSettings();
+    if (discovery !== undefined) data.discovery = discovery;
+    const page = catalogPage(data); await settle();
+    const banner = page.elements.get('model-settings-discovery');
+    assert.equal(banner.hidden, false);
+    assert.match(banner.textContent, /重启网关服务/); assert.match(banner.textContent, /完整模型目录/);
+    assert.equal(page.elements.get('model-settings-state').textContent, '待重启加载目录');
+    assert.doesNotMatch(page.elements.get('model-settings-state').className, /\bsuccess\b/);
+    assert.deepEqual(modelInputs(page).map(input => input.value), data.models.map(model => model.id));
+    assert.equal(page.elements.get('model-settings-error').hidden, true);
+    assert.equal(page.calls.some(call => call.method === 'POST'), false);
+  }
+});
+
+test('manual refresh of a legacy backend retains the restart warning and never reports a completed full catalog refresh', async () => {
+  const page = catalogPage(legacyModelSettings()); await settle();
+  const initialReads = page.calls.filter(call => call.path === '/api/model-settings').length;
+  page.elements.get('model-settings-refresh-button').trigger('click'); await settle();
+  assert.equal(page.calls.filter(call => call.path === '/api/model-settings').length, initialReads + 1);
+  assert.equal(page.elements.get('model-settings-discovery').hidden, false);
+  assert.match(page.elements.get('model-settings-message').textContent, /重启网关服务/);
+  assert.doesNotMatch(page.elements.get('model-settings-message').textContent, /账号目录已刷新|账号目录已更新/);
+  assert.equal(page.elements.get('model-settings-state').textContent, '待重启加载目录');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false, 'Reading a legacy directory must never restart or mutate the service automatically.');
+});
+
+test('a current backend clears the legacy catalog warning while preserving unsaved choices and revision protection', async () => {
+  const page = catalogPage(legacyModelSettings()); await settle();
+  const checkbox = inputFor(page, 'claude-codebuddy-opus-5-5'); checkbox.checked = false; checkbox.trigger('change');
+  assert.equal(page.elements.get('model-settings-discovery').hidden, false);
+  assert.equal(page.elements.get('model-settings-state').textContent, '有未保存更改');
+  page.models = { revision: 6, discovery: { CodeBuddy: { state: 'ready', count: 2 }, Cursor: { state: 'ready', count: 2 } },
+    models: [...legacyModelSettings().models, { id: 'CodeBuddy-new-fixture-model', name: 'New CodeBuddy model', channel: 'CodeBuddy', enabled: false, available: true }] };
+  page.elements.get('model-settings-refresh-button').trigger('click'); await settle();
+  assert.equal(page.elements.get('model-settings-discovery').hidden, true);
+  assert.doesNotMatch(page.elements.get('model-settings-discovery').textContent, /重启网关服务/);
+  assert.equal(inputFor(page, 'claude-codebuddy-opus-5-5').checked, false);
+  assert.equal(inputFor(page, 'CodeBuddy-new-fixture-model').checked, false);
+  assert.equal(page.elements.get('model-settings-state').textContent, '有未保存更改');
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  assert.match(page.elements.get('model-settings-message').textContent, /账号目录已刷新.*勾选已保留/);
+  assert.equal(page.run('modelSettings.revision'), 5, 'Refreshing the server must not silently upgrade an unsaved draft revision.');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
 });
 
 const quotaSnapshot = () => ({ timeZone: 'America/Los_Angeles', accounts: {
