@@ -8,6 +8,8 @@
           → Mac 127.0.0.1:43157 → 原固定 VM 通道 → Claude → VPS
 ```
 
+大陆访问以速度为优先时，先参考 [公网 IPv4/IPv6 直连研究](mac-direct-access.md)。现有一条电信线路的模拟流式传输约为 22.7 KiB/s；这不是模型生成速度。直连尚待光猫条件与外部入站验收，Funnel 仍为当前已部署入口。
+
 ## 访问边界
 
 新增入口仅提供 `/v1/models`、`/v1/chat/completions`、`/v1/messages` 和 `/v1/messages/count_tokens`。它接受独立外部 API key，替换为本机网关密钥后转发到固定回环目标。VM relay 密钥和 Claude OAuth 不交给外部客户端。
