@@ -9,9 +9,13 @@
     <string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/bin/tailscaled</string>
     <string>--tun=userspace-networking</string>
     <string>--state=/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/tailscale.state</string>
+    <string>--statedir=/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/tailscale-data</string>
     <string>--socket=/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/tailscaled.sock</string>
     <string>--port=0</string>
   </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>TS_FORCE_NOISE_443</key><string>true</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>

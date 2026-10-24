@@ -26,7 +26,9 @@
 node scripts/run-external-claude-gateway.mjs /absolute/private/External/gateway.json
 ```
 
-CLI-only Tailscale 的 daemon 启动参数见 `local.claude-vps.bifrost-funnel.example.plist`。不启用 SOCKS/HTTP 出站代理或 subnet/exit 路由。以专用 socket 完成官方网页登录：
+CLI-only Tailscale 的 daemon 启动参数见 `local.claude-vps.bifrost-funnel.example.plist`。显式指定 `--statedir` 的 0700 私有目录，供证书等运行数据使用；只有自定义 `--state` 文件不足以提供证书缓存目录。不启用 SOCKS/HTTP 出站代理或 subnet/exit 路由。以专用 socket 完成官方网页登录：
+
+模板使用 `TS_FORCE_NOISE_443=true`，让控制连接使用 HTTPS 443，避免某些网络的 HTTP 80 中间设备在 Noise 握手后中断连接。公网域名仍需从实际客户端网络验收；Funnel 不提供中国大陆直连或延迟保证，不能用已开启代理的访问结果代替国内直连检查。
 
 ```sh
 tailscale --socket=/absolute/private/External/tailscaled.sock up \
@@ -39,6 +41,8 @@ tailscale --socket=/absolute/private/External/tailscaled.sock funnel \
 首次需在官方网页完成账号授权和 Funnel 功能启用。取得完整 DNS 名称后，填入私有网关配置的 `publicHostname` 并重启外部入口。客户端 Base URL 为 `https://<实际 DNS 名称>/v1`，Authorization 为各自的 `Bearer <外部 API key>`。
 
 登录后的验收必须包括真实公网 HTTPS、无密钥 401、错误密钥拒绝、有效密钥的模型元数据、未提供的接口拒绝、SSE 首片段/取消和 daemon 重启恢复。可以通过仅允许专用一次性测试密钥的 loopback 模拟后端测试流式，避免请求真实模型。Claude 尚未登录时，模型列表为空、推理不可用；网络通道验收不代表真实推理已通过。
+
+国内直连验收需另外关闭显式代理、绑定物理网卡，并核实出口确实是国内运营商。只使用 `curl --noproxy` 不能绕过仍在运行的 TUN。还应直接检查路由器或国内递归 DNS 的回答，再使用该公网地址完成 TLS 证书校验、认证、连接复用和流式测试。记录首次连接、复用连接、吞吐与取消的结果；一条运营商线路的结果不代表其它省份或运营商。网络测试中的模拟数据不计入真实 Claude 推理速度。
 
 关闭公网入口用 `tailscale --socket=... funnel reset`；停止专用 daemon 也会断开公网入口。本机 43157 入口和 VM 的 VPS 出站无需因此停止。
 
