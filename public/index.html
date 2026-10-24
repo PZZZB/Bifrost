@@ -425,6 +425,23 @@
               <dl class="client-user-meta" id="client-user-meta"></dl>
               <div class="button-row"><button class="button secondary" id="client-user-toggle" type="button" disabled>停用用户</button></div>
               <form class="client-form client-registration-form" id="client-user-limit-form"><label class="client-field" for="client-user-key-limit">Key 到期上限（浏览器本地时间）<input id="client-user-key-limit" type="datetime-local"></label><button class="button secondary" id="client-user-limit-save" type="submit" disabled>保存到期上限</button></form><p class="footnote">所有 Key 的到期时间都受此上限约束，留空表示无账号上限。延长上限后，可为需要继续使用的 Key 续期。</p>
+              <section class="client-billing-account" aria-labelledby="client-billing-title">
+                <div class="client-keys-heading"><h3 id="client-billing-title">余额与 Token 配额</h3><span class="pill pending" id="client-billing-state">尚未读取</span></div>
+                <p class="footnote" id="client-billing-note">正在读取计费配置。</p>
+                <dl class="client-billing-metrics" id="client-billing-metrics"></dl>
+                <form class="client-form" id="client-billing-policy-form">
+                  <label class="client-checkbox"><input id="client-billing-enforce" type="checkbox">启用余额计费与余额检查</label>
+                  <label class="client-field" for="client-billing-token-limit">本周期 Token 总配额<input id="client-billing-token-limit" type="text" inputmode="numeric" placeholder="留空为不设上限" maxlength="16"></label>
+                  <p class="footnote">Token 配额独立生效。关闭余额计费后，只记录 Token，不扣余额。启用余额计费或 Token 配额前，需为获准模型配置价格与请求预留。</p>
+                  <button class="button secondary" id="client-billing-policy-save" type="submit" disabled>保存计费与配额</button>
+                  <details class="client-quota-reset"><summary>开始新的 Token 配额周期</summary><p class="footnote">清零当前周期已用 Token，历史账单继续保留。存在预留或待核对请求时不能重置。</p><label class="client-checkbox"><input id="client-billing-reset-confirm" type="checkbox">确认清零本周期 Token 用量</label><button class="button danger" id="client-billing-quota-reset" type="button" disabled>重置本周期用量</button></details>
+                </form>
+                <form class="client-form client-balance-form" id="client-balance-form">
+                  <label class="client-field" for="client-balance-amount">余额调整（元 CNY）<input id="client-balance-amount" type="text" inputmode="decimal" placeholder="正数充值，负数扣减，例如 10.50" maxlength="24" required></label>
+                  <label class="client-field" for="client-balance-note">备注<input id="client-balance-note" type="text" maxlength="240" placeholder="例如：线下充值"></label>
+                  <button class="button primary" id="client-balance-submit" type="submit" disabled>提交余额调整</button><p class="footnote" id="client-balance-pending" role="status"></p>
+                </form>
+              </section>
               <form class="client-form" id="client-model-form"><fieldset class="client-model-fieldset"><legend>允许使用的模型</legend><p class="footnote">精确授权这些模型；未勾选的模型不会出现在该用户的目录中。模型仍需在网关全局开放。</p><div class="client-model-list" id="client-model-list"></div></fieldset><button class="button primary" id="client-model-save" type="submit" disabled>保存模型权限</button><p class="inline-status management-message" id="client-model-message" role="status"></p></form>
               <div class="client-keys-heading"><h3>API Key</h3><span class="footnote">默认有效期 30 天</span></div>
               <div class="client-key-list" id="client-key-list"></div>
@@ -433,6 +450,24 @@
           </section>
         </div>
 
+        <section class="panel client-billing-panel" aria-labelledby="client-prices-title">
+          <div class="panel-heading"><div><div class="eyebrow">MODEL PRICING</div><h2 id="client-prices-title">模型计费价格</h2></div><span class="pill pending" id="client-prices-state">尚未读取</span></div>
+          <p class="panel-copy">价格由管理员填写，单位为元 / 百万 Token。启用余额计费或 Token 配额的用户，只能调用已配置并启用计费的模型。输入价格适用于未缓存输入，缓存输入单独计价。</p>
+          <form class="client-form client-prices-form" id="client-prices-form">
+            <label class="client-field" for="client-price-model">模型<select id="client-price-model"></select></label>
+            <div class="client-price-fields"><label class="client-field" for="client-price-input">输入价格<input id="client-price-input" type="text" inputmode="decimal" placeholder="未设置" maxlength="24" required></label><label class="client-field" for="client-price-cached">缓存输入价格<input id="client-price-cached" type="text" inputmode="decimal" placeholder="未设置" maxlength="24" required></label><label class="client-field" for="client-price-output">输出价格<input id="client-price-output" type="text" inputmode="decimal" placeholder="未设置" maxlength="24" required></label></div>
+            <div class="client-price-fields"><label class="client-field" for="client-price-reserve-input">预留输入 Token<input id="client-price-reserve-input" type="text" inputmode="numeric" placeholder="管理员设置" maxlength="16" required></label><label class="client-field" for="client-price-reserve-output">预留输出 Token<input id="client-price-reserve-output" type="text" inputmode="numeric" placeholder="管理员设置" maxlength="16" required></label></div>
+            <label class="client-checkbox"><input id="client-price-enabled" type="checkbox">启用此模型计费</label><p class="footnote">请求开始时按配置预留余额与 Token，结束后按真实用量结算。缺失用量或断流时保留预留，转为待核对。价格最多 6 位小数，不内置厂商价格。</p><button class="button primary" id="client-price-save" type="submit" disabled>保存此模型价格</button>
+          </form>
+        </section>
+        <section class="panel client-billing-panel" aria-labelledby="client-unresolved-title">
+          <div class="panel-heading"><div><div class="eyebrow">RECONCILIATION</div><h2 id="client-unresolved-title">待核对请求</h2></div><span class="pill" id="client-unresolved-count">尚未读取</span></div>
+          <p class="panel-copy">按所选用户列出仍占用预留的待核对请求。核实上游真实用量后结算；确认未产生用量时释放预留。</p><p class="gateway-error" id="client-unresolved-error" role="status" hidden></p><div class="client-ledger-list" id="client-unresolved-list"></div><button class="button secondary" id="client-unresolved-more" type="button" hidden>更多待核对</button>
+        </section>
+        <section class="panel client-billing-panel" aria-labelledby="client-ledger-title">
+          <div class="panel-heading"><div><div class="eyebrow">BILLING LEDGER</div><h2 id="client-ledger-title">最近账单</h2></div><span class="pill" id="client-ledger-count">尚未读取</span></div>
+          <p class="panel-copy" id="client-ledger-note">显示所选用户的最近账单。预留中的金额仍属于余额，暂不可用；待核对请求需查明真实用量后处理。</p><p class="gateway-error" id="client-ledger-error" role="status" hidden></p><div class="client-ledger-list" id="client-ledger-list"></div><button class="button secondary" id="client-ledger-more" type="button" hidden>更多账单</button>
+        </section>
         <section class="panel client-registration-panel" aria-labelledby="client-registration-title">
           <div class="panel-heading"><div><div class="eyebrow">REGISTRATION</div><h2 id="client-registration-title">注册与邀请</h2></div></div>
           <form class="client-form client-registration-form" id="client-registration-form"><label class="client-field" for="client-registration-mode">注册方式<select id="client-registration-mode" name="mode"><option value="invite">仅邀请码注册</option><option value="closed">关闭注册</option><option value="open">开放注册</option></select></label><label class="client-field" for="client-registration-days">新 Key 默认有效天数<input id="client-registration-days" type="number" min="1" max="3650" value="30" required></label><button class="button primary" id="client-registration-save" type="submit" disabled>保存注册设置</button></form>

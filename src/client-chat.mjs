@@ -416,7 +416,7 @@ export class ClientChatAdapter {
   }
   status() { this.#prune(); return { entries: this.#cache.size, maximum: this.#maxEntries, ttlMs: this.#ttl, memoryOnly: true }; }
   close() { this.#closed = true; this.#cache.clear(); this.#cacheBytes = 0; }
-  async request({ body, scope, signal } = {}) {
+  async request({ body, scope, signal, requestId } = {}) {
     let translated, linkedSignal, abort;
     try {
       if (this.#closed) throw new ChatError('Chat 适配器已关闭。', 503, 'client_chat_unavailable');
@@ -441,7 +441,7 @@ export class ClientChatAdapter {
       abort = new AbortController(); linkedSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
       // A dispatched live SDK continuation cannot be replayed safely after a lost HTTP response.
       if (latestEntry) latestEntry.used = true;
-      const response = await this.#request({ body: translated.output, scope, signal: linkedSignal });
+      const response = await this.#request({ body: translated.output, scope, signal: linkedSignal, ...(requestId ? { requestId } : {}) });
       if (!(response instanceof Response)) protocol();
       if (!response.ok) {
         await response.body?.cancel();

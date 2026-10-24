@@ -5,7 +5,8 @@ const portalElements = Object.fromEntries([
   'invite-code', 'invite-field', 'registration-note', 'auth-error', 'auth-submit', 'dashboard-panel',
   'user-summary', 'portal-refresh', 'portal-logout', 'account-banner', 'connection-fields', 'key-form',
   'key-name', 'key-days', 'key-expiry-note', 'key-create-button', 'new-key-panel', 'new-key-secret',
-  'secret-dismiss', 'secret-copy', 'secret-copy-status', 'key-count', 'keys-list', 'model-count', 'models-list',
+  'secret-dismiss', 'secret-copy', 'secret-copy-status', 'key-count', 'keys-list', 'model-count', 'models-list', 'models-pricing-note',
+  'portal-billing-state', 'portal-billing-note', 'portal-billing-metrics', 'portal-billing-count', 'portal-billing-history',
 ].map(id => [id, document.getElementById(id)]));
 
 let portalConfig = null;
@@ -44,6 +45,51 @@ function showNewKey(result) {
 function portalDate(value) {
   if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return '—';
   return new Date(value).toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function portalMoney(value) {
+  if (!Number.isSafeInteger(value)) return '未返回';
+  const negative = value < 0, absolute = String(Math.abs(value)).padStart(7, '0');
+  const fraction = absolute.slice(-6).replace(/0+$/, '');
+  return `${negative ? '-' : ''}${absolute.slice(0, -6)}${fraction ? `.${fraction}` : ''} 元`;
+}
+
+function portalTokens(value) { return Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString('zh-CN') : '未返回'; }
+
+function portalBillingLabel(entry) {
+  const types = { balance_adjustment: '余额调整', account_configured: '计费与配额设置', price_updated: '模型价格更新', adjustment: '余额调整', credit: '充值', debit: '扣减', reserve: '请求预留', reserved: '请求预留', settle: '用量结算', settled: '用量结算', release: '预留释放', released: '预留释放', unresolved: '待核对', quota_reset: '配额周期重置', policy: '计费设置', resolve: '人工核销' };
+  const states = { pending: '进行中', started: '调用中', reserved: '预留中', unresolved: '待核对', settled: '已结算', released: '已释放', failed: '失败', completed: '已完成' };
+  const type = entry.type === 'account_configured' && entry.configuration?.resetQuota === true ? '配额周期重置' : types[entry.type] || entry.type || '账单', state = states[entry.status] || entry.status;
+  return `${type}${state && state !== type ? ` · ${state}` : ''}`;
+}
+
+function renderPortalBilling(billing) {
+  const available = billing && typeof billing === 'object' && Number.isSafeInteger(billing.balanceMicros);
+  portalElements['portal-billing-state'].textContent = available ? billing.enforceBalance === true ? '余额计费' : '仅统计 Token' : '待更新后台';
+  portalElements['portal-billing-state'].className = `pill${available ? ' active' : ''}`;
+  portalElements['portal-billing-note'].textContent = !available ? '计费信息尚未返回，请在网关更新并重启后刷新。'
+    : `${billing.accountingBlocked ? '账户计费异常正在阻止新调用，请联系管理员。' : ''}${billing.enforceBalance ? '模型调用按管理员设置的价格扣费。充值或余额问题请联系管理员。' : '当前不扣余额，只记录 Token 用量。'}${billing.pendingCount || billing.unresolvedCount ? ` ${billing.pendingCount || 0} 个请求进行中，${billing.unresolvedCount || 0} 个请求待核对；预留金额暂不可用。` : ''}`;
+  const metrics = available ? [['账户余额', portalMoney(billing.balanceMicros)], ['预留金额', portalMoney(billing.reservedMicros)], ['可用余额', portalMoney(billing.availableMicros)],
+    ['本周期已用 Token', portalTokens(billing.usedTokens)], ['预留 Token', portalTokens(billing.reservedTokens)], ['剩余 Token', billing.tokenLimit === null ? '未设上限' : portalTokens(billing.remainingTokens)]] : [];
+  portalElements['portal-billing-metrics'].replaceChildren(...metrics.map(([label, value]) => {
+    const row = document.createElement('div'), term = document.createElement('dt'), detail = document.createElement('dd');
+    term.textContent = label; detail.textContent = value; row.append(term, detail); return row;
+  }));
+  const history = available && Array.isArray(billing.history) ? billing.history.slice(0, 50) : [];
+  portalElements['portal-billing-count'].textContent = available ? `（${history.length} 条）` : '';
+  const rows = history.map(entry => {
+    const row = document.createElement('article'); row.className = 'portal-billing-entry';
+    const heading = document.createElement('div'), title = document.createElement('strong'), amount = document.createElement('span');
+    heading.className = 'portal-billing-entry-heading'; title.textContent = portalBillingLabel(entry);
+    amount.textContent = entry.type === 'settled' && entry.charged === false ? '仅统计 Token' : Number.isSafeInteger(entry.amountMicros) ? portalMoney(entry.amountMicros) : '—'; heading.append(title, amount); row.append(heading);
+    for (const text of [portalDate(entry.createdAt || entry.time), entry.model || '', entry.note || '',
+      entry.usage ? `输入 ${portalTokens(entry.usage.inputTokens)} · 缓存 ${portalTokens(entry.usage.cachedInputTokens)} · 输出 ${portalTokens(entry.usage.outputTokens)} · 合计 ${portalTokens(entry.usage.totalTokens)} Token` : '',
+      Number.isSafeInteger(entry.reservedMicros) ? `预留 ${portalMoney(entry.reservedMicros)} · ${portalTokens(entry.reservedTokens)} Token` : '']) {
+      if (!text) continue; const detail = document.createElement('p'); detail.textContent = text; row.append(detail);
+    } return row;
+  });
+  if (!rows.length) { const empty = document.createElement('p'); empty.className = 'empty-state'; empty.textContent = available ? '暂无账单。' : '账单信息尚未返回。'; rows.push(empty); }
+  portalElements['portal-billing-history'].replaceChildren(...rows);
 }
 
 function userDisabled(user = portalUser) {
@@ -120,6 +166,7 @@ function showPortalLogin() {
   portalElements['keys-list'].replaceChildren();
   portalElements['models-list'].replaceChildren();
   portalElements['connection-fields'].replaceChildren();
+  renderPortalBilling(null);
   portalElements['dashboard-panel'].hidden = true;
   portalElements['auth-panel'].hidden = false;
   updatePortalControls();
@@ -207,7 +254,11 @@ function renderPortalKeys(keys = []) {
   }
 }
 
-function renderPortalModels(models = []) {
+function renderPortalModels(models = [], billing) {
+  const billingKnown = billing && Number.isSafeInteger(billing.balanceMicros);
+  portalElements['models-pricing-note'].textContent = billingKnown && billing.enforceBalance === false
+    ? '当前只统计 Token，不扣余额。以下管理员单价供启用余额计费时参考。'
+    : '单价由管理员配置，单位为元 / 百万 Token。缺少计费价格不代表免费。';
   const items = Array.isArray(models) ? models.filter(model => model && typeof model.id === 'string') : [];
   portalElements['model-count'].textContent = `${items.length} 个模型`;
   portalElements['models-list'].replaceChildren();
@@ -227,6 +278,13 @@ function renderPortalModels(models = []) {
       formats.textContent = protocols.map(protocol => ({ 'chat-completions': 'OpenAI Chat', responses: 'Responses', messages: 'Anthropic Messages' })[protocol]).join(' · ');
       item.append(formats);
     }
+    if (model.pricing && typeof model.pricing === 'object') {
+      const price = document.createElement('p'); price.className = 'model-protocols';
+      price.textContent = model.pricing.enabled === true
+        ? `每百万 Token：输入 ${portalMoney(model.pricing.inputRateMicros)} · 缓存 ${portalMoney(model.pricing.cachedInputRateMicros)} · 输出 ${portalMoney(model.pricing.outputRateMicros)}` : '此模型计费未启用'; item.append(price);
+    } else {
+      const price = document.createElement('p'); price.className = 'model-protocols'; price.textContent = billingKnown ? '未配置计费价格' : '价格未返回，请联系管理员确认。'; item.append(price);
+    }
     item.append(copy); portalElements['models-list'].append(item);
   }
 }
@@ -245,7 +303,8 @@ function renderPortalUser(data) {
     : '到期后此 Key 自动失效，账号仍可登录。';
   renderPortalConnections(data.gateway ?? portalConfig?.gateway);
   renderPortalKeys(data.keys);
-  renderPortalModels(data.models);
+  renderPortalModels(data.models, data.billing);
+  renderPortalBilling(data.billing);
   portalElements['auth-panel'].hidden = true;
   portalElements['dashboard-panel'].hidden = false;
   updatePortalControls();

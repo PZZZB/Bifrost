@@ -44,6 +44,11 @@
       <section id="dashboard-panel" aria-labelledby="dashboard-heading" hidden>
         <div class="dashboard-heading"><div><div class="eyebrow">YOUR GATEWAY</div><h1 id="dashboard-heading">我的工作台</h1><p id="user-summary"></p></div><div class="actions"><button class="button secondary" id="portal-refresh" type="button">刷新</button><button class="button quiet" id="portal-logout" type="button">退出登录</button></div></div>
         <div class="account-banner" id="account-banner" role="status" hidden></div>
+        <section class="card portal-billing-card" aria-labelledby="portal-billing-heading">
+          <div class="card-heading"><div><div class="eyebrow">BALANCE & USAGE</div><h2 id="portal-billing-heading">余额与用量</h2></div><span class="pill" id="portal-billing-state">尚未读取</span></div>
+          <p class="card-copy" id="portal-billing-note">正在读取账户计费信息。</p><dl class="portal-billing-metrics" id="portal-billing-metrics"></dl>
+          <details class="portal-ledger"><summary>最近账单 <span id="portal-billing-count"></span></summary><div id="portal-billing-history" class="portal-billing-history"></div></details>
+        </section>
         <div class="portal-grid">
           <section class="card connection-card" aria-labelledby="connection-heading">
             <div class="eyebrow">CONNECT</div><h2 id="connection-heading">接入客户端</h2>
@@ -75,7 +80,7 @@
         </section>
         <section class="card models-card" aria-labelledby="models-heading">
           <div class="card-heading"><div><div class="eyebrow">AVAILABLE MODELS</div><h2 id="models-heading">可用模型</h2></div><span class="count" id="model-count"></span></div>
-          <p class="card-copy">复制模型 ID，填入客户端的模型配置。</p>
+          <p class="card-copy">复制模型 ID，填入客户端的模型配置。</p><p class="subtle-note" id="models-pricing-note"></p>
           <div id="models-list" class="models-list"><p class="empty-state">正在读取模型…</p></div>
         </section>
       </section>

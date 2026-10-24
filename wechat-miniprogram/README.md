@@ -2,6 +2,18 @@
 
 This folder contains development source for the user portal. It supports username/password registration, login, assigned models, API Key creation, expiry display, and revocation. It uses the same `/portal/api/*` service as the browser portal. It does not contain an upstream provider credential or a model proxy.
 
+## Balance and token usage
+
+The user page displays the account balance, reserved amount, available balance, current token usage, reserved tokens, remaining quota, and up to 50 recent billing entries returned by `/portal/api/me`. Missing billing data displays an upgrade notice instead of a zero balance. Refreshing the page requests current data; this client does not poll the billing API automatically.
+
+Balances use CNY and are stored as integer micro-units: `1 CNY = 1,000,000 micro-units`. Administrators adjust balances and configure model prices in the private Bifröst management page. The Mini Program provides **read-only billing**. It does not call WeChat Pay, collect payment details, create payment orders, accept recharge payments, or implement a payment callback. An administrator credit is a ledger entry, not a purchase of upstream provider quota.
+
+Balance charging and the token quota are separate settings. Existing users default to token accounting without balance charging. If the administrator enables a token quota, that quota remains effective even when balance charging is disabled. A missing model price is not a free-price declaration. For accounts using charging or a token quota, the server requires an enabled model price and reservation configuration.
+
+Reservations are configured budgets for concurrent request admission, not exact tokenizer measurements or hard model output limits. Actual usage can exceed the reservation. Complete usage settles the request and releases its reservation. Interrupted requests or missing usage can remain unresolved and continue holding their reservation until an administrator checks the upstream usage and settles or releases it. The Mini Program never changes an unresolved request into a free completion.
+
+Only requests sent through this user API contribute to the account ledger. Direct provider traffic and the original private gateway do not become this user's bill. Local model prices describe this gateway's configured charges; they do not establish the provider's price.
+
 ## Run in WeChat Developer Tools
 
 1. Import this folder as a Mini Program project. `touristappid` in `project.config.json` is a development placeholder. Replace it with the AppID of your own registered Mini Program before a device preview or release.

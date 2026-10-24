@@ -10,12 +10,34 @@ function formatDate(value) {
 function disabled(user) { return user && (user.enabled === false || ['disabled', 'suspended'].includes(user.status)); }
 function expired(user) { return user && typeof user.keyExpiresAtLimit === 'string' && Date.parse(user.keyExpiresAtLimit) <= Date.now(); }
 
+function money(value) {
+  if (!Number.isSafeInteger(value)) return '未返回';
+  const absolute = String(Math.abs(value)).padStart(7, '0'), fraction = absolute.slice(-6).replace(/0+$/, '');
+  return `${value < 0 ? '-' : ''}${absolute.slice(0, -6)}${fraction ? `.${fraction}` : ''} 元`;
+}
+function tokens(value) { return Number.isSafeInteger(value) && value >= 0 ? String(value) : '未返回'; }
+function billingView(billing) {
+  const available = billing && typeof billing === 'object' && Number.isSafeInteger(billing.balanceMicros);
+  if (!available) return { billingReady: false, billingLabel: '待更新后台', billingNote: '计费信息尚未返回，请在网关更新并重启后刷新。', billingMetrics: [], billingHistory: [] };
+  const typeLabels = { balance_adjustment: '余额调整', account_configured: '计费与配额设置', price_updated: '模型价格更新', adjustment: '余额调整', credit: '充值', debit: '扣减', reserve: '请求预留', reserved: '请求预留', settle: '用量结算', settled: '用量结算', release: '预留释放', released: '预留释放', unresolved: '待核对', quota_reset: '配额周期重置', policy: '计费设置', resolve: '人工核销' };
+  const statusLabels = { pending: '进行中', started: '调用中', reserved: '预留中', unresolved: '待核对', settled: '已结算', released: '已释放', completed: '已完成', failed: '失败' };
+  return { billingReady: true, billingLabel: billing.enforceBalance ? '余额计费' : '仅统计 Token',
+    billingNote: `${billing.accountingBlocked ? '账户计费异常正在阻止新调用，请联系管理员。' : ''}${billing.enforceBalance ? '按管理员设置的模型价格扣费，充值请联系管理员。' : '当前只记录 Token，不扣余额。'} ${billing.pendingCount || 0} 个进行中，${billing.unresolvedCount || 0} 个待核对；预留暂不可用。`,
+    billingMetrics: [['账户余额', money(billing.balanceMicros)], ['预留金额', money(billing.reservedMicros)], ['可用余额', money(billing.availableMicros)], ['本周期已用 Token', tokens(billing.usedTokens)], ['预留 Token', tokens(billing.reservedTokens)], ['剩余 Token', billing.tokenLimit === null ? '未设上限' : tokens(billing.remainingTokens)]].map(([label, value]) => ({ label, value })),
+    billingHistory: (Array.isArray(billing.history) ? billing.history : []).slice(0, 50).map((entry, index) => ({ id: `${entry.id || entry.requestId || entry.operationId || 'entry'}-${index}`,
+      title: `${typeLabels[entry.type] || entry.type || '账单'}${entry.status ? ` · ${statusLabels[entry.status] || entry.status}` : ''}`,
+      amount: entry.type === 'settled' && entry.charged === false ? '仅统计 Token' : Number.isSafeInteger(entry.amountMicros) ? money(entry.amountMicros) : '—', time: formatDate(entry.createdAt || entry.time), model: String(entry.model || ''), note: String(entry.note || ''),
+      usage: entry.usage ? `输入 ${tokens(entry.usage.inputTokens)} · 缓存 ${tokens(entry.usage.cachedInputTokens)} · 输出 ${tokens(entry.usage.outputTokens)} · 合计 ${tokens(entry.usage.totalTokens)} Token` : '',
+      reserved: Number.isSafeInteger(entry.reservedMicros) ? `预留 ${money(entry.reservedMicros)} · ${tokens(entry.reservedTokens)} Token` : '' })) };
+}
+
 Page({
   data: {
     busy: false, configLoaded: false, authMode: 'login', username: '', password: '', inviteToken: '',
     registrationEnabled: false, invitationRequired: false, loggedIn: false, userLabel: '', accountNotice: '',
-    keyName: '', keyDays: '30', keyDeadline: '', canCreateKey: false, keys: [], models: [],
+    keyName: '', keyDays: '30', keyDeadline: '', canCreateKey: false, keys: [], models: [], modelPricingNote: '',
     chatCompletionsUrl: '', baseUrl: '', messagesUrl: '', newSecret: '', error: '', message: '',
+    billingReady: false, billingLabel: '尚未读取', billingNote: '', billingMetrics: [], billingHistory: [],
   },
 
   onLoad() { this.initialize(); },
@@ -39,8 +61,9 @@ Page({
   resetSession() {
     getApp().globalData.sessionToken = null;
     this._user = null; this.clearSecret();
-    this.setData({ loggedIn: false, userLabel: '', accountNotice: '', keys: [], models: [],
-      password: '', inviteToken: '', chatCompletionsUrl: '', baseUrl: '', messagesUrl: '', canCreateKey: false });
+    this.setData({ loggedIn: false, userLabel: '', accountNotice: '', keys: [], models: [], modelPricingNote: '',
+      password: '', inviteToken: '', chatCompletionsUrl: '', baseUrl: '', messagesUrl: '', canCreateKey: false,
+      ...billingView(null) });
   },
   async run(action) {
     if (this.data.busy) return;
@@ -112,10 +135,14 @@ Page({
       protocols: (Array.isArray(model.protocols) ? model.protocols : []).map(protocol => ({
         'chat-completions': 'OpenAI Chat', responses: 'Responses', messages: 'Anthropic Messages',
       })[protocol]).filter(Boolean).join(' · '),
+      pricingText: model.pricing && typeof model.pricing === 'object' ? model.pricing.enabled === true
+        ? `每百万 Token：输入 ${money(model.pricing.inputRateMicros)} · 缓存输入 ${money(model.pricing.cachedInputRateMicros)} · 输出 ${money(model.pricing.outputRateMicros)}`
+        : '此模型计费未启用' : data.billing && Number.isSafeInteger(data.billing.balanceMicros) ? '未配置计费价格' : '价格未返回，请联系管理员确认。',
     }));
     const gateway = data.gateway || this._config.gateway || {};
     const days = Number(data.keyDefaults && data.keyDefaults.expiresInDays || 30);
     this.setData({ loggedIn: true, userLabel: user.username, keys, models,
+      modelPricingNote: data.billing && data.billing.enforceBalance === false ? '当前只统计 Token，不扣余额。以下管理员单价供启用余额计费时参考。' : '单价由管理员配置，单位为元 / 百万 Token。缺少计费价格不代表免费。',
       accountNotice: disabled(user) ? '账号已停用，所有 Key 均无法调用。请联系管理员。'
         : expired(user) ? 'API Key 授权已到期，账号仍可登录。请联系管理员续期。' : '',
       canCreateKey: !disabled(user) && !expired(user), keyDeadline: formatDate(user.keyExpiresAtLimit),
@@ -123,6 +150,7 @@ Page({
       chatCompletionsUrl: typeof gateway.chatCompletionsUrl === 'string' ? gateway.chatCompletionsUrl : '',
       baseUrl: typeof gateway.baseUrl === 'string' ? gateway.baseUrl : '',
       messagesUrl: typeof gateway.messagesUrl === 'string' ? gateway.messagesUrl : '',
+      ...billingView(data.billing),
     });
   },
   async refresh() { const result = await api('me'); this.render(result); },

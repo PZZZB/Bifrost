@@ -126,6 +126,17 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       if (!url.pathname.startsWith('/api/')) throw new BridgeError('页面不存在。', 404);
       checkBrowser(req);
       if (req.method === 'GET') {
+        if (url.pathname === '/api/client-admin/billing/unresolved') {
+          if (!clientAdmin) throw new BridgeError('接入用户管理尚未就绪。', 503, 'client_admin_unavailable');
+          json(res, 200, clientAdmin.outstanding({ limit: 50,
+            ...(url.searchParams.has('accountId') ? { accountId: url.searchParams.get('accountId') } : {}),
+            ...(url.searchParams.has('before') ? { before: url.searchParams.get('before') } : {}) })); return;
+        }
+        const billingHistory = /^\/api\/client-admin\/accounts\/([0-9a-f-]{36})\/billing\/history$/.exec(url.pathname);
+        if (billingHistory) {
+          if (!clientAdmin) throw new BridgeError('接入用户管理尚未就绪。', 503, 'client_admin_unavailable');
+          json(res, 200, clientAdmin.history(billingHistory[1], { limit: 50, ...(url.searchParams.has('before') ? { before: url.searchParams.get('before') } : {}) })); return;
+        }
         if (url.pathname === '/api/client-admin') {
           if (!clientAdmin) throw new BridgeError('当前后台尚未启用接入用户管理，请重启加载。', 503, 'client_admin_unavailable');
           json(res, 200, await clientAdmin.snapshot()); return;

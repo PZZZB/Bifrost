@@ -30,6 +30,7 @@ import { ClientAccess } from './client-access.mjs';
 import { ClientAdmin } from './client-admin.mjs';
 import { ClientStateCodec } from './client-state.mjs';
 import { startClientService } from './client-service.mjs';
+import { ClientBilling } from './client-billing.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serviceVersion = await createServiceVersion({ projectDir });
@@ -57,7 +58,7 @@ let usageLedger = null;
 try { usageLedger = await UsageLedger.open({ path: join(stateDir, 'usage.jsonl'), timeZone: 'America/Los_Angeles' }); }
 catch (error) { console.error(`Token statistics unavailable: ${redact(error.message)}`); }
 let backendRpc, configRpc, backend, integration, gateway, clientVersion, accountQuotas, serviceControl;
-let withService, cursorProvider, requestDiagnostics, clientAccess = null, clientService = null, clientAdmin = null;
+let withService, cursorProvider, requestDiagnostics, clientAccess = null, clientService = null, clientAdmin = null, clientBilling = null;
 const modelPolicy = await ModelPolicy.open({ path: join(stateDir, 'model-policy.json') });
 try { requestDiagnostics = await RequestDiagnostics.open({ path: join(stateDir, 'request-diagnostics.jsonl') }); }
 catch { console.error('Request diagnostics unavailable; model forwarding remains enabled.'); }
@@ -106,9 +107,12 @@ const clientModels = () => modelPolicy.snapshot().models.filter(model => ['B', '
     protocols: ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])] }));
 try {
   clientAccess = await ClientAccess.open({ path: join(stateDir, 'client-access.json'), allowedModelIds: () => clientModels().map(model => model.id) });
-  clientAdmin = new ClientAdmin({ access: clientAccess, getModels: clientModels,
+  try { clientBilling = await ClientBilling.open({ path: join(stateDir, 'client-billing.json') }); }
+  catch { console.error('Client billing unavailable; client inference remains closed until the ledger is repaired.'); }
+  clientAdmin = new ClientAdmin({ access: clientAccess, billing: clientBilling, getModels: clientModels,
     getEndpoint: () => clientService?.endpoint() ?? null,
-    getServerStatus: () => clientService?.status() ?? { enabled: false, ready: false, message: '用户入口尚未启动。' } });
+    getServerStatus: () => clientService?.status() ?? { enabled: false, ready: false,
+      message: clientBilling ? '用户入口尚未启动。' : '用户计费账本未就绪，入口已停止接入。' } });
 } catch { console.error('Client access unavailable; existing model routing remains enabled.'); }
 // Load optional account catalogs without delaying the gateway or starting inference.
 void modelDiscovery.refresh().catch(error => console.error(`Model discovery: ${redact(error.message)}`));
@@ -178,16 +182,20 @@ server.listen(port, '127.0.0.1', () => {
   if (delegation) console.log('Codex delegation: Magpie');
   else console.log(`Account B storage: ${bHome}`);
 });
-if (clientAccess && !delegation) {
+if (clientAccess && clientBilling && !delegation) {
   const codec = new ClientStateCodec({ secret: state.gatewayKey });
-  clientService = await startClientService({ stateDir, reservedPorts: [port, 43157], publicDir: join(projectDir, 'public'), access: clientAccess,
+  clientService = await startClientService({ stateDir, reservedPorts: [port, 43157], publicDir: join(projectDir, 'public'), access: clientAccess, billing: clientBilling,
     getModels: clientModels, csrfSecret: state.gatewayKey, isDraining: () => serviceControl?.draining === true,
+    prepareResponses: (body, scope) => codec.input(body, scope),
     requestResponses: async ({ body, scope, signal }) => {
-      const input = codec.input(body, scope);
       const response = await fetch(`${baseUrl}/responses`, { method: 'POST', signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${state.gatewayKey}`, 'x-bifrost-client-scope': scope,
-          originator: 'codex_account_bridge', 'user-agent': `codex-account-bridge/0.1.0 codex/${clientVersion}` }, body: JSON.stringify(input) });
+          originator: 'codex_account_bridge', 'user-agent': `codex-account-bridge/0.1.0 codex/${clientVersion}` }, body: JSON.stringify(body) });
       if (!response.ok) {
+        const contentType = response.headers.get('content-type') ?? '';
+        if (contentType.includes('application/json') || contentType.includes('text/event-stream')) {
+          return codec.response(response, scope, body.model);
+        }
         await response.body?.cancel().catch(() => {});
         return Response.json({ error: { message: '所选模型渠道拒绝了请求，请联系管理员查看诊断。', code: 'client_upstream_rejected' } }, { status: response.status });
       }
@@ -220,6 +228,7 @@ async function shutdown(code = 0) {
   await usageLedger?.flush();
   await requestDiagnostics?.close();
   await clientAccess?.close();
+  await clientBilling?.close();
   process.exit(code);
 }
 process.on('SIGINT', () => { void shutdown(); });
