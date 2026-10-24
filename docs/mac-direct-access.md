@@ -2,7 +2,7 @@
 
 研究日期：2026-10-25（Asia/Shanghai）。目标是让外部客户端仅填写 HTTPS Base URL 和独立 API key，直接访问 Mac 中的网关；Claude 继续运行在隔离 VM 中。
 
-**建议先验证原生 IPv6 直连，并确认能否补齐公网 IPv4。** 双栈直连可兼容更多客户端。当前已部署的 Funnel 继续提供入口；本次研究没有开放新的公网监听、配置光猫或改变 VM 网络策略。直连尚未部署、尚未完成外部测速。
+**原生 IPv6 出站已确认，公网入站目前尚未打通。** 下一步先检查光猫的入站规则和 WAN IPv4，再决定直连配置。双栈直连可兼容更多客户端。当前 Funnel 继续提供入口；短时、固定响应的探测端口已关闭，未新增持久公网监听、配置光猫或改变 VM 网络策略。Mac 上的专用 HTTPS 模板已完成回环验收，直连尚未启用、尚未完成外部测速。
 
 ## 当前证据及其适用范围
 
@@ -12,6 +12,9 @@
 | Funnel 小请求及连接复用 | 5 次模型目录请求总耗时中位数 1.376 秒 | 复用连接仍有网络等待；不包含模型推理 |
 | Mac 物理以太网 | 已有公网 IPv6，包含非 temporary、非 deprecated 的地址 | 具备尝试 IPv6 直连的地址条件；地址和运营商前缀仍可能变化 |
 | 原生 IPv6 出站对照 | socket 使用 Darwin `IPV6_BOUND_IF` 绑定 en0；国内站点 TCP 约 8 ms，含 TLS/HTTP 约 53 ms；另一个公网站点也完成 TLS/HTTP | 本机 IPv6 出站可用；不能代替外部连入、上行吞吐或跨运营商测试 |
+| 外部 IPv6 入站探测，TCP 8443 | 临时服务只返回随机测试标记，不连接 API 或 Claude；本机对照成功，上海、深圳、香港、新加坡四个节点均在 TCP 建连时超时；探测后关闭 | 当前入站不通；拦截位置仍需核实，不能直接归因于光猫或运营商 |
+| 相同四个探测节点的 IPv6 对照 | 复用节点访问另一个 IPv6 HTTPS 网站，全部返回 200 且 TLS 验证成功 | 这些节点有可用 IPv6；入站失败不能简单解释为探测节点不支持 IPv6 |
+| Funnel 宿主连接 | 在实际运行的 Mihomo 控制接口中，相关 TUN 连接选择 `DIRECT` | 这些连接未使用 Clash 代理节点；不能把现有慢速直接归因于 VPS 绕行 |
 | 光猫 | 可访问中国电信管理登录页；UPnP SSDP 和 NAT-PMP 公网地址查询未收到回答 | WAN IPv4 与入站防火墙仍需登录查看；没有发现响应不等于不支持相关功能 |
 
 IPv4 出口查询得到的公网地址可能属于上游 NAT，不能据此认定光猫持有可映射的公网 IPv4。当前没有取得光猫 WAN 状态或外部 IPv6 入站成功的证据。
@@ -43,6 +46,26 @@ Tailscale 私网直连或 frp XTCP 需要客户端安装相应组网/visitor 软
 
 IPv4/IPv6 地址证书现已可用，但 Let's Encrypt 的 IP 证书有效期约 6 天，需要自动续期；IP 验证仍要求 HTTP-01 的 80 或 TLS-ALPN-01 的 443 可达。动态地址还会导致客户端 URL 变化，因此优先采用域名和 DDNS。
 
+## 已准备的 HTTPS 入口
+
+提供 [Caddyfile 模板](../examples/mac-claude-vm/Caddyfile.direct.example) 和 [macOS 网络沙箱](../examples/mac-claude-vm/direct-tls-loopback.sb)。Caddy 2.11.7 的 macOS ARM64 官方发行文件已按官方 SHA-512 校验；当前只安装普通用户二进制，没有注册自动启动服务。
+
+模板只启用 HTTPS HTTP/1.1、HTTP/2，关闭管理接口、自动 HTTP 重定向和证书申请；上游固定为 `127.0.0.1:43158`，并固定上游 Host。网络沙箱拒绝其它出站连接，包括内部 43157 与公网。证书签发和续期需由单独的受限流程完成，不能通过放宽 TLS 进程的网络权限来代替。
+
+| 环境变量 | 内容 |
+| --- | --- |
+| `BIFROST_PUBLIC_HOST` | 实际公开域名，必须与证书匹配 |
+| `BIFROST_LISTEN_ADDRESS` | 单个明确的监听地址；回环验收用 `127.0.0.1` |
+| `BIFROST_HTTPS_PORT` | 默认 8443；回环验收用未占用的非特权端口 |
+| `BIFROST_TLS_CERT_FILE` / `BIFROST_TLS_KEY_FILE` | 证书链与私钥绝对路径，私钥置于私有目录、权限 0600 |
+| `BIFROST_TLS_STATE_DIR` | 私有状态目录，权限 0700 |
+
+使用 `sandbox-exec -f /absolute/path/direct-tls-loopback.sb /absolute/path/caddy validate --adapter caddyfile --config /absolute/path/Caddyfile` 校验，再以相同沙箱运行 `caddy run`。这些路径和变量需要在宿主的私有配置中设置。配置示例的 `bind` 指定本地地址，不等于 Darwin 接口绑定；仍需按前文检查 TUN 下的实际回包路径。
+
+回环验收使用已有域名证书，固定客户端解析到 `127.0.0.1` 并严格验证 TLS，没有改变该域名的 DNS。验证了无/错误密钥 401、有效密钥的模型目录 200、Origin 403、管理路径 404、SNI/Host 不匹配 421。另用隔离的模拟后端验证 SSE 首帧在后端放行剩余正文之前到达、完整正文一致和断开后的上游取消；模拟后端没有接触 Claude。所有临时监听已关闭。
+
+新的域名、证书自动续期、光猫入站和真实外部速度仍待配置或验收。这组回环结果只证明 HTTPS 入口的本机行为，不代表公网直连已经可用。
+
 ## API 与 VM 边界
 
 新增公网监听只接入现有 43158 外部入口，沿用独立客户端密钥、会话命名、并发/频率/正文限制及 API 路径白名单。内部 43157、VM relay、管理页、SSH 和文件共享不作为该入口的上游。
@@ -68,3 +91,4 @@ SSE 不能为了压缩或缓存而等待完整正文。Caddy 已对 `text/event-
 - [Let's Encrypt 验证方式与端口要求](https://letsencrypt.org/docs/challenge-types/)
 - [Caddy 反向代理、流式与取消行为](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#streaming)
 - [frp XTCP 的打洞限制](https://gofrp.org/en/docs/features/xtcp/)
+- [Globalping 外部探测 API](https://globalping.io/docs/api.globalping.io)

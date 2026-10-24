@@ -1,0 +1,7 @@
+(version 1)
+(allow default)
+
+; TLS certificates are provisioned separately. The TLS proxy can connect only
+; to the existing authenticated external gateway, including during startup.
+(deny network-outbound)
+(allow network-outbound (remote ip "localhost:43158"))
