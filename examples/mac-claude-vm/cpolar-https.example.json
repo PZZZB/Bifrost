@@ -1,0 +1,13 @@
+{
+  "authtoken": "REPLACE_WITH_PROVIDER_AUTHTOKEN",
+  "tunnels": {
+    "bifrost-website": {
+      "addr": "127.0.0.1:43158",
+      "proto": "http",
+      "region": "cn_vip",
+      "bind_tls": "true",
+      "inspect": "false",
+      "subdomain": "bifrost-example"
+    }
+  }
+}

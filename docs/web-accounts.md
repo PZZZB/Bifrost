@@ -16,6 +16,8 @@ node scripts/manage-web-accounts.mjs init /absolute/private/External/WebAccounts
 
 微信对非标准端口的提示出现在加载网页之前，前端代码不能关闭。分享给微信的注册页应使用标准 HTTPS 443 地址，例如 `https://accounts.example.net/account/`，不是简单从已有 TCP 隧道地址中删去端口。现有 Tailscale Funnel 可以单独提供标准端口注册页，客户端继续填写原国内 API 地址；应实测其大陆访问延迟，并保留原入口。标准端口只消除这项触发条件，不保证微信不会因其他客户端规则提示，真实手机仍需验证。国内 Sakura HTTP(S) 标准端口隧道需要自有备案域名，免费的 TCP 子域绑定仍使用分配端口。
 
+需要国内标准 443 注册入口时，可按 [cpolar 独立入口配置](mac-domestic-web.md)部署固定 HTTPS 子域名，模型 API 继续使用原线路，Funnel 保留备用。该说明包括私有配置、普通用户后台服务、流量检查关闭、边界及自动恢复验收；不改变 VM 或账号库。
+
 在已有私有 `External/gateway.json` 新增一个字段，保留其他配置：
 
 ```json

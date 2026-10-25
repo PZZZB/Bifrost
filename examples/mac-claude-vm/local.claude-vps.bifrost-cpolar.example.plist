@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.claude-vps.bifrost-cpolar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/sandbox-exec</string>
+    <string>-f</string><string>/ABSOLUTE/PRIVATE/External/Cpolar/loopback.sb</string>
+    <string>/ABSOLUTE/PRIVATE/External/Cpolar/bin/cpolar</string>
+    <string>start</string>
+    <string>-config</string><string>/ABSOLUTE/PRIVATE/External/Cpolar/persistent.json</string>
+    <string>-dashboard</string><string>off</string>
+    <string>-daemon</string><string>off</string>
+    <string>-processMode</string><string>single</string>
+    <string>-log</string><string>none</string>
+    <string>-log-level</string><string>WARNING</string>
+    <string>bifrost-website</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>WorkingDirectory</key><string>/ABSOLUTE/PRIVATE/External/Cpolar</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LANG</key><string>en_US.UTF-8</string>
+  </dict>
+  <key>StandardOutPath</key><string>/ABSOLUTE/PRIVATE/External/Cpolar/service.stdout.log</string>
+  <key>StandardErrorPath</key><string>/ABSOLUTE/PRIVATE/External/Cpolar/service.stderr.log</string>
+</dict>
+</plist>
