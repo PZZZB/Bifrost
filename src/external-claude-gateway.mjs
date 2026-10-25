@@ -12,6 +12,25 @@ const sha256 = value => createHash('sha256').update(value).digest();
 const key = value => typeof value === 'string' && /^[\x21-\x7e]{40,4096}$/.test(value);
 const fail = status => { throw Object.assign(new Error(), { status }); };
 
+/** Explicit HTTP authorities for ingress processes which preserve the public Host.
+ * These names never select a network destination; the upstream remains loopback. */
+export function validateExternalAuthorities(value = []) {
+  if (!Array.isArray(value) || value.length > 8) throw new TypeError('Invalid external authorities.');
+  const seen = new Set();
+  return value.map(authority => {
+    const match = typeof authority === 'string' && authority.length <= 259 &&
+      /^([a-z0-9.-]+)(?::([1-9][0-9]{0,4}))?$/.exec(authority);
+    const labels = match ? match[1].split('.') : [];
+    if (!match || match[1].length > 253 || labels.length < 2 ||
+        labels.some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) ||
+        !/[a-z]/.test(labels.at(-1)) || match[2] && Number(match[2]) > 65535 || seen.has(authority)) {
+      throw new TypeError('Invalid external authorities.');
+    }
+    seen.add(authority);
+    return authority;
+  });
+}
+
 export function validateExternalClients(clients) {
   if (!Array.isArray(clients) || clients.length > 100) throw new TypeError('Invalid external clients.');
   const ids = new Set(), hashes = new Set();

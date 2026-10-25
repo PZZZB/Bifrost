@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>local.claude-vps.bifrost-sakura</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/env</string>
+    <string>-u</string><string>NATFRP_TOKEN</string>
+    <string>-u</string><string>NATFRP_TARGET</string>
+    <string>-u</string><string>http_proxy</string>
+    <string>-u</string><string>https_proxy</string>
+    <string>-u</string><string>HTTP_PROXY</string>
+    <string>-u</string><string>HTTPS_PROXY</string>
+    <string>-u</string><string>ALL_PROXY</string>
+    <string>-u</string><string>all_proxy</string>
+    <string>/usr/bin/sandbox-exec</string>
+    <string>-f</string>
+    <string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/Sakura/sakura-loopback.sb</string>
+    <string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/Sakura/bin/frpc</string>
+    <string>-c</string>
+    <string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/Sakura/frpc.ini</string>
+    <string>-n</string>
+    <string>--proxy</string><string>none</string>
+    <string>--system_dns</string>
+    <string>--disable_log_color</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/Sakura</string>
+  <key>Umask</key><integer>63</integer>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ExitTimeOut</key><integer>20</integer>
+  <key>StandardOutPath</key><string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/Sakura/frpc.log</string>
+  <key>StandardErrorPath</key><string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/Sakura/frpc.log</string>
+</dict></plist>

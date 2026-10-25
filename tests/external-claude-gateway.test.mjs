@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
-import { createExternalClaudeGateway, validateExternalClients } from '../src/external-claude-gateway.mjs';
+import { createExternalClaudeGateway, validateExternalClients, validateExternalAuthorities } from '../src/external-claude-gateway.mjs';
 
 const localKey = 'local-private-fixture-'.repeat(3), sessionKey = 'namespace-fixture-'.repeat(3);
 const aliceKey = 'external-alice-fixture-'.repeat(3), bobKey = 'external-bob-fixture-'.repeat(3);
@@ -137,4 +137,41 @@ test('client configuration rejects duplicate identities, keys and invalid limits
     [client('alice', aliceKey), client('bob', aliceKey)], [client('alice', aliceKey, { maxConcurrent: 0 })],
     [client('alice', aliceKey, { requestsPerMinute: 0 })]]) assert.throws(() => validateExternalClients(value));
   assert.deepEqual(validateExternalClients([]), []);
+});
+
+test('public authority configuration cannot introduce wildcards, URLs, headers or invalid ports', () => {
+  const valid = ['api.example.net:47846', 'gateway.example.net'];
+  assert.deepEqual(validateExternalAuthorities(valid), valid);
+  assert.deepEqual(validateExternalAuthorities(), []);
+  for (const value of [null, 'api.example.net', [''], ['*.example.net'], ['https://api.example.net'],
+    ['user@api.example.net'], ['api.example.net/path'], ['api.example.net\r\nx-injected: yes'],
+    ['api.example.net:0'], ['api.example.net:65536'], ['api.example.net:0443'], ['127.0.0.1:43157'],
+    ['localhost'], ['api..example.net'], ['-api.example.net'], ['API.example.net'],
+    ['api.example.net', 'api.example.net'], Array.from({ length: 9 }, (_, i) => `api${i}.example.net`)]) {
+    assert.throws(() => validateExternalAuthorities(value));
+  }
+});
+
+test('preserved public authorities keep authentication and an explicit host and port whitelist', async t => {
+  let calls = 0;
+  const { send } = await fixture(t, { allowedHosts: ['gateway.example.net', 'api.example.net', 'api.example.net:47846'],
+    fetchImpl: async url => { assert.equal(url, 'http://127.0.0.1:43157/v1/models'); calls++; return Response.json({ data: [] }); } });
+  for (const [host, key, status] of [
+    ['gateway.example.net', aliceKey, 200], ['api.example.net:47846', aliceKey, 200],
+    ['api.example.net', aliceKey, 200], ['api.example.net:43157', aliceKey, 403],
+    ['other.example.net:47846', aliceKey, 403], ['api.example.net:47846', bobKey + 'invalid', 401],
+  ]) {
+    const response = await send('/v1/models', { key, headers: { host } });
+    assert.equal(response.status, status); await response.json();
+  }
+  assert.equal(calls, 3);
+});
+
+test('one client shares its quota across existing and additional public authorities', async t => {
+  const { send } = await fixture(t, { allowedHosts: ['gateway.example.net', 'api.example.net:47846'],
+    clients: [client('alice', aliceKey, { requestsPerMinute: 1 })] });
+  const first = await send('/v1/models', { headers: { host: 'gateway.example.net' } });
+  assert.equal(first.status, 200); await first.json();
+  const second = await send('/v1/models', { headers: { host: 'api.example.net:47846' } });
+  assert.equal(second.status, 429); await second.json();
 });

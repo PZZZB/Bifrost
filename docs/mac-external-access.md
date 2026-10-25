@@ -8,7 +8,7 @@
           → Mac 127.0.0.1:43157 → 原固定 VM 通道 → Claude → VPS
 ```
 
-大陆访问以速度为优先时，先参考 [公网 IPv4/IPv6 直连研究](mac-direct-access.md)。现有一条电信线路的模拟流式传输约为 22.7 KiB/s；这不是模型生成速度。直连尚待光猫条件与外部入站验收，Funnel 仍为当前已部署入口。
+大陆访问以速度为优先时，参考 [直连条件与入口选择](mac-direct-access.md)。Funnel 在一条电信线路的模拟流式传输约为 22.7 KiB/s；这不是模型生成速度。用户无法管理光猫、客户端只能填写 URL 和 API key，当前已部署 [国内出站隧道](mac-outbound-tunnel.md)：16 MiB 级模拟正文约 1.32 MiB/s，模拟首帧约 0.10 秒。两条入口共用原来的外部鉴权、会话与限流状态。
 
 ## 访问边界
 
@@ -41,6 +41,8 @@ tailscale --socket=/absolute/private/External/tailscaled.sock funnel \
 ```
 
 首次需在官方网页完成账号授权和 Funnel 功能启用。取得完整 DNS 名称后，填入私有网关配置的 `publicHostname` 并重启外部入口。客户端 Base URL 为 `https://<实际 DNS 名称>/v1`，Authorization 为各自的 `Bearer <外部 API key>`。
+
+保留公开 HTTP Host 的额外隧道可使用私有配置中的 `additionalPublicAuthorities`，明确列出实际域名及 `域名:实际端口`；不接受通配符、URL、用户信息或无效端口。没有列出的 Host 被拒绝，上游仍固定到 43157。此选项不创建监听端口或选择新的网络目标，原 `publicHostname` 的 Funnel Host 继续有效。
 
 登录后的验收必须包括真实公网 HTTPS、无密钥 401、错误密钥拒绝、有效密钥的模型元数据、未提供的接口拒绝、SSE 首片段/取消和 daemon 重启恢复。可以通过仅允许专用一次性测试密钥的 loopback 模拟后端测试流式，避免请求真实模型。Claude 尚未登录时，模型列表为空、推理不可用；网络通道验收不代表真实推理已通过。
 

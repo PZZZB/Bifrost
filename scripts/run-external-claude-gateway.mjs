@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import { createExternalClaudeGateway, validateExternalClients } from '../src/external-claude-gateway.mjs';
+import { createExternalClaudeGateway, validateExternalClients, validateExternalAuthorities } from '../src/external-claude-gateway.mjs';
 
 let server;
 async function privateFile(path, limit = 65_536) {
@@ -24,7 +24,8 @@ try {
     return validateExternalClients(data.clients);
   };
   await getClients();
-  const allowedHosts = ['127.0.0.1:43158', 'localhost:43158'];
+  const allowedHosts = ['127.0.0.1:43158', 'localhost:43158',
+    ...validateExternalAuthorities(config.additionalPublicAuthorities)];
   if (config.publicHostname) allowedHosts.push(config.publicHostname, `${config.publicHostname}:443`);
   server = createExternalClaudeGateway({ gatewayKey, sessionKey, getClients, allowedHosts });
   await new Promise((yes, no) => { server.once('error', no); server.listen(43158, '127.0.0.1', yes); });

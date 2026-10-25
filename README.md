@@ -273,6 +273,8 @@ Mac 可通过独立回环网关调用 host-only 网络中的 Linux ARM64 relay�
 
 需要让外部客户端访问 Mac 网关时，可另用 [Tailscale Funnel 公网入口](docs/mac-external-access.md)：不需要自有域名，使用独立客户端密钥、会话命名和限流，内部网关继续只监听回环地址。公网开通需要本人完成 Tailscale 网页认证，并单独验收 HTTPS 和流式传输。
 
+中国大陆访问以速度为优先、又无法管理光猫时，可用 [国内出站隧道](docs/mac-outbound-tunnel.md) 接入相同鉴权入口。客户端只需 HTTPS URL 和 API key；Claude 继续运行在隔离 VM，VPS 只承担原出站流量。当前网络模拟与真实模型验证范围见文档。
+
 ### 准备独立 Claude CLI 后端
 
 CLI 安装、账号登录和协议适配分别管理。`OfficialClaudeCli.ps1` 固定安装官方 Claude CLI 2.1.304，校验官方 manifest、文件大小和 SHA-256，使用独立配置目录。`Plan`、`Status` 不发起模型请求，`Prepare` 安装，`Login -Interactive` 由本人在可见窗口完成官方订阅登录。普通电脑可指定自己的安装目录；当前部署必须在虚拟机内执行。
