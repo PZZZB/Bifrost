@@ -96,6 +96,8 @@ Key 默认有效 30 天，账号可以继续登录。所有新 Key 仍受账号�
 
 Mac 统一账号模式仅发布隔离 Claude 渠道已就绪的 `Claude-*` 模型，支持 Chat Completions 和 Messages；未登录时目录为空，不回退其他账号。运维支持[加密滚动备份及恢复演练](docs/mac-operations.md)。
 
+[本地与远端混合网关架构方案](docs/hybrid-gateway-architecture.md)规划用同一内核支持公司电脑上的本地 CodeBuddy，以及按模型明确选择的远端 Bifrost。公司本地调用独立运行，远端调用继续使用 Mac 的用户权限及账本；通用混合入口尚待实现，该方案不改变当前已部署服务。
+
 CodeBuddy IDE 使用 `models.json`，WorkBuddy 使用“设置 → 模型 → 自定义”。详细字段、期限规则和部署示例见 [用户接入说明](docs/client-access.md)。[微信小程序源码](wechat-miniprogram/README.md) 复用同一用户 API；尚需 AppID、HTTPS 域名、微信开发者工具编译和发布，当前不是已上线小程序。
 
 首次启用此后端功能需重启 Bifröst。静态页面刷新只更新界面；现有服务未重启时，“接入用户”会显示待升级提示。重启时机仍由用户选择。
