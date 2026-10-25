@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { lstat, mkdir, readFile, rename, rm, open } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
+import { isAbsolute } from 'node:path';
+import { PrivateAccountFile, initializePrivateAccounts } from './private-account-files.mjs';
+export { readPrivateAccountFile } from './private-account-files.mjs';
 
 export const ACCOUNT_PRIVACY_VERSION = '2026-10-25';
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -9,25 +9,6 @@ const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const token = (value, prefix) => typeof value === 'string' && new RegExp(`^${prefix}[A-Za-z0-9_-]{43}$`).test(value);
 const accountError = (status, code) => Object.assign(new Error(code), { status, code });
 const mint = prefix => prefix + randomBytes(32).toString('base64url');
-
-export async function readPrivateAccountFile(path, limit = 262_144) {
-  if (typeof path !== 'string' || !isAbsolute(path)) throw new Error('Private file required.');
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.size > limit || process.platform !== 'win32' &&
-      ((metadata.mode & 0o077) || metadata.uid !== process.getuid())) throw new Error('Private file required.');
-  return readFile(path, 'utf8');
-}
-
-async function writeRecord(path, record) {
-  const temporary = `${path}.${randomBytes(8).toString('hex')}.tmp`;
-  let file;
-  try {
-    file = await open(temporary, 'wx', 0o600);
-    await file.writeFile(JSON.stringify(record) + '\n');
-    await file.sync(); await file.close(); file = null;
-    await rename(temporary, path);
-  } finally { await file?.close(); await rm(temporary, { force: true }); }
-}
 
 function validateRecord(record) {
   if (record?.version !== 1 || !Array.isArray(record.accounts) || record.accounts.length > 90 ||
@@ -59,7 +40,7 @@ function validateRecord(record) {
 /** Small, bounded single-Mac store. A filesystem lock serializes transactions
  * across the gateway and local administration CLI; atomic rename commits them.
  * Only HMAC identities and hashes of credentials are persisted. */
-export class WeChatAccountStore {
+export class WeChatAccountStore extends PrivateAccountFile {
   constructor({ directory, identityKey, appId, maxAccounts = 50, maxConcurrent = 1,
     requestsPerMinute = 20, sessionTtlMs = 86_400_000, clock = Date.now } = {}) {
     if (typeof directory !== 'string' || !isAbsolute(directory) ||
@@ -70,32 +51,8 @@ export class WeChatAccountStore {
         !Number.isSafeInteger(sessionTtlMs) || sessionTtlMs < 60_000 || sessionTtlMs > 7 * 86_400_000) {
       throw new TypeError('Invalid account store configuration.');
     }
-    Object.assign(this, { directory, identityKey, appId, maxAccounts, maxConcurrent, requestsPerMinute, sessionTtlMs, clock });
-    this.path = join(directory, 'accounts.json'); this.lock = join(directory, 'accounts.lock');
-  }
-
-  async read() {
-    const directory = await lstat(this.directory);
-    if (!directory.isDirectory() || process.platform !== 'win32' &&
-        ((directory.mode & 0o077) || directory.uid !== process.getuid())) throw new Error('Private directory required.');
-    return validateRecord(JSON.parse(await readPrivateAccountFile(this.path)));
-  }
-
-  async transaction(operation) {
-    await this.read();
-    let locked = false;
-    for (let attempt = 0; attempt < 80; attempt++) {
-      try { await mkdir(this.lock, { mode: 0o700 }); locked = true; break; }
-      catch (error) { if (error.code !== 'EEXIST') throw error; await delay(25); }
-    }
-    if (!locked) throw accountError(503, 'account_store_busy');
-    try {
-      const record = await this.read();
-      const result = await operation(record);
-      validateRecord(record);
-      await writeRecord(this.path, record);
-      return result;
-    } finally { await rm(this.lock, { recursive: true, force: true }); }
+    super(directory, validateRecord);
+    Object.assign(this, { identityKey, appId, maxAccounts, maxConcurrent, requestsPerMinute, sessionTtlMs, clock });
   }
 
   publicAccount(account) {
@@ -191,10 +148,5 @@ export class WeChatAccountStore {
 }
 
 export async function initializeWeChatAccounts(directory) {
-  if (typeof directory !== 'string' || !isAbsolute(directory)) throw new Error('Absolute private directory required.');
-  await mkdir(directory, { mode: 0o700 });
-  const identityKey = randomBytes(32).toString('base64url');
-  const file = await open(join(directory, 'identity.key'), 'wx', 0o600);
-  try { await file.writeFile(identityKey + '\n'); await file.sync(); } finally { await file.close(); }
-  await writeRecord(join(directory, 'accounts.json'), { version: 1, accounts: [], invites: [] });
+  await initializePrivateAccounts(directory, 'identity.key');
 }

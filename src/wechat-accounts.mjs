@@ -34,6 +34,7 @@ export function createWeChatAccounts({ store, exchangeCode, apiBaseUrl, clock = 
   }
   let windowEnd = 0, requests = 0, logins = 0, loginActive = 0;
   return {
+    maxAccounts: store.maxAccounts,
     getClients: () => store.clients(),
     async handle(req, res) {
       let reserved = false;

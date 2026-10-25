@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { createExternalClaudeGateway, validateExternalClients, validateExternalAuthorities } from '../src/external-claude-gateway.mjs';
 import { loadWeChatAccounts } from '../src/wechat-accounts.mjs';
+import { loadWebAccounts } from '../src/web-accounts.mjs';
 
 let server;
 async function privateFile(path, limit = 65_536) {
@@ -20,16 +21,23 @@ try {
   const gatewayKey = (await privateFile(config.gatewayKeyFile)).trim();
   const sessionKey = (await privateFile(config.sessionKeyFile)).trim();
   const accountApi = config.wechatAccountsFile === undefined ? null : await loadWeChatAccounts(config.wechatAccountsFile);
-  const getClients = async () => {
+  const webAccounts = config.webAccountsFile === undefined ? null : await loadWebAccounts(config.webAccountsFile);
+  const readStaticClients = async () => {
     const data = JSON.parse(await privateFile(config.clientsFile));
     if (data.version !== 1) throw new Error();
-    return validateExternalClients([...validateExternalClients(data.clients), ...(await accountApi?.getClients() ?? [])]);
+    return validateExternalClients(data.clients);
+  };
+  if ((await readStaticClients()).length + (accountApi?.maxAccounts ?? 0) + (webAccounts?.maxAccounts ?? 0) > 100) throw new Error();
+  const getClients = async () => {
+    return validateExternalClients([...await readStaticClients(), ...(await accountApi?.getClients() ?? []),
+      ...(await webAccounts?.getClients() ?? [])]);
   };
   await getClients();
   const allowedHosts = ['127.0.0.1:43158', 'localhost:43158',
     ...validateExternalAuthorities(config.additionalPublicAuthorities)];
   if (config.publicHostname) allowedHosts.push(config.publicHostname, `${config.publicHostname}:443`);
-  server = createExternalClaudeGateway({ gatewayKey, sessionKey, getClients, allowedHosts, accountApi });
+  if (webAccounts && !allowedHosts.includes(new URL(webAccounts.publicOrigin).host)) throw new Error();
+  server = createExternalClaudeGateway({ gatewayKey, sessionKey, getClients, allowedHosts, accountApi, webAccounts });
   await new Promise((yes, no) => { server.once('error', no); server.listen(43158, '127.0.0.1', yes); });
   const close = () => { server.close(); server.closeAllConnections(); };
   process.once('SIGINT', close); process.once('SIGTERM', close);

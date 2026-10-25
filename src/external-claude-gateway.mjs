@@ -64,7 +64,7 @@ function errorResponse(res, status) {
 export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients,
   allowedHosts, upstreamPort = 43157, maxConcurrent = 4, maxBodyBytes = 16 * 1024 * 1024,
   headerTimeoutMs = 20_000, requestTimeoutMs = 10 * 60_000, fetchImpl = fetch, clock = Date.now,
-  accountApi = null } = {}) {
+  accountApi = null, webAccounts = null } = {}) {
   if (!key(gatewayKey) || !key(sessionKey) || gatewayKey === sessionKey || typeof getClients !== 'function' ||
       !Array.isArray(allowedHosts) || !allowedHosts.length || allowedHosts.some(host => typeof host !== 'string' || !host) ||
       !Number.isInteger(upstreamPort) || upstreamPort < 1024 || upstreamPort > 65535 ||
@@ -85,9 +85,12 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
       for (let index = 0; index < req.rawHeaders.length; index += 2) {
         const name = req.rawHeaders[index].toLowerCase(); counts.set(name, (counts.get(name) ?? 0) + 1);
       }
-      if (counts.get('host') !== 1 || !hosts.has(req.headers.host?.toLowerCase()) ||
-          req.headers.origin !== undefined) fail(403);
+      if (counts.get('host') !== 1 || !hosts.has(req.headers.host?.toLowerCase())) fail(403);
       if (['authorization', 'x-api-key', ...SESSION_HEADERS].some(name => (counts.get(name) ?? 0) > 1)) fail(400);
+      if (webAccounts?.handles(req.url)) {
+        await webAccounts.handle(req, res); return;
+      }
+      if (req.headers.origin !== undefined) fail(403);
       if (accountApi && req.url.startsWith('/account/v1/')) {
         await accountApi.handle(req, res); return;
       }

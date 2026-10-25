@@ -14,7 +14,7 @@
 
 新增入口仅提供 `/v1/models`、`/v1/chat/completions`、`/v1/messages` 和 `/v1/messages/count_tokens`。它接受独立外部 API key，替换为本机网关密钥后转发到固定回环目标。VM relay 密钥和 Claude OAuth 不交给外部客户端。
 
-可选的[微信小程序账号服务](wechat-accounts.md)在显式配置后增加 `/account/v1/` 登录与个人密钥操作，注册用户与原静态客户端共用同一模型鉴权和会话隔离。未配置时不开放这些接口，也不要求已有客户端更换 key。
+可选的[网页注册](web-accounts.md)在显式配置后提供 `/account/` 和独立的 `/account/web/v1/` 浏览器账号接口；它只接受配置的 HTTPS Origin，模型接口仍保留原来的 Origin 拒绝。另可配置[微信小程序账号服务](wechat-accounts.md)的 `/account/v1/` 接口。注册用户与原静态客户端共用同一模型鉴权和会话隔离；未配置时不开放新增入口，已有客户端无需更换 key。
 
 每个客户端使用独立随机密钥，私有 `clients.json` 只存其 SHA-256。每个客户端默认最多 2 个并发请求、每分钟 30 次；入口总并发最多 4，请求正文最多 16 MiB，单次最长 10 分钟。新请求每次重新读取客户端列表；删除该项会拒绝后续请求，已在运行的流需要停止入口才能立即中断。请求数限制不是模型 token 或订阅费用限额。
 

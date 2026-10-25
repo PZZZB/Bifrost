@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "directory": "/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/WebAccounts",
+  "publicOrigin": "https://api.example.net:47846",
+  "apiBaseUrl": "https://api.example.net:47846/v1",
+  "maxAccounts": 50,
+  "maxConcurrent": 1,
+  "requestsPerMinute": 20,
+  "sessionTtlMs": 86400000
+}
