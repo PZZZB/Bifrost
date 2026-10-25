@@ -6,6 +6,7 @@ import { BifrostRemote } from '../providers/bifrost-remote.mjs';
 import { ModelRouter } from '../routing/model-router.mjs';
 import { createDesktopServer } from './desktop-server.mjs';
 import { loadDesktopConfig, loadDesktopIdentity, desktopCredentialStore, validateDesktopConfig } from './desktop-config.mjs';
+import { createClientRegistry } from '../clients/index.mjs';
 
 /** Assemble only selected sources. Never boots Codex RPC, VM, tunnels or Server accounts. */
 export async function startDesktop({ stateDir, config: suppliedConfig, identity: suppliedIdentity,
@@ -23,11 +24,11 @@ export async function startDesktop({ stateDir, config: suppliedConfig, identity:
         providers.push(new CodeBuddyLocal({ id: source.id, service }));
       } else {
         // This branch is not evaluated and the credential file is never opened in local-only mode.
-        providers.push(new BifrostRemote({ ...source, apiKey: await loadRemoteKey(source.id), fetchImpl }));
+        providers.push(new BifrostRemote({ ...source, apiKey: await loadRemoteKey(source.id), fetchImpl, stateSecret: identity.secret }));
       }
     }
     router = new ModelRouter({ providers, secret: identity.secret });
-    server = createDesktopServer({ router, apiKey: identity.apiKey, stateSecret: identity.secret });
+    server = createDesktopServer({ router, apiKey: identity.apiKey, stateSecret: identity.secret, clients: createClientRegistry() });
     server.listen(config.port, '127.0.0.1'); await once(server, 'listening');
     // Independent background snapshots. Starting and local inference never wait for Mac.
     void router.refresh();

@@ -56,7 +56,7 @@ async function fixture(t, { mixed = true, pendingCatalog = false, remoteInferenc
     }
     const body = JSON.parse(options.body);
     if (remoteInference) return remoteInference(url, options);
-    if (url.endsWith('/messages')) return Response.json({ type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text: 'Remote reply' }], usage: { input_tokens: 4, output_tokens: 2 } });
+    if (url.endsWith('/messages')) return Response.json({ type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text: 'Remote reply' }], stop_reason: 'end_turn', usage: { input_tokens: 4, output_tokens: 2 } });
     return Response.json({ id: 'remote-one', object: 'chat.completion', model: body.model,
       choices: [{ index: 0, message: { role: 'assistant', content: 'Remote reply' }, finish_reason: 'stop' }], usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 } });
   };
@@ -72,6 +72,10 @@ test('the single endpoint lists both sources and routes all existing local proto
   const f = await fixture(t);
   const catalog = await f.send('/v1/models'); assert.equal(catalog.status, 200);
   assert.deepEqual(catalog.data.data.map(model => model.id), [LOCAL, REMOTE]);
+  const codex = await f.send('/clients/codex/models?client_version=0.163.0');
+  assert.equal(codex.status, 200); assert.deepEqual(codex.data.models.map(model => model.slug), [LOCAL, REMOTE]);
+  assert.equal((await f.send('/clients/codex/models?target=https://attacker.test')).status, 400);
+  assert.equal((await f.send('/clients/unknown/models')).status, 404);
   for (const [path, body] of [['/v1/messages', message(LOCAL)], ['/v1/chat/completions', { model: LOCAL, messages: message(LOCAL).messages }],
     ['/v1/responses', { model: LOCAL, input: 'hello', store: false }]]) {
     const reply = await f.send(path, { method: 'POST', body, headers: { 'x-forwarded-host': 'attacker.test', 'x-upstream-url': 'https://attacker.test' } });
@@ -92,8 +96,10 @@ test('remote calls use the registered native ID and personal Mac Key exactly onc
   assert.notEqual(calls[0].options.headers['x-session-id'], 'personal-chat');
   assert.equal(JSON.parse(calls[0].options.body).model, 'Claude-sonnet'); assert.equal(f.localCalls.length, 0);
   assert.deepEqual(await readdir(f.directory), []);
-  const unsupported = await f.send('/v1/responses', { method: 'POST', body: { model: REMOTE, input: 'hello' } });
-  assert.equal(unsupported.status, 501); assert.equal(f.remoteCalls.filter(call => call.options.method === 'POST').length, 1);
+  const adapted = await f.send('/v1/responses', { method: 'POST', body: { model: REMOTE, input: 'hello', store: false } });
+  assert.equal(adapted.status, 200, adapted.text); assert.equal(adapted.data.model, REMOTE);
+  assert.equal(f.remoteCalls.filter(call => call.options.method === 'POST').length, 2);
+  assert.equal(f.remoteCalls.at(-1).url, 'https://mac.example.test/v1/messages');
 });
 test('local-only never reads any remote Key or contacts Mac, and a stalled remote catalog cannot delay a local call', async t => {
   const local = await fixture(t, { mixed: false });

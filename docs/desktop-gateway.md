@@ -54,7 +54,33 @@ npm run start:desktop
 
 客户端仍填写同一个本地 URL 和本地 `bdk_` Key。Mac 已就绪且本人有权访问的模型会自动加入同一列表。列表刷新由客户端控制；部分客户端需要手动刷新模型目录。未登录 Claude 或没有模型权限时，远端列表为空，不生成虚假的占位模型。
 
-第一版远端默认声明 Chat Completions、Messages；当前 Mac Claude 不支持 Responses。若客户端只支持 Responses，就不能调用此 Claude 来源，网关明确返回 501，不伪造协议兼容。公司来源继续复用现有三种协议适配。
+远端的原生协议仍默认声明 Chat Completions、Messages；Desktop 现已通过通用适配器，将远端 Messages 转为 Responses，让 Codex 可以调用。Mac 服务器本身无需改变，适配不增加一次推理或第二本账。公司来源继续复用现有三种协议适配。
+
+## 接入 Codex
+
+先保持 Desktop 正在运行，在另一个 PowerShell 中启动 Codex CLI：
+
+```powershell
+npm run desktop -- client codex
+```
+
+它使用临时 Provider 参数，模型和目录均指向同一个本地网关，不写日常 Codex 配置、账号登录、审批或沙箱设置。首次从当前可用模型中选默认项，之后在 Codex 模型选择器直接选择本地或远端模型。Windows 启动器直接定位原生 `codex.exe`，避免脚本 shim 改坏参数引号；若自动定位失败，可将 `CODEX_BINARY` 指向已安装的 `codex.exe`。需要传 Codex 参数时放在第二个 `--` 后，例如：
+
+```powershell
+npm run desktop -- client codex -- --model remote/bifrost/Claude-sonnet
+```
+
+Codex 使用原生 `model_catalog_url` 读取合并列表，而不是把通用 `/v1/models` 当作 Codex 目录。来源每 15 秒独立刷新；Codex 自己有目录缓存，来源变化后可能需要刷新模型列表或重新启动客户端。
+
+如果使用 Codex 桌面 App 或 IDE 扩展，可先生成本机适用的原生配置：
+
+```powershell
+npm run desktop -- client-config codex
+```
+
+输出无秘密的 TOML 配置项，需合并到该客户端实际使用的用户级配置根层，不能盲目附加到已有 TOML 表格中或覆盖其他设置。配置以 `auth.command` 调用当前 Node 和本地 `desktop.mjs key`，仅获取本地 `bdk_` Key；不把 Key 写进 TOML、命令参数或永久环境变量。移动仓库或 Node 路径后应重新生成。不同 Codex 界面和版本读取配置的时机仍需现场确认，可能需要重启。
+
+可先运行 `npm run verify:desktop-codex` 检查已安装版本的目录、认证及完整协议能力；它使用临时目录和模拟上游，不登录真实账号、不消耗模型额度。客户端扩展机制见[客户端适配边界](client-adapters.md)。
 
 ## 配置、凭据与状态
 
@@ -66,7 +92,7 @@ npm run start:desktop
 
 这些是网关自己创建的凭据，不读取其他软件的登录密钥。DPAPI 绑定当前 Windows 用户；不能把加密文件拷到另一台电脑或另一用户后当成可直接复用的登录。其他系统当前明确拒绝启动，不保存明文替代品。
 
-已鉴权本地状态为 `GET /desktop/status`，只返回来源状态、合并模型快照和进行中的请求数，不包含上游 Key、主机地址、请求正文或对话记录。第一版配置使用 CLI；网页设计、来源设置界面及 Windows 自动启动可后续接入，当前不会修改已有网页 UI。
+已鉴权本地状态为 `GET /desktop/status`，只返回来源状态、客户端适配列表、合并模型快照和进行中的请求数，不包含上游 Key、主机地址、请求正文或对话记录。第一版配置使用 CLI；网页设计、来源设置界面及 Windows 自动启动可后续接入，当前不会修改已有网页 UI。
 
 ## 调用边界与故障
 
@@ -83,4 +109,4 @@ npm run start:desktop
 
 `node --test tests/desktop-*.test.mjs` 使用真实 HTTP 回环监听和既有 CodeBuddy 协议适配器，配合模拟公司/远端上游，验证合并目录、三种本地协议、单次远端分派、凭据与状态隔离、故障不回退和取消传递。
 
-这些测试没有登录真实公司账号，也没有消耗模型额度。公司 Windows 的 DPAPI 真正往返、员工登录、真实内网路由及额度、客户端模型展示、远端 Claude 完整工具回合仍需现场验收；不会把 Mac 上的模拟测试报告为公司环境已经可用。
+这些测试没有登录真实公司账号，也没有消耗模型额度。另已用当前 Mac 的实际 Codex 程序完成合并目录、命令式认证、两种来源的真实本地工具往返和加密状态接续。公司 Windows 的 DPAPI 真正往返、员工登录、真实内网路由及额度、桌面客户端模型展示、远端 Claude 的真实工具回合仍需现场验收；不会把 Mac 上的模拟上游验证报告为公司环境已经可用。

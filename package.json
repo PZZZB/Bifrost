@@ -18,6 +18,7 @@
     "test:accounts": "node --test tests/email-address.test.mjs tests/web-accounts.test.mjs tests/wechat-*.test.mjs tests/external-claude-gateway.test.mjs",
     "verify:web-accounts": "node scripts/verify-web-accounts-offline.mjs",
     "verify:codex": "node scripts/verify-codex.mjs",
+    "verify:desktop-codex": "node scripts/verify-desktop-codex-offline.mjs",
     "check": "node --check src/main.mjs && node --check public/app.js && node --check public/accounts/app.js"
   },
   "dependencies": {

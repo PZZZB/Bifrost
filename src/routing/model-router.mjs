@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { BridgeError } from '../storage.mjs';
+import { modelCapabilities } from './model-capabilities.mjs';
 
 export const PROTOCOL_PATHS = Object.freeze({ 'chat-completions': '/v1/chat/completions',
   responses: '/v1/responses', messages: '/v1/messages' });
@@ -40,7 +41,7 @@ export class ModelRouter {
         routes.set(id, { id, upstreamModel: model.id, provider, generation: String(provider.generation),
           public: { id, object: 'model', owned_by: 'bifrost', name: `${local ? '本地 · CodeBuddy' : '远端 · Bifrost'} · ${model.name || model.id}`,
             source: { id: provider.id, kind: provider.kind, location: local ? 'local' : 'remote' },
-            protocols: [...new Set(model.protocols)], billing_authority: local ? 'company' : 'remote-bifrost' } });
+            protocols: [...new Set(model.protocols)], capabilities: modelCapabilities(model.capabilities), billing_authority: local ? 'company' : 'remote-bifrost' } });
       }
     }
     return routes;

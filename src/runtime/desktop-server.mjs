@@ -22,7 +22,7 @@ async function jsonBody(req) {
 }
 
 /** Personal loopback endpoint. No public registration, account database or billing ledger. */
-export function createDesktopServer({ router, apiKey, stateSecret, maxConcurrent = 4 } = {}) {
+export function createDesktopServer({ router, apiKey, stateSecret, maxConcurrent = 4, clients = null } = {}) {
   if (!/^bdk_[A-Za-z0-9_-]{43}$/.test(apiKey) || !Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 16) throw new TypeError('Invalid desktop listener configuration.');
   const wire = new DesktopWire({ secret: stateSecret }), active = new Set();
   let draining = false;
@@ -41,11 +41,15 @@ export function createDesktopServer({ router, apiKey, stateSecret, maxConcurrent
       if (bearer !== undefined && !/^Bearer bdk_[A-Za-z0-9_-]{43}$/.test(bearer)) throw fail('本地 API Key 无效。', 401, 'desktop_key_invalid');
       const supplied = [bearer?.slice(7), req.headers['x-api-key']].filter(value => value !== undefined);
       if (!supplied.length || supplied.some(value => !same(value, apiKey))) throw fail('本地 API Key 无效。', 401, 'desktop_key_invalid');
-      if (!req.url?.startsWith('/') || req.url.startsWith('//') || /[?#\\]/.test(req.url)) throw fail('请求目标不允许。', 404, 'desktop_route_not_found');
+      if (!req.url?.startsWith('/') || req.url.startsWith('//') || /[#\\]/.test(req.url)) throw fail('请求目标不允许。', 404, 'desktop_route_not_found');
+      const url = new URL(req.url, `http://127.0.0.1:${server.address().port}`);
+      const catalog = /^\/clients\/([a-z][a-z0-9-]{0,31})\/models$/.exec(url.pathname);
+      if (catalog && req.method === 'GET' && clients) { send(res, 200, clients.catalog(catalog[1], router.models(), url.searchParams)); return; }
+      if (url.search) throw fail('请求目标不允许。', 404, 'desktop_route_not_found');
       if (draining) throw fail('本地网关正在停止。', 503, 'desktop_draining');
       if (req.url === '/v1/models' && req.method === 'GET') { send(res, 200, { object: 'list', data: router.models() }); return; }
       if (req.url === '/desktop/status' && req.method === 'GET') {
-        send(res, 200, { role: 'desktop', sources: router.status(), models: router.models(), activeRequests: active.size }); return;
+        send(res, 200, { role: 'desktop', sources: router.status(), clients: clients?.list() ?? [], models: router.models(), activeRequests: active.size }); return;
       }
       const control = /^\/desktop\/sources\/([a-z][a-z0-9-]{0,31})\/(login|logout|refresh)$/.exec(req.url);
       if (control && req.method === 'POST') {

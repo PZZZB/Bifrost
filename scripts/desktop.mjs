@@ -1,10 +1,12 @@
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { connect } from 'node:net';
 import { desktopStateDir, initializeDesktop, loadDesktopConfig, loadDesktopIdentity, desktopCredentialStore, validateDesktopConfig } from '../src/runtime/desktop-config.mjs';
 import { writeJson } from '../src/storage.mjs';
 import { startDesktop } from '../src/runtime/desktop.mjs';
+import { fileURLToPath } from 'node:url';
+import { createClientRegistry } from '../src/clients/index.mjs';
 
 async function ensureStopped(port) {
   const busy = await new Promise(resolve => {
@@ -22,10 +24,12 @@ async function keyFromStdin() {
   return key;
 }
 async function run() {
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: { url: { type: 'string' }, source: { type: 'string' }, 'key-stdin': { type: 'boolean' } } });
-  const command = positionals[0] ?? 'help', stateDir = desktopStateDir();
+  const args = process.argv.slice(2), separator = args.indexOf('--');
+  const { values, positionals } = parseArgs({ args: separator < 0 ? args : args.slice(0, separator), allowPositionals: true,
+    options: { url: { type: 'string' }, source: { type: 'string' }, 'key-stdin': { type: 'boolean' }, 'state-dir': { type: 'string' } } });
+  const command = positionals[0] ?? 'help', stateDir = values['state-dir'] ? resolve(values['state-dir']) : desktopStateDir();
   if (command === 'help') {
-    console.log('Bifrost Desktop (Windows)\ninit | start | key | status | login | logout | refresh | remote --url HTTPS/v1 --key-stdin\n远端用户 Key 仅通过标准输入接收，不放在命令参数或配置文件中。'); return;
+    console.log('Bifrost Desktop (Windows)\ninit | start | key | status | login | logout | refresh | remote --url HTTPS/v1 --key-stdin\nclient-config <client> | client <client> [-- client arguments]\n远端用户 Key 仅通过标准输入接收，不放在命令参数或配置文件中。'); return;
   }
   if (process.platform !== 'win32') throw new Error('Desktop 当前使用 Windows 当前用户 DPAPI；本机测试不能替代 Windows 实际登录验收。');
   if (command === 'init') {
@@ -47,6 +51,28 @@ async function run() {
   }
   const identity = await loadDesktopIdentity(stateDir);
   if (command === 'key') { console.log(identity.apiKey); return; }
+  if (['client-config', 'client'].includes(command)) {
+    const client = createClientRegistry().profile(positionals[1]);
+    if (typeof client.configuration !== 'function') throw new Error('此客户端暂未提供配置生成器。');
+    const baseUrl = `http://127.0.0.1:${config.port}/v1`;
+    let model;
+    if (command === 'client') {
+      const response = await fetch(`${baseUrl}/models`, { redirect: 'manual', headers: { authorization: `Bearer ${identity.apiKey}` }, signal: AbortSignal.timeout(5000) });
+      if (!response.ok) throw new Error('请先启动本地网关。');
+      const catalog = await response.json();
+      model = catalog.data?.find(model => client.protocols.some(protocol => model.protocols.includes(protocol)))?.id;
+      if (!model) throw new Error('尚无适用于此客户端的可用模型，请先完成来源授权并刷新目录。');
+    }
+    const settings = client.configuration({ baseUrl, model,
+      tokenCommand: { command: process.execPath, args: [fileURLToPath(import.meta.url), 'key', '--state-dir', stateDir] } });
+    if (command === 'client-config') { console.log(settings.text); return; }
+    const clientArgs = [...settings.args, ...(separator < 0 ? [] : args.slice(separator + 1))];
+    const binary = client.resolveBinary ? await client.resolveBinary() : (client.binaryEnv && process.env[client.binaryEnv]) || settings.command;
+    // Direct native execution preserves structured TOML arguments, including paths with spaces.
+    // Only non-secret settings are present; Codex obtains its local Key through DPAPI.
+    const child = spawn(binary, clientArgs, { stdio: 'inherit' });
+    process.exitCode = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve(code ?? 1)); }); return;
+  }
   if (command === 'start') {
     const runtime = await startDesktop({ stateDir, config, identity });
     console.log(`Bifrost Desktop: ${runtime.baseUrl}\n本地与远端模型合并到同一个列表。按 Ctrl+C 停止。`);

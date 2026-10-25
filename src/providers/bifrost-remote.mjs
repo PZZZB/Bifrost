@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { BridgeError } from '../storage.mjs';
 import { modelId, PROTOCOL_PATHS } from '../routing/model-router.mjs';
+import { MessagesResponsesAdapter } from '../protocols/messages-responses-adapter.mjs';
+import { modelCapabilities } from '../routing/model-capabilities.mjs';
 
 const fail = (status = 503, code = 'desktop_remote_unavailable') => new BridgeError('远端 Bifrost 暂不可用，请检查网络、用户 Key 或模型权限。', status, code);
 export function validateBifrostUrl(value) {
@@ -25,14 +27,19 @@ async function boundedJson(response, maximum = 256 * 1024) {
 /** Personal user Key, fixed user API paths, verified TLS, no redirects or retries. */
 export class BifrostRemote {
   #url; #key; #fetch; #models = []; #pending = null; #abort = new AbortController(); #state = 'not_refreshed';
-  constructor({ id = 'bifrost', baseUrl, apiKey, protocols = ['chat-completions', 'messages'], fetchImpl = fetch } = {}) {
+  #responses;
+  constructor({ id = 'bifrost', baseUrl, apiKey, protocols = ['chat-completions', 'messages'], fetchImpl = fetch, stateSecret } = {}) {
     this.id = id; this.kind = 'bifrost-remote'; this.#url = validateBifrostUrl(baseUrl);
     if (typeof apiKey !== 'string' || !/^bfk_[A-Za-z0-9_-]{43}$/.test(apiKey) || !Array.isArray(protocols) || !protocols.length
       || protocols.some(value => !Object.hasOwn(PROTOCOL_PATHS, value))) throw new TypeError('A personal Bifrost user Key and explicit protocols are required.');
     this.#key = apiKey; this.#fetch = fetchImpl; this.protocols = [...new Set(protocols)];
     this.generation = createHash('sha256').update(JSON.stringify([this.#url, apiKey])).digest('hex');
+    if (stateSecret) this.#responses = new MessagesResponsesAdapter({ stateSecret, requestMessages: request => this.#requestNative('messages', request) });
   }
-  catalogSnapshot() { return structuredClone(this.#models); }
+  catalogSnapshot() {
+    return structuredClone(this.#models).map(model => ({ ...model,
+      protocols: [...new Set([...model.protocols, ...(this.#responses && model.protocols.includes('messages') ? ['responses'] : [])])] }));
+  }
   status() { return { state: this.#state, available: this.#state === 'ready', modelCount: this.#models.length, billingAuthority: 'remote-bifrost' }; }
   refreshCatalog(signal) {
     if (this.#pending) return this.#pending;
@@ -51,7 +58,7 @@ export class BifrostRemote {
           // An advertised capability may narrow the owner's configuration, never expand it.
           const protocols = Array.isArray(model.protocols) ? this.protocols.filter(value => model.protocols.includes(value)) : this.protocols;
           return { id: model.id, name: typeof model.name === 'string' && model.name.length < 200 ? model.name : model.id,
-            available: model.available !== false, protocols };
+            available: model.available !== false, protocols, capabilities: modelCapabilities(model.capabilities) };
         }).filter(model => model.protocols.length);
         this.#models = models; this.#state = 'ready';
       } catch {
@@ -61,6 +68,13 @@ export class BifrostRemote {
     return this.#pending;
   }
   async request(protocol, { body, scope, session, signal } = {}) {
+    const native = this.#models.find(model => model.id === body?.model && model.available);
+    if (protocol === 'responses' && !native?.protocols.includes('responses') && native?.protocols.includes('messages') && this.#responses) {
+      return this.#responses.request({ body, scope, session, signal, capabilities: native.capabilities });
+    }
+    return this.#requestNative(protocol, { body, scope, session, signal });
+  }
+  async #requestNative(protocol, { body, scope, session, signal } = {}) {
     if (this.#abort.signal.aborted || !this.#models.some(model => model.id === body.model && model.available && model.protocols.includes(protocol))) throw fail();
     let response;
     try {

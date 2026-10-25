@@ -25,7 +25,10 @@ export class CodeBuddyLocal {
         const models = await this.#service.getModels({ signal: AbortSignal.any([this.#abort.signal, AbortSignal.timeout(5000), ...(signal ? [signal] : [])]) });
         if (generation !== this.generation || this.#abort.signal.aborted) return;
         this.#models = models.filter(model => model.available).map(model => ({ id: model.id, name: model.name,
-          available: true, protocols: ['chat-completions', 'responses', 'messages'] }));
+          available: true, protocols: ['chat-completions', 'responses', 'messages'],
+          capabilities: { contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens,
+            inputModalities: model.inputModalities, reasoningEfforts: model.efforts,
+            defaultReasoningEffort: model.defaultEffort, reasoningSummaries: model.supportsReasoningSummary === true } }));
         this.#version = generation; this.#state = 'ready';
       } catch { this.#models = []; this.#version = generation; this.#state = 'unavailable'; }
       finally { this.#pending = null; }

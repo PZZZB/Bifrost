@@ -3,7 +3,7 @@ import { clientScope as validateClientScope } from './client-scope.mjs';
 import { mkdir, readFile, writeFile, unlink, lstat, realpath, readdir, rm } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { cursorEffortParameter, resolveCursorModel, cursorImageCapability, cursorModelAvailability } from './cursor-service.mjs';
-import { translateResponses, ResponsesConversion, encodeResponsesEvent } from './codebuddy-responses.mjs';
+import { translateResponses, ResponsesConversion, encodeResponsesEvent } from './protocols/responses-messages.mjs';
 import { imagePart, ImageConversionError } from './codebuddy-images.mjs';
 import { writeJson } from './storage.mjs';
 import { describeCursorError } from './cursor-errors.mjs';

@@ -1,6 +1,6 @@
 # 本地与远端混合网关架构
 
-状态：Windows Desktop 的基础运行入口、合并目录、模型路由和两种 Provider 已实现，使用方式见 [Desktop 使用说明](desktop-gateway.md)。已通过模拟上游的离线验收；真实公司员工登录、目录、额度及完整远端 Claude 调用仍需在公司电脑验收。现有 Mac 服务、账号库及虚拟机网络保持当前部署。
+状态：Windows Desktop 的基础运行入口、合并目录、模型路由和两种 Provider 已实现，并已增加独立客户端适配及通用 Responses 转换，使用方式见 [Desktop 使用说明](desktop-gateway.md)。已通过模拟上游的离线验收，以及实际 Codex 引擎的合并目录和双来源工具往返；真实公司员工登录、目录、额度及完整远端 Claude 调用仍需在公司电脑验收。现有 Mac 服务、账号库及虚拟机网络保持当前部署。
 
 ## 使用方式
 
@@ -41,6 +41,8 @@ CodeBuddyLocal / BifrostRemote / 现有隔离 Claude 连接
 ```
 
 Runtime 负责装配；Core 不根据 macOS、Windows 或机器名决定路由。HTTP 处理器不判断“Claude 就走某个端口”，而是通过已解析的 Provider 及协议能力分派。Provider 管理自己的授权、传输与生命周期。
+
+客户端也不进入路由判断。`src/clients/` 通过独立注册表提供目录格式及配置，`src/protocols/` 提供跨客户端复用的协议转换；新增客户端通常只注册适配，不修改公司授权、Mac 账本或模型分派。详见[客户端适配边界](client-adapters.md)。
 
 Provider 的最小契约：
 
@@ -102,7 +104,7 @@ UI 统一显示调用记录，但保留来源和额度归属。远端余额及�
 | 来源 | 当前可复用的协议能力 | 设计要求 |
 | --- | --- | --- |
 | 本地 CodeBuddy | 已有 Responses、Chat Completions、Messages 适配 | 复用现有实现及账号实际模型能力 |
-| 当前 Mac Claude | Chat Completions、Messages | 不宣称支持 Responses；未支持时明确拒绝 |
+| 当前 Mac Claude | 原生 Chat Completions、Messages；Desktop 可将 Messages 转为 Responses | 明确区分原生与转换；由通用适配器支持 Codex，Mac 不重复计费 |
 | 以后新增来源 | 来自对应适配器 | 不靠模型名称猜测能力 |
 
 BifrostRemote 尽量保持同一协议直通，只映射模型身份及必要会话信息；既有 CodeBuddy 适配器继续处理工具、思考与协议转换。SSE、背压、取消和终态必须保留。目录读取可以有边界内的重试，推理请求不自动重试或跨来源重放。
@@ -140,7 +142,8 @@ Server 保留现有注册页、ClientAccess、ClientBilling、隧道及隔离 Cl
 | --- | --- | --- |
 | `codebuddy-service.mjs`、`employee-oauth.mjs` | 独立授权、目录、刷新和换号代次 | Desktop 已按需启动；待验证实际公司环境 |
 | `providers/codebuddy-local.mjs` | 复用既有模型、工具、Chat / Responses / Messages 适配 | 不重复实现 OAuth 或协议转换 |
-| `providers/bifrost-remote.mjs` | 普通用户 Key、固定 HTTPS 模型 API、独立目录 | 可继续扩展已验证协议能力 |
+| `providers/bifrost-remote.mjs` | 普通用户 Key、固定 HTTPS 模型 API、独立目录 | Messages 可经通用适配器提供 Responses，不增加上游调用 |
+| `clients/`、`protocols/` | 客户端目录与配置；统一转换、状态和流式协议 | 后续客户端注册目录 / 配置；新协议补通用转换及验收 |
 | `routing/model-router.mjs`、`routing/desktop-wire.mjs` | 合并目录、唯一来源、会话绑定、SSE 与状态封套 | Server 将来可渐进接入同一注册契约 |
 | `runtime/desktop*.mjs` | 按配置装配、个人回环 API、独立私有状态 | 后续图形来源设置、Windows 自动启动 |
 | `client-server.mjs`、`client-chat.mjs` | Server 用户模型 API、协议处理、SSE | Server 暂沿用现有分派；Desktop 复用 Chat 适配器 |
