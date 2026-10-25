@@ -21,7 +21,7 @@
 | XorPay | FAQ 列开户费 100 元；体验版月费 0 元，平台费 1.2% 加渠道费 0.38%，按页面相加约 1.58%；有更低平台费但收月费的套餐。列有个人接入、微信内 JSAPI/收银台、支付宝和签名通知/查单接口。 | 继续核实的候选。FAQ 把“小微”定义为实体特约商户；尚未确认可承接个人纯线上模型/API 额度。还需确认 FAQ 的低频交易回收、重新开户收费规则是否适用，及 0.38% 是否真适用于本人的业务。 |
 | YunGouOS | 官网列认证服务费最低 200 元起、渠道费最低 0.38% 起；个人接口费需另外取得明确报价。主体自披露为南京新云宝软件有限公司，有公开 SDK、API 文档和合作协议。 | 继续核实的候选。“个体户、企业最低 0 平台费”不能套给个人；官网不同产品页的费用也不能直接拼成个人线上业务报价。需核对收单机构、本人商户号、经营类目和实际完整费率。 |
 | 虎皮椒 | 官网列开户费、平台交易费 1–2% 加官方费率 0.6%；微信、支付宝的开户展示价格不同。 | 不是明显低价方案。官网仍列 2025-11-06 微信唤醒和小程序支付关闭通知；该通知不等于微信内 JSAPI 全部停用。JSAPI 实际通道、是否已恢复、API 业务准入需确认。 |
-| 面包多 Pay | 文档列每笔 2% + 0.1 元；开户审核免费。支持个人申请、微信 JSAPI 与支付宝；须先通过业务及渠道审核。 | 用户已选择推进申请。其通知文档没有列签名验证机制，通知只能触发服务器用私有凭据查单，不能直接入账。还有业务预审与闪电结算开通条件，不能按营销页的分钟级承诺安排上线。 |
+| 面包多 Pay | 文档列每笔 2% + 0.1 元；开户审核免费。支持个人申请、微信 JSAPI 与支付宝；须先通过业务及渠道审核。 | 已登录，正常申请先被手机号绑定校验拦截。实际入口还列售出超过 10 份、注册超过一个月等条件；零订单开发者能否受理尚未确认。通知没有公开文档列明的签名机制，须用私有凭据查单后才可入账。不能按营销页的分钟级承诺安排上线。 |
 | PayJS | 当前官网写明已停止运营，仅保留部分线下设备厂商用户。 | 排除新接入。 |
 
 官方页面：[XorPay 费用与个人规则](https://xorpay.com/doc/faq.html)、[XorPay 网站/软件接入](https://xorpay.com/doc/product.html)、[签名通知](https://xorpay.com/doc/notify.html)、[查单](https://xorpay.com/doc/query.html)、[服务协议](https://xorpay.com/htdocs/agree.html)；[YunGouOS 官网](https://merchant.yungouos.com/)、[公开 SDK](https://github.com/YunGouOS/YunGouOS-PAY-SDK)、[使用规则](https://open.pay.yungouos.com/#/api/rule)；[虎皮椒费用](https://www.xunhupay.com/)、[停用通知](https://www.xunhupay.com/334.html)；[面包多审核](https://doc.mbd.pub/fu-wu-kai-tong)、[费用](https://doc.mbd.pub/untitled)、[通知](https://doc.mbd.pub/api/webhook-yi-bu-tong-zhi)、[查询](https://doc.mbd.pub/api/ding-dan-cha-xun)；[PayJS 当前状态](https://payjs.cn/)。
