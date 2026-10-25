@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "port": 43160,
+  "sources": [
+    { "id": "codebuddy", "kind": "codebuddy-local" },
+    {
+      "id": "bifrost",
+      "kind": "bifrost-remote",
+      "baseUrl": "https://gateway.example.com/v1",
+      "protocols": ["chat-completions", "messages"]
+    }
+  ]
+}

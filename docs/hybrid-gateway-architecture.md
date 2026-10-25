@@ -1,6 +1,6 @@
 # 本地与远端混合网关架构
 
-状态：设计方案。以下配置和接口是待实现的契约，不是当前已上线功能；本次文档修改不改变 Mac 的服务、路由、账号库或虚拟机网络。
+状态：Windows Desktop 的基础运行入口、合并目录、模型路由和两种 Provider 已实现，使用方式见 [Desktop 使用说明](desktop-gateway.md)。已通过模拟上游的离线验收；真实公司员工登录、目录、额度及完整远端 Claude 调用仍需在公司电脑验收。现有 Mac 服务、账号库及虚拟机网络保持当前部署。
 
 ## 使用方式
 
@@ -9,7 +9,7 @@
 - **Desktop**：运行在本人公司电脑上，仅监听回环地址。直接连接本人获准使用的公司 CodeBuddy；可选连接远端 Bifrost。
 - **Server**：运行在现有 Mac 上，服务公网注册用户，继续管理账号、模型权限、限额和计费，并连接现有隔离 Claude。
 
-公司电脑的客户端填写一个本地地址和本地 Key，在模型列表中选择来源。其他用户继续填写 Mac 的公网地址和各自的 Bifrost Key，无需安装 Desktop。
+公司电脑的客户端只填写一个本地地址和本地 Key，`GET /v1/models` 同时列出公司及远端的可用模型。用户直接选模型，不切换内外网模式、来源页或客户端地址；同名模型标明来源和额度归属。选择模型后，路由自动确定唯一 Provider。其他用户继续填写 Mac 的公网地址和各自的 Bifrost Key，无需安装 Desktop。
 
 ```mermaid
 flowchart LR
@@ -56,18 +56,18 @@ status() / close()             状态及资源回收
 
 ## 模型身份与会话
 
-本地目录建议使用来源命名空间，UI 始终显示“本地 / 远端”及额度来源。以下是规划示例：
+本地目录使用来源命名空间，模型描述显示本地 / 远端及额度来源。以下是实际 ID 格式示例，具体模型取决于账号返回的可用目录：
 
 | 客户端可见 ID | UI 名称 | 实际绑定 |
 | --- | --- | --- |
-| `local/codebuddy/<model>` | 本地 · CodeBuddy · 模型名称 | 指定 CodeBuddy 实例及其目录中的准确 ID |
+| `local/codebuddy/CodeBuddy-<model>` | 本地 · CodeBuddy · 模型名称 | 指定 CodeBuddy 实例及其目录中的准确别名 |
 | `remote/bifrost/Claude-sonnet` | 远端 · Bifrost · Claude Sonnet | 指定远端实例的 `Claude-sonnet` |
 
 别名不携带 URL。ModelRouter 查找已登记映射，不把前缀、请求头、metadata 或请求正文转换为网络目标。重复别名拒绝加载。已有模型 ID 可保留为兼容别名，但必须绑定明确来源。
 
 Desktop 将外层别名映射回上游实际 ID。Mac 仍收到现有 `Claude-*` ID，继续用现有模型白名单和权限检查，不需要为本地命名空间放宽 Mac 的授权规则。
 
-会话状态绑定调用者、会话、路由、上游模型及来源授权代次。工具结果、思考签名、opaque state 不跨来源迁移。远端返回的加密状态保持不透明，Desktop 不尝试解密。路由重绑或换号后，不能静默续接旧会话；需要明确结束旧会话或拒绝无效状态。
+会话状态绑定调用者、会话、路由、上游模型及来源授权代次。Messages 思考签名、redacted thinking 及 Responses opaque state 加一层 Desktop 加密封套，内部上游状态保持不透明；Desktop 不解密供应方状态。显式 `X-Session-Id` 已绑定其他模型或授权时返回 409，换来源应新建聊天。即使不提供该头，封套和既有 CodeBuddy Chat 工具缓存仍按路由及授权隔离；客户端显式提交的普通消息历史由使用者自行管理。
 
 ## 身份、凭据与计费
 
@@ -93,7 +93,7 @@ UI 统一显示调用记录，但保留来源和额度归属。远端余额及�
 
 ## 网络及协议
 
-本地请求从公司电脑发往公司 CodeBuddy 的实际接口。Provider 使用独立传输配置，依照公司 DNS、认证和证书链工作，不借用 Mac 的 VPS，也不通过修改整个进程的代理环境切换两种来源。公司侧 DNS、真实接口、员工身份及额度来源，需要在公司机器上确认；本地运行不自动证明上游完全处于内网。
+本地请求从公司电脑发往公司 CodeBuddy 的实际接口。Provider 使用独立传输配置，依照公司 DNS、认证和证书链工作，不借用 Mac 的 VPS，也不通过修改整个进程的代理环境切换两种来源。现有员工授权模块仍使用其固定腾讯接口契约，不能把它当成已验证的任意内网 API。公司侧 DNS、真实接口、员工身份及额度来源，需要在公司机器上确认；本地运行不自动证明上游完全处于内网。
 
 远端连接器使用配置好的 HTTPS origin 和独立凭据，校验证书、拒绝跨目标重定向，只开放已实现的模型 API。目标来自私有配置，不接受客户端指定。公司凭据、内网地址和内部目录不上传 Mac。
 
@@ -109,53 +109,55 @@ BifrostRemote 尽量保持同一协议直通，只映射模型身份及必要会
 
 ## 配置形态
 
-以下为**设计示例，当前加载器不接受此配置**：
+以下配置由独立 Desktop 入口加载；不会传给现有 Server `main.mjs`。私有文件为 `~/.bifrost-desktop/desktop.json`：
 
 ```json
 {
-  "role": "desktop",
-  "listener": "127.0.0.1:43159",
+  "version": 1,
+  "port": 43160,
   "sources": [
     {
-      "id": "company",
-      "kind": "codebuddy-local",
-      "credentialRef": "os-store://codebuddy/company"
+      "id": "codebuddy",
+      "kind": "codebuddy-local"
     },
     {
       "id": "bifrost",
       "kind": "bifrost-remote",
       "baseUrl": "https://gateway.example.com/v1",
-      "credentialRef": "os-store://bifrost/owner"
+      "protocols": ["chat-completions", "messages"]
     }
   ]
 }
 ```
 
-纯本地配置只保留第一个来源；无需填写无效的服务器地址或远端 Key。`credentialRef` 是逻辑引用，不是明文凭据。当前 CodeBuddy 凭据模块使用 Windows 当前用户 DPAPI，其他操作系统需实现对应存储，不能悄悄降级为明文。
+纯本地配置只保留第一个来源；无需填写无效的服务器地址或远端 Key。来源编号映射独立的 DPAPI 私有文件，不接受配置内明文 Key、任意凭据路径或监听 Host。Desktop 本地 Key 与状态密钥、本人远端用户 Key、CodeBuddy 授权分别保存。当前安全存储使用 Windows 当前用户 DPAPI，其他操作系统明确拒绝启动，不降级为明文。
 
 Server 保留现有注册页、ClientAccess、ClientBilling、隧道及隔离 Claude 配置。它不会因为 Desktop 支持公司来源就自动发布公司模型或获得连接公司内网的能力。
 
-## 当前代码与改造位置
+## 当前代码与后续改造位置
 
 | 已有模块 | 可复用内容 | 待补内容 |
 | --- | --- | --- |
-| `codebuddy-service.mjs`、`employee-oauth.mjs` | 独立授权、目录、刷新和换号代次 | 由 Desktop Profile 按需启动；验证实际公司环境 |
-| `codebuddy-provider.mjs`、`codebuddy-responses.mjs` | 模型、工具及流式协议适配 | 包装统一 Provider 接口，不重复实现 OAuth |
-| `client-server.mjs`、`client-chat.mjs` | 用户模型 API、协议处理、SSE | 将模型分派与来源、鉴权及计费策略分离 |
+| `codebuddy-service.mjs`、`employee-oauth.mjs` | 独立授权、目录、刷新和换号代次 | Desktop 已按需启动；待验证实际公司环境 |
+| `providers/codebuddy-local.mjs` | 复用既有模型、工具、Chat / Responses / Messages 适配 | 不重复实现 OAuth 或协议转换 |
+| `providers/bifrost-remote.mjs` | 普通用户 Key、固定 HTTPS 模型 API、独立目录 | 可继续扩展已验证协议能力 |
+| `routing/model-router.mjs`、`routing/desktop-wire.mjs` | 合并目录、唯一来源、会话绑定、SSE 与状态封套 | Server 将来可渐进接入同一注册契约 |
+| `runtime/desktop*.mjs` | 按配置装配、个人回环 API、独立私有状态 | 后续图形来源设置、Windows 自动启动 |
+| `client-server.mjs`、`client-chat.mjs` | Server 用户模型 API、协议处理、SSE | Server 暂沿用现有分派；Desktop 复用 Chat 适配器 |
 | `client-access.mjs`、`client-billing.mjs` | Server 的用户、权限、权威账本 | 留在 Server；不强制 Desktop 联系 Mac 或创建同类用户库 |
 | `model-discovery.mjs`、`model-policy.mjs` | 目录刷新、能力与授权代次 | 增加来源实例注册及互不阻塞的目录快照 |
 | `mac-claude-client.mjs` | Mac 内固定回环连接 | 保留为本机适配器；另增通用 BifrostRemote，不能把它改成任意远端代理 |
-| `main.mjs` | 当前服务装配和生命周期 | 抽出 Profile 装配；Desktop 不加载 Codex RPC、VM、隧道及公网账号组件 |
+| `main.mjs` | 当前 Server 服务装配和生命周期 | 独立 Desktop 入口不加载本模块、Codex RPC、VM、隧道及公网账号组件 |
 
-建议新增 `src/routing/`、`src/providers/` 和 `src/runtime/`，现有 Provider 模块保留，先通过薄适配器接入。先定义 Provider 与路由契约，再小步抽离装配，避免同时重写所有已验证的协议转换。
+已新增 `src/routing/`、`src/providers/` 和 `src/runtime/`，既有 Provider 模块通过薄适配器接入。Server 行为保持原样；后续逐步抽离其装配，避免同时重写已验证的账号、计费及协议转换。
 
 ## 实施顺序与验收
 
-1. 抽出 Provider 注册、路由及 Profile 契约，保留现有 Server 行为及模型 ID。
-2. 实现 Desktop 本地模式：只启动 CodeBuddy 与回环 API，不依赖 Codex CLI、Mac 账号或远端网络。
-3. 增加 BifrostRemote 与命名空间目录，组成混合模式，保持协议与会话边界。
-4. UI 增加“来源”配置和状态，模型清楚标出本地 / 远端与额度归属。公司来源失效时显示具体状态，由本人明确选择是否改用远端。
-5. 在公司机器验证身份、真实目录、网络出口和实际额度；当前 Mac 上的模拟测试不能替代这一步。
+1. 已实现 Provider 注册、路由及 Desktop 装配，保留 Server 行为及模型 ID。
+2. 已实现 Desktop 本地来源，只启动 CodeBuddy 与回环 API，不依赖 Codex CLI、Mac 账号或远端网络。
+3. 已实现 BifrostRemote 与同一个合并模型目录；提供 CLI 配置、状态和 CodeBuddy 授权入口。
+4. 后续 UI 可增加来源配置及状态；客户端本身直接读取合并目录，不需要来源开关。来源失效时仅影响对应模型，由本人明确选择其他模型。
+5. 待在公司机器验证身份、真实目录、网络出口和实际额度；当前 Mac 上的模拟测试不能替代这一步。
 
 关键验收：
 

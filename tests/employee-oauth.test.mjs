@@ -9,6 +9,17 @@ const employee = { idp: 'ioa_auth', uid: 'employee-1', enterpriseUserName: 'empl
 const login = { state: 'nonce', expiresAt: now + 300000 };
 const reply = (data, code = 0) => Response.json({ code, data });
 
+test('Desktop may disable inference replay after 401 without changing the default Server policy', async () => {
+  const requests = [];
+  const value = new EmployeeOAuthClient({ now: () => now, retryUnauthorizedInference: false,
+    loadAuth: async () => ({ version: 1, auth: { ...token, expiresAt: now + 3600000 }, identity: employee }),
+    fetchImpl: async (url, options) => { requests.push({ url, options }); return new Response(null, { status: 401 }); } });
+  const response = await value.chatCompletions({ body: { model: 'test-model', stream: true } });
+  assert.equal(response.status, 401); assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.method, 'POST');
+  assert.throws(() => new EmployeeOAuthClient({ retryUnauthorizedInference: 'false' }));
+});
+
 function client(steps) {
   const requests = [];
   const value = new EmployeeOAuthClient({ now: () => now, fetchImpl: async (url, options) => {

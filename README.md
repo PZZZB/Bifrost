@@ -104,7 +104,7 @@ Key 默认有效 30 天，账号可以继续登录。所有新 Key 仍受账号�
 
 Mac 统一账号模式仅发布隔离 Claude 渠道已就绪的 `Claude-*` 模型，支持 Chat Completions 和 Messages；未登录时目录为空，不回退其他账号。运维支持[加密滚动备份及恢复演练](docs/mac-operations.md)。
 
-[本地与远端混合网关架构方案](docs/hybrid-gateway-architecture.md)规划用同一内核支持公司电脑上的本地 CodeBuddy，以及按模型明确选择的远端 Bifrost。公司本地调用独立运行，远端调用继续使用 Mac 的用户权限及账本；通用混合入口尚待实现，该方案不改变当前已部署服务。
+[Windows Desktop 混合入口](docs/desktop-gateway.md)使用一个本地 URL 和 Key，在同一个模型列表合并公司 CodeBuddy 与远端 Bifrost；直接选模型，由路由自动分派，不切换内外网模式。公司调用独立使用员工授权及额度；远端使用本人的普通 Mac 用户 Key，沿用其权限与账本。基础运行入口已通过离线集成测试，公司 Windows 的真实登录、路由及额度仍待现场验收；[架构与边界](docs/hybrid-gateway-architecture.md)说明凭据隔离、状态保护和故障行为，该功能不改变当前 Mac 部署。
 
 CodeBuddy IDE 使用 `models.json`，WorkBuddy 使用“设置 → 模型 → 自定义”。详细字段、期限规则和部署示例见 [用户接入说明](docs/client-access.md)。用户端当前以网页版为主；仓库保留的[微信小程序示例](wechat-miniprogram/README.md) 复用同一用户 API，尚未部署发布。
 

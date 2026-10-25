@@ -70,17 +70,19 @@ export class EmployeeOAuthClient {
   #saving = Promise.resolve();
   #generation = 0;
   #requestTimeoutMs;
+  #retryUnauthorizedInference;
   #hasBegunLogin = false;
   #activeLogin = null;
   #scopeAuth = null;
 
-  constructor({ fetchImpl = fetch, now = Date.now, loadAuth, saveAuth, loadCatalog, requestTimeoutMs = 15000 } = {}) {
+  constructor({ fetchImpl = fetch, now = Date.now, loadAuth, saveAuth, loadCatalog, requestTimeoutMs = 15000, retryUnauthorizedInference = true } = {}) {
     if (loadAuth !== undefined && typeof loadAuth !== 'function' || saveAuth !== undefined && typeof saveAuth !== 'function') {
       throw new TypeError('OAuth credential callbacks must be functions.');
     }
     if (loadCatalog !== undefined && typeof loadCatalog !== 'function') {
       throw new TypeError('OAuth loadCatalog must be a function.');
     }
+    if (typeof retryUnauthorizedInference !== 'boolean') throw new TypeError('Invalid inference retry policy.');
     if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 0x7fffffff) {
       throw new TypeError('OAuth requestTimeoutMs must be a positive bounded integer.');
     }
@@ -89,6 +91,7 @@ export class EmployeeOAuthClient {
     this.#saveAuth = saveAuth;
     this.#loadCatalog = loadCatalog;
     this.#requestTimeoutMs = requestTimeoutMs;
+    this.#retryUnauthorizedInference = retryUnauthorizedInference;
     const generation = this.#generation;
     this.#loading = Promise.resolve().then(async () => {
       if (!loadAuth) return;
@@ -369,7 +372,7 @@ export class EmployeeOAuthClient {
       return response;
     };
     let response = await send();
-    if (response.status === 401) {
+    if (response.status === 401 && (method === 'GET' || this.#retryUnauthorizedInference)) {
       try { await response.body?.cancel(); } catch {}
       this.#assertGeneration(generation, signal);
       if (this.#auth === auth) await this.refresh({ signal });

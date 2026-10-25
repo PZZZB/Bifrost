@@ -34,6 +34,7 @@ function publicCatalog(value) {
 
 /** Independent employee authorization and model metadata. Never runs inference. */
 export async function startCodeBuddyService({ stateDir, getGatewayStatus = () => ({}),
+  retryUnauthorizedInference = true,
   client: injectedClient, provider: injectedProvider, store: injectedStore,
   thinkingKeyStore: injectedThinkingKeyStore,
   setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
@@ -43,7 +44,7 @@ export async function startCodeBuddyService({ stateDir, getGatewayStatus = () =>
   catch { config = { enabled: false }; setupError = 'CodeBuddy 配置文件无法读取。'; }
   const store = injectedStore || new CodeBuddyCredentialStore({ path: join(stateDir, 'codebuddy-auth.dpapi.json') });
   const nativeCatalog = new NativeCodeBuddyCatalog();
-  const client = injectedClient || new EmployeeOAuthClient({ loadAuth: () => store.load(), saveAuth: value => store.save(value),
+  const client = injectedClient || new EmployeeOAuthClient({ loadAuth: () => store.load(), saveAuth: value => store.save(value), retryUnauthorizedInference,
     loadCatalog: options => nativeCatalog.load(options) });
   const thinkingKeyStore = injectedThinkingKeyStore || new CodeBuddyCredentialStore({ path: join(stateDir, 'codebuddy-thinking-key.dpapi.json') });
   // Local bridge state is encrypted with its own key. Loading is lazy, so a
