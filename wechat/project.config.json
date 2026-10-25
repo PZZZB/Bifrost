@@ -1,0 +1,10 @@
+{
+  "appid": "touristappid",
+  "projectname": "Bifrost 账号",
+  "compileType": "miniprogram",
+  "miniprogramRoot": "miniprogram/",
+  "cloudfunctionRoot": "cloudfunctions/",
+  "setting": { "es6": true, "minified": true, "urlCheck": true },
+  "libVersion": "3.7.1",
+  "packOptions": { "ignore": [{ "type": "file", "value": "README.md" }] }
+}

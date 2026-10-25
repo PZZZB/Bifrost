@@ -1,0 +1,17 @@
+page { background: #f5f7fb; color: #14213d; font-family: -apple-system, sans-serif; font-size: 28rpx; }
+button { font-size: 28rpx; border-radius: 18rpx; }
+button::after { border: 0; }
+.page { padding: 52rpx 36rpx 72rpx; }
+.eyebrow { font-size: 22rpx; letter-spacing: 5rpx; color: #4865b5; font-weight: 600; }
+.title { font-size: 56rpx; font-weight: 700; margin: 20rpx 0; }
+.subtitle { color: #61708b; line-height: 1.8; margin-bottom: 36rpx; }
+.card { background: #fff; padding: 32rpx; border: 1rpx solid #e4e9f3; border-radius: 26rpx; margin: 24rpx 0; }
+.label { font-size: 24rpx; color: #61708b; margin-bottom: 14rpx; }
+.text { line-height: 1.8; overflow-wrap: break-word; word-break: break-all; }
+.muted { font-size: 24rpx; color: #61708b; line-height: 1.8; }
+.primary { background: #315ee8; color: #fff; margin-top: 28rpx; }
+.secondary { background: #eef2fc; color: #3155ac; margin-top: 20rpx; }
+.danger { background: #fff3f3; color: #b73347; margin-top: 20rpx; }
+.error { background: #fff1eb; color: #9d4323; padding: 24rpx; border-radius: 18rpx; line-height: 1.7; margin: 24rpx 0; }
+.badge { display: inline-block; color: #20735b; background: #e9f7ef; padding: 8rpx 18rpx; border-radius: 30rpx; font-size: 22rpx; }
+.link { color: #315ee8; }

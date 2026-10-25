@@ -1,0 +1,23 @@
+# Staging template. Supply all BIFROST_* paths/addresses before validation.
+# Certificate issuance/renewal is separate; this process has no public egress.
+{
+	admin off
+	persist_config off
+	auto_https off
+	storage file_system {
+		root "{$BIFROST_TLS_STATE_DIR}"
+	}
+	servers {
+		protocols h1 h2
+		strict_sni_host on
+		max_header_size 16KB
+	}
+}
+
+https://{$BIFROST_PUBLIC_HOST}:{$BIFROST_HTTPS_PORT:8443} {
+	bind {$BIFROST_LISTEN_ADDRESS}
+	tls "{$BIFROST_TLS_CERT_FILE}" "{$BIFROST_TLS_KEY_FILE}"
+	reverse_proxy 127.0.0.1:43158 {
+		header_up Host 127.0.0.1:43158
+	}
+}

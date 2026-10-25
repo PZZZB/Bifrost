@@ -1,0 +1,48 @@
+<view class="page">
+  <view class="eyebrow">BIFROST</view>
+  <view class="title">连接你的工具</view>
+  <view class="subtitle">注册网关账号，获取自己的连接地址与 API key。</view>
+  <view wx:if="!configured" class="error">服务接入准备中，暂未开放注册。</view>
+  <view wx:if="error" class="error" role="alert">{{error}}</view>
+  <block wx:if="!account">
+    <view class="card">
+      <view class="label">首次注册邀请码</view>
+      <input class="invite" value="{{inviteCode}}" bindinput="onInvite" maxlength="128" placeholder="已有账号可留空" disabled="{{busy}}" />
+      <view class="muted">邀请码由网关管理员提供，每个邀请码限用一次。</view>
+      <checkbox-group bindchange="onConsent">
+        <label class="consent"><checkbox value="accepted" checked="{{consent}}" color="#315ee8" />我已阅读并同意</label>
+      </checkbox-group>
+      <text class="link" bindtap="onPrivacy">《账号隐私说明》</text>
+      <button class="primary" bindtap="onLogin" loading="{{busy}}" disabled="{{busy || !configured}}">微信登录 / 注册</button>
+    </view>
+    <view class="muted">在这里登录微信即可创建网关账号，无需提供模型账号密码。</view>
+  </block>
+  <block wx:else>
+    <view class="card">
+      <view class="badge">账号已开通</view>
+      <view class="label spaced">账号编号</view><view class="text account-id" user-select>{{account.id}}</view>
+      <view class="muted spaced">最多 {{account.limits.maxConcurrent}} 个并发请求 · 每分钟 {{account.limits.requestsPerMinute}} 次请求</view>
+    </view>
+    <view class="card">
+      <view class="label">Base URL</view><view class="text" user-select>{{apiBaseUrl}}</view>
+      <button class="secondary" bindtap="onCopyUrl">复制连接地址</button>
+      <view class="label spaced">API key</view>
+      <block wx:if="apiKey">
+        <view class="key" user-select>{{apiKey}}</view>
+        <view class="muted">仅本次展示，请妥善保存。离开页面后不再显示。</view>
+        <button class="primary" bindtap="onCopyKey">复制 API key</button>
+      </block>
+      <view wx:else class="muted">{{account.apiKeyConfigured ? '已设置，完整密钥不会再次显示。' : '当前没有启用的 API key。'}}</view>
+      <button class="secondary" bindtap="onResetKey" disabled="{{busy}}">{{account.apiKeyConfigured ? '重置 API key' : '生成 API key'}}</button>
+      <button wx:if="account.apiKeyConfigured" class="danger" bindtap="onRevokeKey" disabled="{{busy}}">停用 API key</button>
+    </view>
+    <view class="card">
+      <view class="label">在客户端使用</view>
+      <view class="text">将 Base URL 和 API key 填入 CodeBuddy 等客户端的自定义模型配置。模型是否可用取决于管理员开放的渠道。</view>
+      <view class="muted spaced">请求频率限制不代表 Token 额度或订阅余额。</view>
+    </view>
+    <button class="secondary" bindtap="onLogout" disabled="{{busy}}">退出登录</button>
+    <button class="danger" bindtap="onDeleteAccount" disabled="{{busy}}">注销网关账号</button>
+    <view class="privacy-link link" bindtap="onPrivacy">账号隐私说明</view>
+  </block>
+</view>

@@ -60,6 +60,8 @@ ssh -L 43155:127.0.0.1:43155 user@server
 
 管理入口为 <http://127.0.0.1:43155/>。页面分为“控制台”“账号管理”和“接入用户”三个页签：控制台显示服务状态、模型开关、额度和请求统计；账号管理集中显示 A、B、CodeBuddy、Cursor 的登录、授权及渠道详情；接入用户管理下游账号、独立 API Key、模型权限和注册方式。四张上游账号卡统一展示登录状态、登录账号、套餐、授权方式、账号模型目录和已开放模型，缺少的信息明确显示未返回。
 
+Mac 隔离 Claude 入口另提供[注册网页](docs/web-accounts.md)，页面源码位于 `public/accounts/`，使用邮箱、密码和一次性邀请码。分享给微信的网页可独立使用标准 HTTPS 443，客户端仍填写原模型 API 地址；各入口独立校验 Origin 和 CSRF。仅检查邮箱格式及域名收信 DNS，不发送验证码，邮箱保持未验证；旧用户名账号仍可登录。不依赖小程序注册或读取微信身份。另保留可选[微信身份小程序](docs/wechat-accounts.md)，源码位于 `wechat/`，启用前需要 AppID、服务端 AppSecret 和云开发环境。这套隔离入口使用独立账号库，与通用[用户门户及计费](docs/client-access.md)的 `public/portal.*`、`wechat-miniprogram/` 分开部署，账号和 Key 不自动互通。
+
 账号 A 沿用当前 Codex 认证，状态取自最近一次额度查询；切换 Codex 账号后需在控制台刷新额度。账号 B 保留独立登录、身份确认和验证，CodeBuddy 与 Cursor 保留各自的官方授权入口。身份确认、目录来源、计费及 SDK 特有信息收进详情；Cursor 的声明套餐继续标注待核实。可用 `/#accounts` 直接打开账号管理。切换页签保留未保存的模型选择，不触发登录、推理或重启。
 
 网页的 HTML、JavaScript 和 CSS 每次从磁盘读取，并返回 `Cache-Control: no-store`；更新这些文件后刷新页面即可加载。服务端程序或需要启动时读取的配置更新，仍需重启网关。
@@ -284,6 +286,16 @@ With 提供智能体会话接口，因此这里使用会话与 MCP 桥接。初�
 原 Claude 订阅与 CodeBuddy 是两个独立后端。Claude Desktop 的 3p 模式使用网关认证，不会自动携带 1p 的订阅登录。原订阅可使用已独立登录的 Claude Code CLI 后端；这不是将 Desktop 原请求原样发给 claude.ai，也不把 API 用量算作订阅额度。Codex 继续使用原有 Bridge 路由。
 
 原 Claude 模型由本项目的 `ClaudeCliHub` 调用官方 Claude Agent SDK 和官方 Claude CLI。Magpie 仅作为实现参考，不是运行依赖。CodeBuddy 继续使用本项目已有的转换。模型目录列出配置的模型，不能据此证明账号有每个模型的调用权限。
+
+### Mac 客户端调用 Linux 虚拟机里的 Claude
+
+Mac 可通过独立回环网关调用 host-only 网络中的 Linux ARM64 relay，同时保持 Claude 的 OAuth、原生会话和云端流量留在虚拟机。入口支持 Anthropic Messages 和 OpenAI Chat Completions，适用于 CodeBuddy 自定义模型；会话和客户端工具复用现有 Claude Agent SDK 后端。
+
+部署模板、网络边界、登录及离线环境披露检查见 [Mac 与 Linux VM 接入](docs/mac-claude-vm.md)。这些模板不包含账号凭据、实际网关密钥或 VPS 配置。
+
+需要让外部客户端访问 Mac 网关时，可另用 [Tailscale Funnel 公网入口](docs/mac-external-access.md)：不需要自有域名，使用独立客户端密钥、会话命名和限流，内部网关继续只监听回环地址。公网开通需要本人完成 Tailscale 网页认证，并单独验收 HTTPS 和流式传输。
+
+中国大陆访问以速度为优先、又无法管理光猫时，可用 [国内出站隧道](docs/mac-outbound-tunnel.md) 接入相同鉴权入口。客户端只需 HTTPS URL 和 API key；Claude 继续运行在隔离 VM，VPS 只承担原出站流量。当前网络模拟与真实模型验证范围见文档。
 
 ### 准备独立 Claude CLI 后端
 

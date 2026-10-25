@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "listener": { "address": "127.0.0.1", "port": 43158 },
+  "upstreamPort": 43157,
+  "additionalPublicAuthorities": [],
+  "gatewayKeyFile": "/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/gateway.key",
+  "sessionKeyFile": "/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/session.key",
+  "clientsFile": "/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/clients.json"
+}

@@ -1,0 +1,6 @@
+.invite { background: #f5f7fb; border-radius: 12rpx; height: 90rpx; padding: 0 20rpx; margin-bottom: 16rpx; font-size: 26rpx; }
+.consent { display: flex; align-items: center; padding: 28rpx 0 12rpx; font-size: 25rpx; }
+.spaced { margin-top: 28rpx; }
+.account-id { font-size: 24rpx; }
+.key { background: #f3f6fe; padding: 22rpx; border-radius: 14rpx; font-family: monospace; font-size: 25rpx; word-break: break-all; margin-bottom: 18rpx; }
+.privacy-link { text-align: center; font-size: 24rpx; padding-top: 32rpx; }

@@ -34,10 +34,12 @@ export function validateTcpForwarderConfig(config) {
 }
 
 /** Forward bytes between one loopback listener and one explicit numeric-IP destination. */
-export async function startTcpForwarder(configuration, { signal, connectTimeoutMs = 10_000 } = {}) {
+export async function startTcpForwarder(configuration, { signal, connectTimeoutMs = 10_000, localAddress } = {}) {
   const config = validateTcpForwarderConfig(configuration);
   if (!Number.isInteger(connectTimeoutMs) || connectTimeoutMs < 1 || connectTimeoutMs > 120_000 ||
-      signal !== undefined && !(signal instanceof AbortSignal)) throw new TypeError(CONFIG_ERROR);
+      signal !== undefined && !(signal instanceof AbortSignal) ||
+      localAddress !== undefined && (typeof localAddress !== 'string' || !isIP(localAddress) ||
+        ['0.0.0.0', '::'].includes(localAddress) || isIP(localAddress) !== isIP(config.target.ip))) throw new TypeError(CONFIG_ERROR);
   signal?.throwIfAborted();
 
   const pairs = new Set();
@@ -46,7 +48,7 @@ export async function startTcpForwarder(configuration, { signal, connectTimeoutM
     if (closing || signal?.aborted) { client.destroy(); return; }
     accepted++;
     const upstream = net.createConnection({ host: config.target.ip, port: config.target.port,
-      family: isIP(config.target.ip), allowHalfOpen: true });
+      family: isIP(config.target.ip), allowHalfOpen: true, ...(localAddress ? { localAddress } : {}) });
     let resolveClosed;
     const pair = { client, upstream, timer: null, stopped: false, clientClosed: false, upstreamClosed: false,
       closed: new Promise(resolve => { resolveClosed = resolve; }) };

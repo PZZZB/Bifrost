@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>local.claude-vps.bifrost-external</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/runtime/node</string>
+    <string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/app/scripts/run-external-claude-gateway.mjs</string>
+    <string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/gateway.json</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/gateway.log</string>
+  <key>StandardErrorPath</key><string>/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/gateway.log</string>
+</dict></plist>
