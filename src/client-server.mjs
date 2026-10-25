@@ -39,8 +39,9 @@ async function bodyJson(req, limit) {
 
 /** Public user API and inference listener. The local administrator APIs never mount here. */
 export function createClientServer({ access, publicDir, publicBaseUrl, allowedHosts, getModels,
-  requestResponses, requestMessages = null, prepareResponses = null, billing = null, isDraining = () => false, csrfSecret, now = Date.now,
-  maxConcurrentPerAccount = 4, maxConcurrent = 32 } = {}) {
+  requestResponses, requestMessages = null, requestChat = null, prepareResponses = null, billing = null, webAccounts = null,
+  isDraining = () => false, csrfSecret, now = Date.now,
+  maxConcurrentPerAccount = 4, maxConcurrent = 32, requestsPerMinute = 120 } = {}) {
   const publicUrl = new URL(publicBaseUrl);
   if (!['http:', 'https:'].includes(publicUrl.protocol) || publicUrl.pathname !== '/' || publicUrl.search || publicUrl.hash || publicUrl.username || publicUrl.password) throw new TypeError('Public client URL must be an origin.');
   if (typeof csrfSecret !== 'string' || csrfSecret.length < 40) throw new TypeError('A private CSRF secret is required.');
@@ -148,6 +149,7 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
       const url = new URL(req.url, publicUrl);
       if (url.origin !== publicUrl.origin || url.hash) throw fail('请求目标不允许。', 403);
       const path = url.pathname;
+      if (webAccounts?.handles(req.url)) { await webAccounts.handle(req, res); return; }
       if (req.method === 'GET' && STATIC[path]) {
         const [file, type] = STATIC[path], content = await readFile(join(publicDir, file));
         res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' }); res.end(content); return;
@@ -207,13 +209,14 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
       if (!['/v1/models', '/v1/responses', '/v1/chat/completions', '/v1/messages'].includes(path)) throw fail('接口不存在。', 404, 'client_route_not_found');
       const suppliedKey = secretHeader(req), principal = access.authenticateKey(suppliedKey);
       if (!principal) throw fail('API Key 无效、已停用或已过期。', 401, 'client_key_invalid');
+      if (req.headers.origin !== undefined) throw fail('模型入口不接受浏览器跨站调用。', 403, 'client_origin_rejected');
       if (path === '/v1/models' && req.method === 'GET') {
         json(res, 200, { object: 'list', data: userModels(principal).map(model => ({ id: model.id, object: 'model', owned_by: 'bifrost' })) }); return;
       }
       if (req.method !== 'POST' || path === '/v1/models') throw fail('请求方法不支持。', 405);
       const used = running.get(principal.accountId) ?? 0;
       if (used >= maxConcurrentPerAccount || [...running.values()].reduce((a, b) => a + b, 0) >= maxConcurrent) throw fail('并发请求已达上限，请稍后重试。', 429, 'client_concurrency_limit');
-      rate(`inference:${principal.accountId}`, 120, 60_000);
+      rate(`inference:${principal.accountId}`, requestsPerMinute, 60_000);
       const abort = new AbortController();
       const disconnected = () => { if (!res.writableEnded) abort.abort(); };
       req.once('aborted', disconnected); res.once('close', disconnected);
@@ -235,13 +238,26 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
             } };
           billingRequests.set(requestId, billingContext);
         }
-        const request = { body, scope: principal.accountId, signal: abort.signal, ...(billingContext ? { requestId: billingContext.requestId } : {}) };
+        const session = req.headers['x-session-id'] ?? '';
+        if (typeof session !== 'string' || session.length > 1024) throw fail('会话标识无效。');
+        const request = { body, scope: principal.accountId, session, signal: abort.signal, ...(billingContext ? { requestId: billingContext.requestId } : {}) };
         let response;
-        if (path === '/v1/chat/completions') response = await chat.request(request);
-        else if (path === '/v1/responses') response = await meteredResponses(request);
+        if (path === '/v1/chat/completions') response = model.channel === 'Claude' && requestChat
+          ? await dispatch(request, 'chat', requestChat) : await chat.request(request);
+        else if (path === '/v1/responses') {
+          if (model.channel === 'Claude') throw fail('此模型支持 Chat Completions 和 Messages。', 501, 'client_protocol_unsupported');
+          response = await meteredResponses(request);
+        }
         else {
-          if (model.channel !== 'CodeBuddy' || !requestMessages) throw fail('此模型暂未提供 Messages 接入，请使用 Chat Completions 或 Responses。', 501, 'client_protocol_unsupported');
+          if (!['CodeBuddy', 'Claude'].includes(model.channel) || !requestMessages) throw fail('此模型暂未提供 Messages 接入，请使用 Chat Completions 或 Responses。', 501, 'client_protocol_unsupported');
           response = await dispatch(request, 'messages', requestMessages);
+        }
+        if (model.channel === 'Claude' && !response.ok) {
+          // dispatch has already inspected error usage. Public errors must not
+          // reveal host addresses, operating systems, or upstream credentials.
+          await response.body?.cancel().catch(() => {});
+          response = Response.json({ error: { message: '模型服务暂时不可用，请稍后重试或联系管理员。', code: 'client_upstream_rejected' } },
+            { status: [400, 413, 422, 429].includes(response.status) ? response.status : 503 });
         }
         await relay(req, res, response, abort);
       } finally {

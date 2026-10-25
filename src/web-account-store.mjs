@@ -1,5 +1,7 @@
 import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
+import { lstat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { PrivateAccountFile, initializePrivateAccounts } from './private-account-files.mjs';
 import { webEmail, checkEmailDomain as defaultEmailDomainCheck } from './email-address.mjs';
 
@@ -10,7 +12,7 @@ const sessionToken = value => typeof value === 'string' && /^bws_[A-Za-z0-9_-]{4
 const invitation = value => typeof value === 'string' && /^bfi_[A-Za-z0-9_-]{43}$/.test(value);
 const mint = prefix => prefix + randomBytes(32).toString('base64url');
 const fail = (status, code) => { throw Object.assign(new Error(code), { status, code }); };
-export const WEB_PRIVACY_VERSION = '2026-10-25';
+export const WEB_PRIVACY_VERSION = '2026-10-25.1';
 const PASSWORD_ALGORITHM = 'scrypt-131072-8-1';
 const DUMMY = { algorithm: PASSWORD_ALGORITHM, salt: Buffer.alloc(16).toString('base64url'), hash: Buffer.alloc(64).toString('base64url') };
 let passwordWork = 0;
@@ -80,6 +82,13 @@ function validate(record) {
 }
 
 export class WebAccountStore extends PrivateAccountFile {
+  async read() {
+    const migrated = await lstat(join(this.directory, 'migrated-to.json')).then(() => true, error => {
+      if (error.code === 'ENOENT') return false; throw error;
+    });
+    if (migrated) throw new Error('This account store was migrated. Use the main local account administrator.');
+    return super.read();
+  }
   constructor({ directory, maxAccounts = 50, maxConcurrent = 1, requestsPerMinute = 20,
     sessionTtlMs = 86_400_000, clock = Date.now, checkEmailDomain = defaultEmailDomainCheck } = {}) {
     super(directory, validate);

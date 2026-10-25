@@ -31,6 +31,9 @@ import { ClientAdmin } from './client-admin.mjs';
 import { ClientStateCodec } from './client-state.mjs';
 import { startClientService } from './client-service.mjs';
 import { ClientBilling } from './client-billing.mjs';
+import { loadMacClaudeClient } from './mac-claude-client.mjs';
+import { UnifiedWebAccounts } from './unified-web-accounts.mjs';
+import { createWebAccounts } from './web-accounts.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serviceVersion = await createServiceVersion({ projectDir });
@@ -102,11 +105,13 @@ const codeBuddyService = await startCodeBuddyService({ stateDir,
   } });
 const modelDiscovery = new ModelDiscovery({ modelPolicy, codeBuddyService, cursorService });
 const providerQuotas = new ProviderQuotas({ codeBuddyService, cursorService });
-const clientModels = () => modelPolicy.snapshot().models.filter(model => ['B', 'CodeBuddy', 'Cursor'].includes(model.channel))
+const macClaude = await loadMacClaudeClient(process.env.BRIDGE_MAC_CLAUDE_CONFIG);
+const clientModels = () => macClaude ? macClaude.models() : modelPolicy.snapshot().models.filter(model => ['B', 'CodeBuddy', 'Cursor'].includes(model.channel))
   .map(model => ({ id: model.id, name: model.name, channel: model.channel, enabled: model.enabled, available: model.available,
     protocols: ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])] }));
 try {
-  clientAccess = await ClientAccess.open({ path: join(stateDir, 'client-access.json'), allowedModelIds: () => clientModels().map(model => model.id) });
+  clientAccess = await ClientAccess.open({ path: join(stateDir, 'client-access.json'), allowedModelIds: () => clientModels().map(model => model.id),
+    ...(macClaude ? { maxAccounts: macClaude.web.maxAccounts } : {}) });
   try { clientBilling = await ClientBilling.open({ path: join(stateDir, 'client-billing.json') }); }
   catch { console.error('Client billing unavailable; client inference remains closed until the ledger is repaired.'); }
   clientAdmin = new ClientAdmin({ access: clientAccess, billing: clientBilling, getModels: clientModels,
@@ -184,7 +189,11 @@ server.listen(port, '127.0.0.1', () => {
 });
 if (clientAccess && clientBilling && !delegation) {
   const codec = new ClientStateCodec({ secret: state.gatewayKey });
+  const webAccounts = macClaude ? createWebAccounts({ ...macClaude.web, csrfKey: macClaude.csrfKey,
+    publicDir: join(projectDir, 'public/accounts'), store: new UnifiedWebAccounts({ access: clientAccess, billing: clientBilling, ...macClaude.web }) }) : null;
   clientService = await startClientService({ stateDir, reservedPorts: [port, 43157], publicDir: join(projectDir, 'public'), access: clientAccess, billing: clientBilling,
+    webAccounts, ...(macClaude ? { requestChat: macClaude.requestChat, maxConcurrent: 4, maxConcurrentPerAccount: macClaude.web.maxConcurrent,
+      requestsPerMinute: macClaude.web.requestsPerMinute } : {}),
     getModels: clientModels, csrfSecret: state.gatewayKey, isDraining: () => serviceControl?.draining === true,
     prepareResponses: (body, scope) => codec.input(body, scope),
     requestResponses: async ({ body, scope, signal }) => {
@@ -201,8 +210,9 @@ if (clientAccess && clientBilling && !delegation) {
       }
       return codec.response(response, scope, body.model);
     },
-    requestMessages: ({ body, scope, signal }) => codeBuddyService.provider.request({ path: '/v1/messages', body: Buffer.from(JSON.stringify(body)),
-      clientScope: scope, signal }),
+    requestMessages: request => clientModels().find(model => model.id === request.body.model)?.channel === 'Claude'
+      ? macClaude.requestMessages(request) : codeBuddyService.provider.request({ path: '/v1/messages', body: Buffer.from(JSON.stringify(request.body)),
+        clientScope: request.scope, signal: request.signal }),
   });
   const clientStatus = clientService.status();
   if (clientStatus.ready) console.log(`Bifrost user portal: ${clientService.endpoint().portalUrl}`);
@@ -218,6 +228,7 @@ async function shutdown(code = 0) {
   }
   server.close(); server.closeAllConnections();
   await clientService?.close();
+  await macClaude?.close();
   await Promise.allSettled([modelDiscovery.close(), providerQuotas.close()]);
   await Promise.allSettled([backendRpc?.close(), configRpc?.close(), withService.close(), codeBuddyService.close(), cursorProvider.close(), cursorService.close()]);
   // Account for response-finally work triggered by closing sockets before flushing.

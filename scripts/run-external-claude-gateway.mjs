@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import { createExternalClaudeGateway, validateExternalClients, validateExternalAuthorities } from '../src/external-claude-gateway.mjs';
 import { loadWeChatAccounts } from '../src/wechat-accounts.mjs';
 import { loadWebAccounts } from '../src/web-accounts.mjs';
+import { createClientGatewayForwarder } from '../src/client-gateway-forwarder.mjs';
 
 let server;
 async function privateFile(path, limit = 65_536) {
@@ -21,6 +22,8 @@ try {
   const gatewayKey = (await privateFile(config.gatewayKeyFile)).trim();
   const sessionKey = (await privateFile(config.sessionKeyFile)).trim();
   const accountApi = config.wechatAccountsFile === undefined ? null : await loadWeChatAccounts(config.wechatAccountsFile);
+  if (config.clientGatewayPort !== undefined && (config.clientGatewayPort !== 43159 || config.webAccountsFile !== undefined || config.wechatAccountsFile !== undefined)) throw new Error();
+  const clientGateway = config.clientGatewayPort === undefined ? null : createClientGatewayForwarder({ port: config.clientGatewayPort });
   const webAccounts = config.webAccountsFile === undefined ? null : await loadWebAccounts(config.webAccountsFile);
   const readStaticClients = async () => {
     const data = JSON.parse(await privateFile(config.clientsFile));
@@ -38,7 +41,7 @@ try {
   if (config.publicHostname) allowedHosts.push(config.publicHostname, `${config.publicHostname}:443`);
   if (webAccounts && [...webAccounts.publicOrigins, new URL(webAccounts.apiBaseUrl).origin]
     .some(origin => !allowedHosts.includes(new URL(origin).host))) throw new Error();
-  server = createExternalClaudeGateway({ gatewayKey, sessionKey, getClients, allowedHosts, accountApi, webAccounts });
+  server = createExternalClaudeGateway({ gatewayKey, sessionKey, getClients, allowedHosts, accountApi, webAccounts, clientGateway });
   await new Promise((yes, no) => { server.once('error', no); server.listen(43158, '127.0.0.1', yes); });
   const close = () => { server.close(); server.closeAllConnections(); };
   process.once('SIGINT', close); process.once('SIGTERM', close);

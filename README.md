@@ -60,7 +60,7 @@ ssh -L 43155:127.0.0.1:43155 user@server
 
 管理入口为 <http://127.0.0.1:43155/>。页面分为“控制台”“账号管理”和“接入用户”三个页签：控制台显示服务状态、模型开关、额度和请求统计；账号管理集中显示 A、B、CodeBuddy、Cursor 的登录、授权及渠道详情；接入用户管理下游账号、独立 API Key、模型权限和注册方式。四张上游账号卡统一展示登录状态、登录账号、套餐、授权方式、账号模型目录和已开放模型，缺少的信息明确显示未返回。
 
-Mac 隔离 Claude 入口另提供[注册网页](docs/web-accounts.md)，页面源码位于 `public/accounts/`，使用邮箱、密码和一次性邀请码。分享给微信的网页可独立使用标准 HTTPS 443，客户端仍填写原模型 API 地址；各入口独立校验 Origin 和 CSRF。仅检查邮箱格式及域名收信 DNS，不发送验证码，邮箱保持未验证；旧用户名账号仍可登录。不依赖小程序注册或读取微信身份。另保留可选[微信身份小程序](docs/wechat-accounts.md)，源码位于 `wechat/`，启用前需要 AppID、服务端 AppSecret 和云开发环境。这套隔离入口使用独立账号库，与通用[用户门户及计费](docs/client-access.md)的 `public/portal.*`、`wechat-miniprogram/` 分开部署，账号和 Key 不自动互通。
+Mac 隔离 Claude 入口另提供[注册网页](docs/web-accounts.md)，页面源码位于 `public/accounts/`，使用邮箱、密码和一次性邀请码。分享给微信的网页可独立使用标准 HTTPS 443，客户端仍填写原模型 API 地址；各入口独立校验 Origin 和 CSRF。仅检查邮箱格式及域名收信 DNS，不发送验证码，邮箱保持未验证；旧用户名账号仍可登录。不依赖小程序注册或读取微信身份。Mac 可启用[统一账号模式](docs/mac-unified-accounts.md)：这张注册页和主干“接入用户”共用一个 ClientAccess 实例及计费账本，统一停用、模型授权、限额和计量。保留的旧版独立账号模式及可选[微信身份小程序](docs/wechat-accounts.md)属于兼容部署，不能与统一模式同时作为写入者。
 
 账号 A 沿用当前 Codex 认证，状态取自最近一次额度查询；切换 Codex 账号后需在控制台刷新额度。账号 B 保留独立登录、身份确认和验证，CodeBuddy 与 Cursor 保留各自的官方授权入口。身份确认、目录来源、计费及 SDK 特有信息收进详情；Cursor 的声明套餐继续标注待核实。可用 `/#accounts` 直接打开账号管理。切换页签保留未保存的模型选择，不触发登录、推理或重启。
 
@@ -93,6 +93,8 @@ Key 默认有效 30 天，账号可以继续登录。所有新 Key 仍受账号�
 计费请求先持久化预留，完成后按可信实际用量结算并释放多余预留。费率按请求快照固定，金额使用整数微元和 BigInt 运算；相同充值或核销操作编号重试不会重复入账。断流、缺失用量或进程重启保留待核对预留，由管理员核销。预留量由管理员配置，不是精确 Tokenizer，实际消耗超过预留时仍记实账并可能形成欠费或超额，后续请求受余额与配额检查。完整规则和容量边界见 [用户接入说明](docs/client-access.md)。
 
 支持 OpenAI Responses、Chat Completions，以及 CodeBuddy 渠道的 Anthropic Messages。用户仅能使用管理员分配、全局开启且当前可用的 B、CodeBuddy、Cursor 模型；账号 A 不发布到此入口。对话接续状态按用户和模型隔离。
+
+Mac 统一账号模式仅发布隔离 Claude 渠道已就绪的 `Claude-*` 模型，支持 Chat Completions 和 Messages；未登录时目录为空，不回退其他账号。运维支持[加密滚动备份及恢复演练](docs/mac-operations.md)。
 
 CodeBuddy IDE 使用 `models.json`，WorkBuddy 使用“设置 → 模型 → 自定义”。详细字段、期限规则和部署示例见 [用户接入说明](docs/client-access.md)。[微信小程序源码](wechat-miniprogram/README.md) 复用同一用户 API；尚需 AppID、HTTPS 域名、微信开发者工具编译和发布，当前不是已上线小程序。
 

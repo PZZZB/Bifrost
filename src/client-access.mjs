@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { BridgeError } from './storage.mjs';
+import { webEmail } from './email-address.mjs';
 
 const derive = promisify(scrypt);
 const DAY = 86_400_000;
@@ -30,12 +31,20 @@ const iso = value => typeof value === 'string' && Number.isFinite(Date.parse(val
 const modelId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/+\[\]-]{0,511}$/.test(value)
   && !value.split('/').some(part => part === '.' || part === '..')
   && (['B-gpt-6-astra', 'B-gpt-6.1-sol', 'claude-codebuddy-opus-5-5'].includes(value)
-    || /^(?:CodeBuddy-|Cursor-)[A-Za-z0-9][A-Za-z0-9._:/+\[\]-]*$/.test(value))
-  && !value.replace(/^(?:CodeBuddy-|Cursor-)/, '').split(/[/:]/).some(part => /^(?:sk-|rt_|oat_|eyJ|Bearer)/i.test(part));
+    || /^(?:CodeBuddy-|Cursor-|Claude-)[A-Za-z0-9][A-Za-z0-9._:/+\[\]-]*$/.test(value))
+  && !value.replace(/^(?:CodeBuddy-|Cursor-|Claude-)/, '').split(/[/:]/).some(part => /^(?:sk-|rt_|oat_|eyJ|Bearer)/i.test(part));
 
 function username(value) {
+  if (typeof value === 'string' && value.includes('@')) return webEmail(value);
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$/.test(value)) throw error('用户名须为 3–64 位英文字母、数字、点、下划线或连字符。');
   return value.toLowerCase();
+}
+function validRegistration(value) {
+  return fields(value, ['privacyVersion', 'acceptedAt', 'emailVerified', 'emailDomainCheck'], ['privacyVersion', 'acceptedAt', 'emailVerified', 'emailDomainCheck'])
+    && typeof value.privacyVersion === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(value.privacyVersion)
+    && iso(value.acceptedAt) && value.emailVerified === false
+    && fields(value.emailDomainCheck, ['method', 'checkedAt'], ['method', 'checkedAt'])
+    && ['mx', 'address'].includes(value.emailDomainCheck.method) && iso(value.emailDomainCheck.checkedAt);
 }
 function password(value) {
   if (typeof value !== 'string' || value.length < 12 || value.length > 256 || value.includes('\0') || Buffer.byteLength(value) > 1024) {
@@ -86,12 +95,13 @@ function validateState(data) {
     || !Array.isArray(data.sessions) || data.sessions.length > MAX_ACCOUNTS * MAX_SESSIONS) throw error();
   const accountIds = new Set(), usernames = new Set(), keyIds = new Set(), keyHashes = new Set();
   for (const account of data.accounts) {
-    if (!fields(account, ['id', 'username', 'password', 'enabled', 'allowedModels', 'createdAt', 'updatedAt', 'keyExpiresAtLimit', 'keys'],
+    if (!fields(account, ['id', 'username', 'password', 'enabled', 'allowedModels', 'createdAt', 'updatedAt', 'keyExpiresAtLimit', 'keys', 'registration'],
       ['id', 'username', 'password', 'enabled', 'allowedModels', 'createdAt', 'updatedAt', 'keyExpiresAtLimit', 'keys'])
       || !UUID.test(account.id) || accountIds.has(account.id) || username(account.username) !== account.username || usernames.has(account.username)
       || !validPasswordHash(account.password) || typeof account.enabled !== 'boolean' || !storedModels(account.allowedModels)
       || !iso(account.createdAt) || !iso(account.updatedAt) || account.keyExpiresAtLimit !== null && !iso(account.keyExpiresAtLimit)
-      || !Array.isArray(account.keys) || account.keys.length > MAX_KEYS) throw error();
+      || !Array.isArray(account.keys) || account.keys.length > MAX_KEYS
+      || account.registration !== undefined && (!account.username.includes('@') || !validRegistration(account.registration))) throw error();
     accountIds.add(account.id); usernames.add(account.username);
     for (const key of account.keys) {
       if (!fields(key, ['id', 'name', 'hash', 'lastFour', 'enabled', 'createdAt', 'expiresAt', 'revokedAt'],
@@ -129,15 +139,18 @@ export class ClientAccess {
   #path;
   #now;
   #allowedModelIds;
+  #maxAccounts;
   #state = { version: 1, revision: 0, registrationPolicy: { mode: 'open', defaultKeyDays: 30 }, accounts: [], invites: [], sessions: [] };
   #queue = Promise.resolve();
   #closed = false;
   #closing = false;
 
-  constructor({ path, now = Date.now, allowedModelIds = [] } = {}) {
+  constructor({ path, now = Date.now, allowedModelIds = [], maxAccounts = MAX_ACCOUNTS } = {}) {
     if (typeof path !== 'string' || !path || path.includes('\0') || typeof now !== 'function'
-      || !(typeof allowedModelIds === 'function' || Array.isArray(allowedModelIds))) throw new TypeError('Invalid ClientAccess options.');
+      || !(typeof allowedModelIds === 'function' || Array.isArray(allowedModelIds))
+      || !Number.isInteger(maxAccounts) || maxAccounts < 1 || maxAccounts > MAX_ACCOUNTS) throw new TypeError('Invalid ClientAccess options.');
     this.#path = resolve(path); this.#now = now; this.#allowedModelIds = allowedModelIds;
+    this.#maxAccounts = maxAccounts;
   }
   static async open(options) {
     const store = new ClientAccess(options);
@@ -191,7 +204,7 @@ export class ClientAccess {
     this.#state = next;
   }
   #models(values) {
-    if (!storedModels(values)) throw error('授权模型列表无效；须选择明确的 B、CodeBuddy 或 Cursor 模型。');
+    if (!storedModels(values)) throw error('授权模型列表无效；须选择明确的 B、CodeBuddy、Cursor 或 Claude 模型。');
     if (values.length === 0) return [];
     let available;
     try { available = typeof this.#allowedModelIds === 'function' ? this.#allowedModelIds() : this.#allowedModelIds; }
@@ -222,6 +235,7 @@ export class ClientAccess {
     const now = this.#time();
     return { id: account.id, username: account.username, enabled: account.enabled, allowedModels: [...account.allowedModels],
       createdAt: account.createdAt, updatedAt: account.updatedAt, keyExpiresAtLimit: account.keyExpiresAtLimit,
+      ...(account.registration ? { registration: structuredClone(account.registration) } : {}),
       keys: account.keys.map(key => this.#publicKey(key, now, account.keyExpiresAtLimit)) };
   }
   #publicInvite(invite) {
@@ -290,7 +304,7 @@ export class ClientAccess {
     if (typeof enabled !== 'boolean') throw error();
     return this.#serialize(async () => {
       const next = structuredClone(this.#state), now = new Date(this.#time()).toISOString();
-      if (next.accounts.length >= MAX_ACCOUNTS) throw error('用户数量达到保存上限。', 409, 'client_account_limit');
+      if (next.accounts.length >= this.#maxAccounts) throw error('用户数量达到保存上限。', 409, 'client_account_limit');
       if (next.accounts.some(account => account.username === name)) throw error('此用户名已注册。', 409, 'client_username_exists');
       const account = { id: randomUUID(), username: name, password: credential, allowedModels: models, enabled, createdAt: now, updatedAt: now,
         keyExpiresAtLimit: options.keyExpiresAtLimit === undefined ? new Date(Date.parse(now) + next.registrationPolicy.defaultKeyDays * DAY).toISOString() : options.keyExpiresAtLimit, keys: [] };
@@ -298,8 +312,10 @@ export class ClientAccess {
     });
   }
   async register(options) {
-    if (!fields(options, ['username', 'password', 'inviteToken'], ['username', 'password'])) throw error();
+    if (!fields(options, ['username', 'password', 'inviteToken', 'registration'], ['username', 'password'])
+      || options.registration !== undefined && !validRegistration(options.registration)) throw error();
     const name = username(options.username), credential = await passwordHash(password(options.password));
+    if (options.registration !== undefined && !name.includes('@')) throw error();
     if (options.inviteToken !== undefined && (typeof options.inviteToken !== 'string' || !TOKEN_PATTERNS.invite.test(options.inviteToken))) {
       throw error('邀请无效或已到期。', 403, 'client_invite_invalid');
     }
@@ -312,11 +328,12 @@ export class ClientAccess {
         && (!invite || invite.revokedAt || invite.uses >= invite.maxUses || Date.parse(invite.expiresAt) <= now)) {
         throw error('邀请无效或已到期。', 403, 'client_invite_invalid');
       }
-      if (next.accounts.length >= MAX_ACCOUNTS) throw error('用户数量达到保存上限。', 409, 'client_account_limit');
+      if (next.accounts.length >= this.#maxAccounts) throw error('用户数量达到保存上限。', 409, 'client_account_limit');
       if (next.accounts.some(account => account.username === name)) throw error('此用户名已注册。', 409, 'client_username_exists');
       const account = { id: randomUUID(), username: name, password: credential, allowedModels: this.#models(invite?.allowedModels ?? []),
         enabled: true, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
-        keyExpiresAtLimit: new Date(now + next.registrationPolicy.defaultKeyDays * DAY).toISOString(), keys: [] };
+        keyExpiresAtLimit: new Date(now + next.registrationPolicy.defaultKeyDays * DAY).toISOString(), keys: [],
+        ...(options.registration ? { registration: structuredClone(options.registration) } : {}) };
       const created = this.#newKey(account);
       const sessionToken = secret('session'), expiresAt = new Date(now + SESSION_LIFETIME).toISOString();
       next.accounts.push(account); if (invite) invite.uses++;
@@ -378,6 +395,25 @@ export class ClientAccess {
       next.sessions = next.sessions.filter(session => session.hash !== hash);
       if (next.sessions.length === this.#state.sessions.length) return false;
       await this.#commit(next); return true;
+    });
+  }
+  /** Website actions are one transaction: revocation and replacement never race. */
+  async changeSession(token, operation) {
+    if (!['reset-key', 'revoke-key', 'delete'].includes(operation)) throw error();
+    return this.#serialize(async () => {
+      const principal = this.authenticateSession(token);
+      if (!principal) throw error('登录已过期，请重新登录。', 401, 'session_expired');
+      const next = structuredClone(this.#state), account = this.#account(next, principal.accountId), now = this.#time();
+      if (operation === 'delete') {
+        next.accounts = next.accounts.filter(item => item.id !== account.id);
+        next.sessions = next.sessions.filter(item => item.accountId !== account.id);
+        await this.#commit(next); return { ok: true };
+      }
+      for (const key of account.keys) key.revokedAt ??= new Date(now).toISOString();
+      let created;
+      if (operation === 'reset-key') created = this.#newKey(account);
+      account.updatedAt = new Date(now).toISOString(); await this.#commit(next);
+      return { account: this.#publicAccount(account), ...(created ? { secret: created.secret } : { ok: true }) };
     });
   }
   async createKey(accountId, options = {}) {

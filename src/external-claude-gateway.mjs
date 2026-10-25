@@ -64,7 +64,7 @@ function errorResponse(res, status) {
 export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients,
   allowedHosts, upstreamPort = 43157, maxConcurrent = 4, maxBodyBytes = 16 * 1024 * 1024,
   headerTimeoutMs = 20_000, requestTimeoutMs = 10 * 60_000, fetchImpl = fetch, clock = Date.now,
-  accountApi = null, webAccounts = null } = {}) {
+  accountApi = null, webAccounts = null, clientGateway = null } = {}) {
   if (!key(gatewayKey) || !key(sessionKey) || gatewayKey === sessionKey || typeof getClients !== 'function' ||
       !Array.isArray(allowedHosts) || !allowedHosts.length || allowedHosts.some(host => typeof host !== 'string' || !host) ||
       !Number.isInteger(upstreamPort) || upstreamPort < 1024 || upstreamPort > 65535 ||
@@ -86,7 +86,8 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
         const name = req.rawHeaders[index].toLowerCase(); counts.set(name, (counts.get(name) ?? 0) + 1);
       }
       if (counts.get('host') !== 1 || !hosts.has(req.headers.host?.toLowerCase())) fail(403);
-      if (['authorization', 'x-api-key', ...SESSION_HEADERS].some(name => (counts.get(name) ?? 0) > 1)) fail(400);
+      if (['authorization', 'x-api-key', 'cookie', 'origin', 'x-bifrost-csrf', ...SESSION_HEADERS].some(name => (counts.get(name) ?? 0) > 1)) fail(400);
+      if (clientGateway?.handles(req.url)) { await clientGateway.handle(req, res, abort.signal); return; }
       if (webAccounts?.handles(req.url)) {
         await webAccounts.handle(req, res); return;
       }
@@ -103,6 +104,11 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
           client.keySha256 === sha256(sessionKey).toString('hex'))) fail(503);
       const hashes = supplied.map(sha256);
       const client = clients.find(candidate => hashes.every(hash => timingSafeEqual(hash, Buffer.from(candidate.keySha256, 'hex'))));
+      if (!client && clientGateway && supplied.every(value => /^bfk_[A-Za-z0-9_-]{43}$/.test(value) && value === supplied[0])) {
+        if (active >= maxConcurrent) fail(429);
+        active++; state = { active: 1 }; reserved = true;
+        await clientGateway.handle(req, res, abort.signal); return;
+      }
       if (!client) fail(401);
       if (!ROUTES.has(req.url)) fail(404);
       if (ROUTES.get(req.url) !== req.method) fail(405);
