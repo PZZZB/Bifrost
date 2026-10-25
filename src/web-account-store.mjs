@@ -1,6 +1,7 @@
 import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { PrivateAccountFile, initializePrivateAccounts } from './private-account-files.mjs';
+import { webEmail, checkEmailDomain as defaultEmailDomainCheck } from './email-address.mjs';
 
 const derive = promisify(scrypt);
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -15,8 +16,18 @@ const DUMMY = { algorithm: PASSWORD_ALGORITHM, salt: Buffer.alloc(16).toString('
 let passwordWork = 0;
 
 export function webUsername(value) {
+  if (typeof value === 'string' && value.includes('@')) return webEmail(value);
   if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,31}$/.test(value)) fail(400, 'invalid_username');
   return value.toLowerCase();
+}
+
+function validIdentity(account) {
+  if (typeof account.username !== 'string') return false;
+  if (!account.username.includes('@')) return /^[a-z0-9][a-z0-9_.-]{2,31}$/.test(account.username) &&
+    account.emailVerified === undefined && account.emailDomainCheck === undefined;
+  try { return webEmail(account.username) === account.username && account.emailVerified === false &&
+    ['mx', 'address'].includes(account.emailDomainCheck?.method) && Number.isSafeInteger(account.emailDomainCheck.checkedAt); }
+  catch { return false; }
 }
 
 function validPassword(value) {
@@ -47,7 +58,7 @@ function validate(record) {
   const ids = new Set(), names = new Set(), keys = new Set(), sessions = new Set(), invites = new Set();
   for (const account of record.accounts) {
     if (!/^web_[a-f0-9]{24}$/.test(account.id) || ids.has(account.id) ||
-        typeof account.username !== 'string' || !/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(account.username) || names.has(account.username) ||
+        !validIdentity(account) || names.has(account.username) ||
         !['active', 'disabled'].includes(account.status) || !Number.isSafeInteger(account.createdAt) ||
         !Number.isSafeInteger(account.acceptedAt) || account.privacyVersion !== WEB_PRIVACY_VERSION ||
         account.passwordHash?.algorithm !== PASSWORD_ALGORITHM || !/^[A-Za-z0-9_-]{22}$/.test(account.passwordHash.salt) ||
@@ -70,17 +81,20 @@ function validate(record) {
 
 export class WebAccountStore extends PrivateAccountFile {
   constructor({ directory, maxAccounts = 50, maxConcurrent = 1, requestsPerMinute = 20,
-    sessionTtlMs = 86_400_000, clock = Date.now } = {}) {
+    sessionTtlMs = 86_400_000, clock = Date.now, checkEmailDomain = defaultEmailDomainCheck } = {}) {
     super(directory, validate);
     if (!Number.isInteger(maxAccounts) || maxAccounts < 1 || maxAccounts > 90 ||
         !Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 8 ||
         !Number.isInteger(requestsPerMinute) || requestsPerMinute < 1 || requestsPerMinute > 600 ||
-        !Number.isSafeInteger(sessionTtlMs) || sessionTtlMs < 60_000 || sessionTtlMs > 7 * 86_400_000) throw new TypeError('Invalid web account settings.');
-    Object.assign(this, { maxAccounts, maxConcurrent, requestsPerMinute, sessionTtlMs, clock });
+        !Number.isSafeInteger(sessionTtlMs) || sessionTtlMs < 60_000 || sessionTtlMs > 7 * 86_400_000 ||
+        typeof checkEmailDomain !== 'function') throw new TypeError('Invalid web account settings.');
+    Object.assign(this, { maxAccounts, maxConcurrent, requestsPerMinute, sessionTtlMs, clock, checkEmailDomain });
   }
 
   publicAccount(account) {
-    return { id: account.id, username: account.username, status: account.status, createdAt: account.createdAt,
+    return { id: account.id, username: account.username, email: account.username.includes('@') ? account.username : null,
+      emailVerified: false, ...(account.emailDomainCheck ? { emailDomainCheck: account.emailDomainCheck } : {}),
+      status: account.status, createdAt: account.createdAt,
       apiKeyConfigured: !!account.keySha256,
       limits: { maxConcurrent: account.maxConcurrent, requestsPerMinute: account.requestsPerMinute } };
   }
@@ -91,21 +105,24 @@ export class WebAccountStore extends PrivateAccountFile {
     return { account: this.publicAccount(account), sessionToken: token, expiresAt };
   }
 
-  async register({ username, password, inviteCode, privacyAccepted }) {
-    username = webUsername(username); validPassword(password);
+  async register({ email, password, inviteCode, privacyAccepted }) {
+    const username = webEmail(email); validPassword(password);
     if (privacyAccepted !== true) fail(400, 'privacy_required');
     const available = record => invitation(inviteCode) ? record.invites.findIndex(invite =>
       invite.keySha256 === digest(inviteCode) && invite.expiresAt > this.clock()) : -1;
     const snapshot = await this.read();
     if (available(snapshot) < 0 || snapshot.accounts.some(account => account.username === username)) fail(403, 'registration_rejected');
     if (snapshot.accounts.length >= this.maxAccounts) fail(409, 'registration_full');
+    const method = await this.checkEmailDomain(username);
+    if (!['mx', 'address'].includes(method)) throw new Error('Invalid email DNS result.');
+    const emailDomainCheck = { method, checkedAt: this.clock() };
     const passwordHash = await makePassword(password);
     return this.transaction(record => {
       const index = available(record);
       if (index < 0 || record.accounts.some(account => account.username === username)) fail(403, 'registration_rejected');
       if (record.accounts.length >= this.maxAccounts) fail(409, 'registration_full');
       const apiKey = mint('bfk_');
-      const account = { id: 'web_' + randomBytes(12).toString('hex'), username, passwordHash, status: 'active',
+      const account = { id: 'web_' + randomBytes(12).toString('hex'), username, emailVerified: false, emailDomainCheck, passwordHash, status: 'active',
         createdAt: this.clock(), acceptedAt: this.clock(), privacyVersion: WEB_PRIVACY_VERSION,
         keySha256: digest(apiKey), session: null, maxConcurrent: this.maxConcurrent, requestsPerMinute: this.requestsPerMinute };
       record.invites.splice(index, 1); record.accounts.push(account);

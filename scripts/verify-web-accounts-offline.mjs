@@ -35,7 +35,7 @@ try {
   await new Promise(resolve => front.listen(0, '127.0.0.1', resolve));
   const origin = 'https://accounts.localhost:' + front.address().port;
   await initializeWebAccounts(join(temporary, 'accounts'));
-  const store = new WebAccountStore({ directory: join(temporary, 'accounts') });
+  const store = new WebAccountStore({ directory: join(temporary, 'accounts'), checkEmailDomain: async () => 'mx' });
   const webAccounts = createWebAccounts({ store, publicOrigin: origin, apiBaseUrl: origin + '/v1',
     csrfKey: (await readFile(join(temporary, 'accounts/csrf.key'), 'utf8')).trim() });
   gateway = createExternalClaudeGateway({ gatewayKey: randomBytes(32).toString('base64url'), sessionKey: randomBytes(32).toString('base64url'),
@@ -64,10 +64,12 @@ try {
     await page.fill('#invite', '');
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.screenshot({ path: join(output, name + '-registration.png'), fullPage: true });
-    await page.fill('#username', name + 'owner'); await page.fill('#password', password);
+    await page.fill('#email', name + 'owner@example.test'); await page.fill('#password', password);
     await page.fill('#password-confirm', password); await page.fill('#invite', inviteCode); await page.check('#consent');
     await page.click('#submit'); await page.locator('#account-view').waitFor({ state: 'visible' });
-    assert.equal(await page.locator('#account-name').textContent(), name + 'owner');
+    assert.equal(await page.locator('#account-name').textContent(), name + 'owner@example.test');
+    assert.match(await page.locator('#email-status').textContent(), /邮箱未验证/);
+    assert.equal(await page.locator('#email-status').isVisible(), true);
     const cookies = await context.cookies();
     assert.ok(cookies.filter(cookie => cookie.name.startsWith('__Host-bifrost_')).every(cookie => cookie.secure && cookie.httpOnly && cookie.sameSite === 'Strict'));
     assert.ok(!await page.evaluate(() => localStorage.length || sessionStorage.length));
@@ -85,12 +87,12 @@ try {
     await page.locator('#account-view').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#api-key').inputValue(), '');
     await page.click('#logout'); await page.locator('#auth-view').waitFor({ state: 'visible' });
-    await page.click('#login-tab'); await page.fill('#username', name + 'owner'); await page.fill('#password', password); await page.click('#submit');
+    await page.click('#login-tab'); await page.fill('#email', name + 'owner@example.test'); await page.fill('#password', password); await page.click('#submit');
     await page.locator('#account-view').waitFor({ state: 'visible' }); await page.reload();
     await page.locator('#account-view').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#api-key').inputValue(), '');
     assert.deepEqual(errors, []);
-    checks.push({ viewport: name, registration: true, rotation_and_old_key_rejection: true,
+    checks.push({ viewport: name, registration: true, email_unverified_notice: true, rotation_and_old_key_rejection: true,
       logout_and_login: true, reload_keeps_session: true, navigation_hides_key: true, no_storage_credentials: true, no_page_errors: true });
     await context.close();
   }

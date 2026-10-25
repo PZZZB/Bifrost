@@ -15,6 +15,6 @@ try {
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   }
 } catch {
-  process.stderr.write('Web account operation failed. Usage: init/invite/list DIRECTORY | disable/enable/revoke-key/reset-password DIRECTORY USERNAME. Check private permissions. Stop the external gateway and all account commands before removing a stale accounts.lock directory.\n');
+  process.stderr.write('Web account operation failed. Usage: init/invite/list DIRECTORY | disable/enable/revoke-key/reset-password DIRECTORY EMAIL_OR_LEGACY_USERNAME. Check private permissions. Stop the external gateway and all account commands before removing a stale accounts.lock directory.\n');
   process.exitCode = 1;
 }

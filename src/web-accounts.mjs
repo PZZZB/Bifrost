@@ -6,6 +6,7 @@ import { readBody } from './gateway.mjs';
 import { validateExternalAuthorities } from './external-claude-gateway.mjs';
 import { readPrivateAccountFile } from './private-account-files.mjs';
 import { WebAccountStore, WEB_PRIVACY_VERSION, webUsername } from './web-account-store.mjs';
+import { webEmail } from './email-address.mjs';
 
 const STATIC = new Map([['/account/', ['index.html', 'text/html; charset=utf-8']],
   ['/account/privacy', ['privacy.html', 'text/html; charset=utf-8']],
@@ -18,10 +19,13 @@ const fail = (status, code) => { throw Object.assign(new Error(code), { status, 
 const ERRORS = {
   invalid_request: '请求格式不正确。', not_found: '页面或接口不存在。', method_not_allowed: '操作方式不支持。',
   access_denied: '请求来源校验失败，请重新打开注册网页。', csrf_rejected: '页面校验已过期，请刷新页面后重试。',
-  invalid_username: '用户名需为 3–32 位英文字母、数字、点、下划线或短横线，并以字母或数字开头。',
+  invalid_username: '请输入邮箱地址；旧版账号可使用原用户名登录。',
+  invalid_email: '请输入正确的邮箱地址，例如 name@qq.com。暂不支持中文或带引号的邮箱地址。',
+  invalid_email_domain: '这个邮箱域名没有可用的收信 DNS 配置，请检查地址是否写错。',
+  email_domain_unavailable: '暂时无法检查邮箱域名，请稍后重试。邀请码尚未使用。',
   invalid_password: '密码需为 12–128 个字符，且不超过 256 字节。', privacy_required: '请先阅读并同意账号隐私说明。',
-  registration_rejected: '用户名或邀请码不可用，请检查后重试。', registration_full: '暂不接受新账号，请联系管理员。',
-  login_rejected: '用户名或密码不正确。', session_expired: '登录已过期，请重新登录。',
+  registration_rejected: '邮箱或邀请码不可用，请检查后重试。', registration_full: '暂不接受新账号，请联系管理员。',
+  login_rejected: '账号或密码不正确。', session_expired: '登录已过期，请重新登录。',
   rate_limited: '操作过于频繁，请稍后重试。', body_too_large: '请求内容过大。',
   account_unavailable: '账号服务暂时不可用，请稍后重试。',
 };
@@ -115,7 +119,7 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, apiBaseUrl,
             }
           }
           json(res, 200, { authenticated: !!identity, ...(identity ?? {}), csrfToken: csrf, apiBaseUrl,
-            registrationMode: 'username_invite', privacyVersion: WEB_PRIVACY_VERSION }); return;
+            registrationMode: 'email_invite', emailVerificationRequired: false, privacyVersion: WEB_PRIVACY_VERSION }); return;
         }
         if (req.headers.origin !== publicOrigin || !validCsrf(csrf) || !safeEqual(csrf, req.headers['x-bifrost-csrf'])) fail(403, 'csrf_rejected');
         let body = {};
@@ -125,11 +129,11 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, apiBaseUrl,
           try { body = JSON.parse(bytes.toString('utf8')); } catch { fail(400, 'invalid_request'); }
           if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request');
         } else if (req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0)) fail(400, 'invalid_request');
-        const allowed = action === 'register' ? ['username', 'password', 'inviteCode', 'privacyAccepted'] : action === 'login' ? ['username', 'password'] : [];
+        const allowed = action === 'register' ? ['email', 'password', 'inviteCode', 'privacyAccepted'] : action === 'login' ? ['username', 'password'] : [];
         if (Object.keys(body).some(name => !allowed.includes(name))) fail(400, 'invalid_request');
         let result;
         if (action === 'register' || action === 'login') {
-          const username = webUsername(body.username);
+          const username = action === 'register' ? webEmail(body.email) : webUsername(body.username);
           if (++authRequests > 30 || authActive >= 2 || (attempts.get(username) ?? 0) >= 5) fail(429, 'rate_limited');
           attempts.set(username, (attempts.get(username) ?? 0) + 1); authActive++; reserved = true;
           result = await store[action](body);

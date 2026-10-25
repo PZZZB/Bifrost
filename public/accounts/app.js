@@ -15,6 +15,11 @@
     $('register-tab').setAttribute('aria-pressed', String(mode === 'register'));
     $('login-tab').setAttribute('aria-pressed', String(mode === 'login'));
     $('registration-fields').hidden = mode !== 'register';
+    $('auth-form').action = '/account/web/v1/' + mode;
+    $('email').type = mode === 'register' ? 'email' : 'text';
+    $('email').name = mode === 'register' ? 'email' : 'username';
+    $('email-label').textContent = mode === 'register' ? '邮箱' : '邮箱或原用户名';
+    $('email-note').textContent = mode === 'register' ? '请使用自己的邮箱。只检查地址格式和域名收信配置，不发送验证码。' : '旧版用户名账号可直接使用原用户名登录。';
     for (const id of ['password-confirm', 'invite', 'consent']) $(id).required = mode === 'register';
     $('password').autocomplete = mode === 'register' ? 'new-password' : 'current-password';
     $('password').value = ''; $('password-confirm').value = '';
@@ -28,6 +33,7 @@
     $('loading').hidden = true; $('auth-view').hidden = !!account; $('account-view').hidden = !account;
     if (!account) { clearKey(); return; }
     $('account-name').textContent = account.username;
+    $('email-status').hidden = !account.email;
     $('account-limits').textContent = `最多 ${account.limits.maxConcurrent} 个并发请求 · 每分钟 ${account.limits.requestsPerMinute} 次请求`;
     $('base-url').value = data.apiBaseUrl;
     $('key-state').textContent = account.apiKeyConfigured ? '密钥已设置，完整内容不会再次显示。' : '当前没有启用的 API key。';
@@ -76,7 +82,7 @@
     if (!$('auth-form').reportValidity()) return;
     if (mode === 'register' && $('password').value !== $('password-confirm').value) { showError('两次输入的密码不一致。'); return; }
     void perform(async () => {
-      const data = await request(mode, { username: $('username').value.trim(), password: $('password').value,
+      const data = await request(mode, { [mode === 'register' ? 'email' : 'username']: $('email').value.trim(), password: $('password').value,
         ...(mode === 'register' ? { inviteCode: $('invite').value.trim(), privacyAccepted: $('consent').checked } : {}) });
       $('password').value = ''; $('password-confirm').value = ''; $('invite').value = ''; render(data);
     });

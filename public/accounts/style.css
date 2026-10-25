@@ -27,6 +27,7 @@ label:not(.consent) { display: block; font-size: 13px; font-weight: 550; margin:
 input:not([type="checkbox"]) { width: 100%; min-width: 0; border: 1px solid #dce3ef; border-radius: 10px; padding: 13px; font-size: 16px; background: #fcfdff; color: #17243a; outline: none; }
 input:focus { border-color: #6388ea; box-shadow: 0 0 0 3px #eaf0ff; }
 input::placeholder { color: #9ba6b7; font-size: 13px; }
+.input-note { color: #728098; font-size: 11px; line-height: 1.8; margin: 8px 0 0; }
 .password-input, .copy-row { display: flex; gap: 8px; align-items: center; }
 .password-input input, .copy-row input { flex: 1; }
 .password-input button, .copy-row button { color: #315fda; background: #edf2ff; border: 0; padding: 13px 12px; border-radius: 9px; font-size: 13px; flex-shrink: 0; }
