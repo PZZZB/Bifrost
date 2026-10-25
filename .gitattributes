@@ -1,0 +1,2 @@
+# Keep verified original SVG bytes stable across Windows and Unix checkouts.
+/public/brand-icons/*.svg -text

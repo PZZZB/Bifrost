@@ -5,6 +5,7 @@ import vm from 'node:vm';
 
 const html = await readFile(new URL('../public/portal.html', import.meta.url), 'utf8');
 const source = await readFile(new URL('../public/portal.js', import.meta.url), 'utf8');
+const css = await readFile(new URL('../public/portal.css', import.meta.url), 'utf8');
 const miniApiSource = await readFile(new URL('../wechat-miniprogram/utils/api.js', import.meta.url), 'utf8');
 const miniPageSource = await readFile(new URL('../wechat-miniprogram/pages/index/index.js', import.meta.url), 'utf8');
 const json = (data, status = 200) => Response.json(data, { status });
@@ -48,7 +49,8 @@ function harness(options = {}) {
   const context = vm.createContext({ document: { getElementById: id => elements.get(id), createElement: tag => new Element(tag) },
     Date, URL, Response, AbortSignal, encodeURIComponent,
     navigator: { clipboard: { async writeText(value) { copies.push(value); } } },
-    window: { addEventListener(name, listener) { listeners.set(name, listener); }, confirm() { return api.confirm; } },
+    window: { location: new URL(options.location ?? 'http://127.0.0.1:43159/portal'),
+      addEventListener(name, listener) { listeners.set(name, listener); }, confirm() { return api.confirm; } },
     fetch: async (path, request = {}) => {
       const call = { path, method: request.method ?? 'GET', headers: request.headers, credentials: request.credentials,
         body: request.body === undefined ? undefined : JSON.parse(request.body) }; calls.push(call);
@@ -224,4 +226,165 @@ test('mini program only projects key summaries and clears secret on hide, includ
   page.onHide(); assert.equal(page.data.newSecret, '');
   page.showSecret({ key: summary(), secret: 'late-secret' }); assert.equal(page.data.newSecret, '');
   assert.doesNotMatch(miniPageSource + miniApiSource, /setStorage|console\.|wx\.login\(/);
+});
+
+test('customer register URL opens registration while login and the portal keep their existing entry mode', async () => {
+  for (const [path, mode] of [['/register', 'register'], ['/login', 'login'], ['/portal', 'login']]) {
+    const page = harness({ location: `http://127.0.0.1:43159${path}` }); await settle();
+    assert.equal(page.elements.get(`${mode}-tab`).getAttribute('aria-selected'), 'true');
+    assert.equal(page.elements.get('auth-submit').textContent, mode === 'register' ? '注册账号' : '登录');
+    assert.deepEqual(page.calls.map(call => [call.path, call.method]), [['/portal/api/config', 'GET'], ['/portal/api/session', 'GET']]);
+  }
+});
+
+test('disabled registration falls back to login on the register URL without creating an account', async () => {
+  const page = harness({ location: 'http://127.0.0.1:43159/register', fetch(call) {
+    if (call.path === '/portal/api/config') return json({ ...config(), registration: { enabled: false, invitationRequired: false } });
+  } }); await settle();
+  assert.equal(page.elements.get('login-tab').getAttribute('aria-selected'), 'true');
+  assert.equal(page.elements.get('register-tab').disabled, true);
+  assert.equal(page.calls.some(call => call.method !== 'GET'), false);
+});
+
+test('public ecosystem relationships describe adapted and candidate directions without private A or Claude subscription sources', async () => {
+  const page = harness(); await settle();
+  const topology = JSON.parse(page.run('JSON.stringify(portalEcosystemRelations())'));
+  assert.deepEqual(topology.nodes.map(node => node.id).sort(), ['claude', 'codebuddy', 'codex', 'cursor', 'workbuddy']);
+  assert.deepEqual(topology.routes.map(route => `${route.from}:${route.to}`).sort(), [
+    'codex:codebuddy', 'codebuddy:codex', 'codex:cursor', 'claude:codebuddy',
+    'workbuddy:codex', 'workbuddy:codebuddy', 'workbuddy:cursor', 'codebuddy:cursor',
+  ].sort());
+  assert.equal(topology.routes.some(route => route.from === 'cursor' || route.to === 'claude' || route.to === 'workbuddy'), false);
+  assert.doesNotMatch(JSON.stringify(topology.routes), /claude-cli|native-opus|账号 A|account A|"channel":"A"/i);
+  assert.equal(page.calls.some(call => !call.path.startsWith('/portal/api/')), false);
+});
+
+test('exploring customer tree nodes preserves registration inputs and never reads administrator state or submits credentials', async () => {
+  const page = harness({ location: 'http://127.0.0.1:43159/register' }); await settle();
+  credentials(page); page.elements.get('invite-code').value = 'optional-invite-in-progress';
+  const calls = page.calls.length;
+  for (const id of ['codebuddy', 'cursor', 'claude', 'workbuddy', 'codex']) {
+    const node = page.elements.get(`portal-node-${id}`);
+    assert.equal(node.getAttribute('type'), 'button');
+    node.trigger('click');
+    assert.equal(node.getAttribute('aria-pressed'), 'true');
+    assert.equal(page.elements.get('username').value, 'sample-user');
+    assert.equal(page.elements.get('password').value, 'correct-password-123');
+    assert.equal(page.elements.get('invite-code').value, 'optional-invite-in-progress');
+    assert.equal(page.elements.get('register-tab').getAttribute('aria-selected'), 'true');
+    assert.equal(page.elements.get('credentials-form').getAttribute('aria-labelledby'), 'register-tab');
+  }
+  page.elements.get('portal-map-reset').trigger('click');
+  for (const id of ['codebuddy', 'cursor', 'claude', 'workbuddy', 'codex']) {
+    assert.equal(page.elements.get(`portal-node-${id}`).getAttribute('aria-pressed'), 'false');
+  }
+  assert.equal(page.calls.length, calls);
+  assert.equal(page.elements.get('password').value, 'correct-password-123');
+});
+
+test('customer ecosystem stays explorable when the user service is unavailable and does not imply an authenticated session', async () => {
+  const page = harness({ fetch(call) {
+    if (call.path === '/portal/api/config') return json({ error: { message: '用户入口暂不可用。' } }, 503);
+  } }); await settle();
+  page.elements.get('portal-node-cursor').trigger('click');
+  assert.equal(page.elements.get('portal-node-cursor').getAttribute('aria-pressed'), 'true');
+  assert.match(page.elements.get('portal-ecosystem-title').textContent, /Cursor/);
+  assert.equal(page.elements.get('auth-submit').disabled, true);
+  assert.equal(page.elements.get('dashboard-panel').hidden, true);
+  assert.equal(page.calls.some(call => call.method !== 'GET' || !call.path.startsWith('/portal/api/')), false);
+});
+
+test('tree exploration does not clear a one-time API Key after the user registers or signs in', async () => {
+  const page = harness({ loggedIn: true }); await settle();
+  page.run('showNewKey({key:{id:"key_1"},secret:"bf_customer_tree_once"})');
+  page.elements.get('portal-node-codebuddy').trigger('click');
+  assert.equal(page.elements.get('new-key-secret').value, 'bf_customer_tree_once');
+  assert.equal(page.elements.get('new-key-panel').hidden, false);
+  assert.equal(page.copies.length, 0);
+  assert.equal(page.elements.get('dashboard-panel').hidden, false);
+  assert.equal(page.elements.get('auth-panel').hidden, true);
+});
+
+test('customer ecosystem distinguishes three adapted directions from five desktop clients awaiting connection and acceptance', async () => {
+  const page = harness(); await settle();
+  const { routes } = JSON.parse(page.run('JSON.stringify(portalEcosystemRelations())'));
+  const directions = stage => routes.filter(route => route.maturity === stage).map(route => `${route.from}:${route.to}`).sort();
+  assert.deepEqual(directions('adapted'), ['codex:codebuddy', 'codex:cursor', 'claude:codebuddy'].sort());
+  assert.deepEqual(directions('client_pending'), ['codebuddy:codex', 'codebuddy:cursor', 'workbuddy:codex', 'workbuddy:codebuddy', 'workbuddy:cursor'].sort());
+  assert.ok(routes.every(route => ['adapted', 'client_pending'].includes(route.maturity)), 'An API capability needs an explicit maturity rather than an implied working client connection.');
+});
+
+test('adapted map paths never infer a reverse arrow from an available standard API', async () => {
+  const page = harness(); await settle();
+  const shared = page.elements.get('portal-route-codex-codebuddy');
+  for (const selected of ['codex', 'codebuddy', 'workbuddy', 'cursor', 'claude', 'all']) {
+    page.run(`selectPortalEcosystem(${JSON.stringify(selected)})`);
+    assert.equal(shared.getAttribute('data-stage'), 'adapted');
+    assert.equal(shared.getAttribute('marker-start'), 'none', 'The pending CodeBuddy client must not become a second arrow.');
+    assert.equal(shared.getAttribute('marker-end'), 'url(#portal-route-arrow)');
+  }
+  for (const path of ['codex-cursor', 'claude-codebuddy']) assert.equal(page.elements.get(`portal-route-${path}`).getAttribute('data-stage'), 'adapted');
+  for (const path of ['workbuddy-codex', 'workbuddy-codebuddy', 'workbuddy-cursor', 'codebuddy-cursor']) {
+    assert.equal(page.elements.get(`portal-route-${path}`).getAttribute('data-stage'), 'client_pending');
+  }
+  assert.match(css, /\.portal-world-art\s+\.world-routes\s+path\[data-stage=["']?client_pending["']?\]\s*\{[^}]*display\s*:\s*none\b/);
+});
+
+test('initial customer map hides pending client arrows even before the JavaScript has loaded', () => {
+  const path = id => {
+    const match = html.match(new RegExp(`<path\\b([^>]*\\bid="portal-route-${id}"[^>]*)>`));
+    assert.ok(match, id);
+    return new Element('path', match[1]);
+  };
+  for (const id of ['codex-codebuddy', 'codex-cursor', 'claude-codebuddy']) {
+    const line = path(id);
+    assert.equal(line.getAttribute('data-stage'), 'adapted');
+    assert.equal(line.getAttribute('marker-start') ?? 'none', 'none');
+    assert.equal(line.getAttribute('marker-end'), 'url(#portal-route-arrow)');
+  }
+  for (const id of ['workbuddy-codex', 'workbuddy-codebuddy', 'workbuddy-cursor', 'codebuddy-cursor']) {
+    const line = path(id);
+    assert.equal(line.getAttribute('data-stage'), 'client_pending');
+    assert.equal(line.getAttribute('marker-end') ?? 'none', 'none');
+  }
+});
+
+test('default map keeps pending desktop client directions separate from adapted routes and avoids a mutual-connection legend', async () => {
+  const page = harness(); await settle();
+  const pending = allText(page.elements.get('portal-ecosystem-pending'));
+  for (const route of [
+    'CodeBuddy 客户端 → Codex 账号 B', 'CodeBuddy 客户端 → Cursor 额度',
+    'WorkBuddy 客户端 → Codex 账号 B', 'WorkBuddy 客户端 → CodeBuddy 额度', 'WorkBuddy 客户端 → Cursor 额度',
+  ]) assert.ok(pending.includes(route), route);
+  assert.doesNotMatch(allText(page.elements.get('portal-ecosystem-routes')), /(?:CodeBuddy|WorkBuddy) 客户端/);
+  assert.doesNotMatch(html, />双向调用</);
+  assert.match(html, /(?:未完成|待)[^<>]{0,40}(?:桌面端|接入|验收)|(?:桌面端)[^<>]{0,40}(?:未完成|待)/);
+});
+
+test('CodeBuddy selection labels inbound adapted callers and keeps its own outbound desktop requests pending', async () => {
+  const page = harness(); await settle();
+  page.elements.get('portal-node-codebuddy').trigger('click');
+  const adapted = allText(page.elements.get('portal-ecosystem-routes'));
+  assert.ok(adapted.includes('Codex 客户端 → CodeBuddy 额度'));
+  assert.ok(adapted.includes('Claude 客户端 → CodeBuddy 额度'));
+  assert.doesNotMatch(adapted, /CodeBuddy 客户端/);
+  const pending = allText(page.elements.get('portal-ecosystem-pending'));
+  assert.ok(pending.includes('CodeBuddy 客户端 → Codex 账号 B'));
+  assert.ok(pending.includes('CodeBuddy 客户端 → Cursor 额度'));
+});
+
+test('WorkBuddy selection shows only its pending desktop setup directions and expands their explanation without requests', async () => {
+  const page = harness({ location: 'http://127.0.0.1:43159/register' }); await settle();
+  credentials(page); page.elements.get('invite-code').value = 'keep-this-optional-invite';
+  const calls = page.calls.length;
+  page.elements.get('portal-node-workbuddy').trigger('click');
+  assert.equal(page.elements.get('portal-node-workbuddy').getAttribute('aria-pressed'), 'true');
+  assert.doesNotMatch(allText(page.elements.get('portal-ecosystem-routes')), /WorkBuddy 客户端/);
+  const pending = allText(page.elements.get('portal-ecosystem-pending'));
+  for (const source of ['Codex 账号 B', 'CodeBuddy 额度', 'Cursor 额度']) assert.ok(pending.includes(`WorkBuddy 客户端 → ${source}`));
+  assert.equal(page.elements.get('portal-pending-details').open, true);
+  assert.match(page.elements.get('portal-ecosystem-copy').textContent, /待接入|未完成|未接入|未验收/);
+  assert.equal(page.elements.get('password').value, 'correct-password-123');
+  assert.equal(page.elements.get('invite-code').value, 'keep-this-optional-invite');
+  assert.equal(page.calls.length, calls);
 });

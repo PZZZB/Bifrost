@@ -2,7 +2,15 @@
 
 Bifröst 是面向 Codex 与 Claude 的多渠道模型网关。Codex 支持账号 A/B 订阅分流、CodeBuddy 与 Cursor；Claude 支持第三方网关接入，按模型路由到独立 Claude CLI 订阅或 CodeBuddy。
 
-CodeBuddy、WorkBuddy 等客户端也可使用独立的 Bifröst 用户账号和 API Key 接入。管理员分配模型与 Key 授权期限，用户在网页或微信小程序开发版中注册、登录和管理自己的 Key。
+CodeBuddy、WorkBuddy 等客户端也可使用独立的 Bifröst 用户账号和 API Key 接入。管理员分配模型与 Key 授权期限，用户通过网页版用户中心注册、登录和管理自己的 Key。
+
+客户注册与登录页采用北欧世界树与彩虹桥主题，桌面布局左侧展示连接图，右侧提供账号表单；手机优先显示表单。应用节点明确标记“调用方”或“提供模型 / 额度”。主图只显示已适配的 Codex 客户端调用 CodeBuddy、Cursor 额度，以及 Claude 客户端调用 CodeBuddy 额度；箭头指向模型与额度来源。CodeBuddy 反向调用及 WorkBuddy 接入放在独立的“通用 API · 客户端待接入”列表，不画成双向已支持。公开页不读取管理状态或显示私有订阅身份；实际模型仍由管理员分配。`/register` 默认打开注册表单，`/login` 与 `/portal` 默认登录；关闭注册时自动回到登录。
+
+管理页同样提供世界树连接总览，并读取已适配方向的渠道实际配置。待接入客户端即使用户 API 已启动，也始终保持待接入状态，不计入“已适配方向”与“入口已配置”数量。Codex 来源在待接入列表中明确称为“Codex 账号 B”，不代表调用 Codex 应用或开放账号 A。通用路由已实现与桌面客户端配置、完整回合验收分别记录；HTTP 接口成功不当作桌面端已验收。
+
+应用图标使用核实的官方原图，来源及哈希记录在 [图标素材说明](public/brand-icons/README.md)，通过 `node scripts/sync-brand-icons.mjs` 同步嵌入两处页面。
+
+管理页与网页版用户中心共享午夜蓝、极光青绿与暖金视觉，支持手机布局、键盘操作与减少动态效果设置。此版仅更新静态页面，刷新即可加载，无需重启正在工作的网关。
 
 当前 Codex 保持账号 A 登录，模型选择器保留原有模型，追加两个使用账号 B 订阅的模型，以及在网页选择启用的 CodeBuddy、Cursor 账号模型。文件操作、终端命令、用户问答和权限确认继续由当前 Codex 执行。
 
@@ -98,7 +106,7 @@ Mac 统一账号模式仅发布隔离 Claude 渠道已就绪的 `Claude-*` 模�
 
 [本地与远端混合网关架构方案](docs/hybrid-gateway-architecture.md)规划用同一内核支持公司电脑上的本地 CodeBuddy，以及按模型明确选择的远端 Bifrost。公司本地调用独立运行，远端调用继续使用 Mac 的用户权限及账本；通用混合入口尚待实现，该方案不改变当前已部署服务。
 
-CodeBuddy IDE 使用 `models.json`，WorkBuddy 使用“设置 → 模型 → 自定义”。详细字段、期限规则和部署示例见 [用户接入说明](docs/client-access.md)。[微信小程序源码](wechat-miniprogram/README.md) 复用同一用户 API；尚需 AppID、HTTPS 域名、微信开发者工具编译和发布，当前不是已上线小程序。
+CodeBuddy IDE 使用 `models.json`，WorkBuddy 使用“设置 → 模型 → 自定义”。详细字段、期限规则和部署示例见 [用户接入说明](docs/client-access.md)。用户端当前以网页版为主；仓库保留的[微信小程序示例](wechat-miniprogram/README.md) 复用同一用户 API，尚未部署发布。
 
 首次启用此后端功能需重启 Bifröst。静态页面刷新只更新界面；现有服务未重启时，“接入用户”会显示待升级提示。重启时机仍由用户选择。
 

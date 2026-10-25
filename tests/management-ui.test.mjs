@@ -1156,3 +1156,269 @@ test('late diagnostic successes and failures cannot replace the newer selected r
     assert.doesNotMatch(page.elements.get('diagnostics-detail-note').textContent, /Fixture stale failure/);
   }
 });
+
+function worldFixture(overrides = {}) {
+  return { connected: true, gateway: { enabled: true }, integration: { installed: true },
+    backend: { running: true, account: { email: 'bound@example.test' }, pinnedAccount: { email: 'bound@example.test' } },
+    models: ['B', 'CodeBuddy', 'Cursor'].map(channel => ({ id: `fixture-${channel}`, channel, enabled: true, available: true })),
+    codebuddy: { configured: true, enabled: true, running: true, provider: { authenticated: true, ready: true } },
+    cursor: { configured: true, enabled: true, authReady: true, gateway: { running: true } },
+    messages: { deployment: 'generic', running: false, channels: { Claude: { running: true }, CodeBuddy: { running: true } } },
+    clients: { server: { enabled: true, ready: true } }, ...overrides };
+}
+
+function topologyFor(page, data) {
+  return JSON.parse(page.run(`JSON.stringify(bridgeTopology(${JSON.stringify(data)}))`));
+}
+
+test('world tree directions describe callers and quota sources without inventing Cursor or WorkBuddy providers', async () => {
+  const page = harness(); await settle();
+  const topology = topologyFor(page, worldFixture());
+  assert.deepEqual(topology.routes.map(route => `${route.from}:${route.to}`).sort(), [
+    'claude:codebuddy', 'codebuddy:codex', 'codebuddy:cursor', 'codex:codebuddy', 'codex:cursor',
+    'workbuddy:codebuddy', 'workbuddy:codex', 'workbuddy:cursor',
+  ].sort());
+  const adapted = topology.routes.filter(route => route.maturity === 'adapted');
+  const awaitingClient = topology.routes.filter(route => route.maturity === 'client_pending');
+  assert.deepEqual(adapted.map(route => `${route.from}:${route.to}`).sort(), ['codex:codebuddy', 'codex:cursor', 'claude:codebuddy'].sort());
+  assert.equal(adapted.every(route => route.state === 'configured'), true);
+  assert.equal(awaitingClient.length, 5);
+  assert.equal(awaitingClient.every(route => route.state === 'pending' && route.label === '客户端待接入'), true);
+  assert.equal(topology.routes.some(route => route.from === 'cursor' || route.to === 'workbuddy'), false);
+  assert.match(topology.nodes.find(node => node.id === 'cursor').copy, /尚未适配 Cursor 客户端/);
+  assert.equal(/orient="auto-start-reverse"/.test(html), true);
+  assert.equal(/箭头从调用方指向额度来源/.test(html), true);
+  const paths = [...html.matchAll(/<path\b[^>]*\bid="(world-route-[^"]+)"[^>]*>/g)];
+  const illustrated = paths.filter(match => !/data-stage="client_pending"/.test(match[0])).map(match => match[1]);
+  assert.deepEqual(illustrated.sort(), ['world-route-codex-codebuddy', 'world-route-codex-cursor', 'world-route-claude-codebuddy'].sort());
+  for (const [, id] of paths) assert.equal(page.elements.get(id).getAttribute('marker-start'), 'none');
+  for (const [attributes, id] of paths.filter(match => /data-stage="client_pending"/.test(match[0]))) {
+    assert.equal(/marker-end="none"/.test(attributes), true, `${id} must not briefly display an unsupported arrow before script initialization.`);
+    assert.equal(page.elements.get(id).getAttribute('marker-end'), 'none');
+  }
+  assert.equal(/<path\b[^>]*id="world-route-codex-codebuddy"[^>]*marker-start="none"/.test(html), true);
+  const styles = await readFile(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.equal(/\.world-routes path\[data-stage=client_pending\]\s*\{\s*display:\s*none/.test(styles), true);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('world tree never promotes an unconfigured desktop caller merely because its public API is ready', async () => {
+  const page = harness(); await settle();
+  for (const clients of [null, { server: { enabled: false, ready: false } }, { server: { enabled: true, ready: false } },
+    { server: { enabled: true, ready: true } }]) {
+    const topology = topologyFor(page, worldFixture({ clients }));
+    const forward = topology.routes.find(route => route.from === 'codex' && route.to === 'codebuddy');
+    const reverse = topology.routes.find(route => route.from === 'codebuddy' && route.to === 'codex');
+    assert.equal(forward.state, 'configured'); assert.equal(reverse.state, 'pending');
+    assert.equal(reverse.label, '客户端待接入');
+    assert.equal(topology.routes.filter(route => route.maturity === 'client_pending').every(route => route.state === 'pending'), true);
+    assert.equal(topology.routes.filter(route => route.state === 'configured').length, 3);
+  }
+});
+
+test('world tree requires saved available models and current authorization for provider connections', async () => {
+  const page = harness(); await settle();
+  for (const change of [
+    { modelError: 'catalog unavailable' },
+    { models: worldFixture().models.map(model => ({ ...model, enabled: false })) },
+    { models: worldFixture().models.map(model => ({ ...model, available: false })) },
+    { codebuddy: { configured: true, enabled: true, provider: { authenticated: false, ready: true } },
+      cursor: { configured: true, enabled: true, authReady: false } },
+    { codebuddy: { configured: true, enabled: false, provider: { authenticated: true, ready: true } },
+      cursor: { configured: true, enabled: false, authReady: true } },
+  ]) {
+    const topology = topologyFor(page, worldFixture(change));
+    assert.equal(topology.routes.filter(route => route.from === 'codex').every(route => route.state === 'pending'), true);
+  }
+  page.run('modelDraft.set("fixture-CodeBuddy", true)');
+  const topology = topologyFor(page, worldFixture({ models: worldFixture().models.map(model => ({ ...model, enabled: false })) }));
+  assert.equal(topology.routes.find(route => route.from === 'codex' && route.to === 'codebuddy').state, 'pending', 'An unsaved model checkbox is not an enabled route.');
+});
+
+test('world tree uses generic Messages channel state instead of the legacy top-level running flag', async () => {
+  const page = harness(); await settle();
+  const configured = topologyFor(page, worldFixture());
+  assert.equal(configured.routes.find(route => route.from === 'claude').state, 'configured');
+  const subscription = configured.local.find(route => route.from === 'claude');
+  assert.equal(subscription.state, 'configured'); assert.match(subscription.reason, /未验证 CLI 登录/);
+  const stopped = topologyFor(page, worldFixture({ messages: { deployment: 'generic', running: true, channels: {} } }));
+  assert.equal(stopped.routes.find(route => route.from === 'claude').state, 'pending');
+  assert.equal(stopped.local.find(route => route.from === 'claude').state, 'pending');
+});
+
+test('world tree never treats a previous B binding as a confirmed new account', async () => {
+  const page = harness(); await settle();
+  const topology = topologyFor(page, worldFixture({ backend: { running: true,
+    account: { email: 'new@example.test' }, pinnedAccount: { email: 'old@example.test' } } }));
+  const routes = topology.routes.filter(route => route.to === 'codex');
+  assert.equal(routes.every(route => route.state === 'pending' && route.label === '客户端待接入'), true);
+  assert.equal(routes.every(route => /当前登录必须匹配已确认的绑定/.test(route.reason)), true);
+  assert.equal(routes.some(route => /账号 B 已绑定/.test(route.reason)), false);
+});
+
+test('world tree remains explorable offline and clears configured states while preserving selection', async () => {
+  let offline = false;
+  const page = harness({ fetch(call) {
+    if (offline && call.path === '/api/status') throw new Error('Fixture offline');
+  } }); await settle();
+  page.elements.get('world-node-codex').trigger('click');
+  assert.equal(page.elements.get('world-node-codex').getAttribute('aria-pressed'), 'true');
+  offline = true; await page.run('refreshStatus().catch(() => {})'); await settle();
+  assert.equal(page.elements.get('world-canvas').getAttribute('data-selection'), 'codex');
+  assert.equal(page.elements.get('world-ready-count').textContent, '0');
+  assert.match(page.elements.get('world-connection-note').textContent, /连接未确认/);
+  const count = page.calls.length;
+  for (const id of ['codex', 'claude', 'codebuddy', 'workbuddy', 'cursor']) assert.equal(page.elements.get(`world-node-${id}`).disabled, false);
+  page.elements.get('world-node-workbuddy').trigger('click');
+  assert.equal(page.elements.get('world-canvas').getAttribute('data-selection'), 'workbuddy');
+  assert.equal(page.calls.length, count, 'Offline exploration sends no user or inference requests.');
+  page.elements.get('world-reset').trigger('click');
+  assert.equal(page.elements.get('world-canvas').getAttribute('data-selection'), 'all');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('world tree loads user entrance metadata only when needed and retains the selected node during polling', async () => {
+  const page = harness({ fetch(call) {
+    if (call.path === '/api/client-admin') return json({ accounts: [], invites: [], models: [],
+      registration: { mode: 'open', defaultKeyDays: 30 }, server: { enabled: true, ready: true } });
+  } }); await settle();
+  assert.equal(page.calls.some(call => call.path === '/api/client-admin'), false);
+  page.elements.get('world-node-workbuddy').trigger('click'); await settle();
+  assert.equal(page.calls.filter(call => call.path === '/api/client-admin').length, 1);
+  assert.equal(page.elements.get('world-detail-title').textContent, 'WorkBuddy');
+  assert.equal(page.elements.get('world-node-workbuddy').getAttribute('aria-pressed'), 'true');
+  for (const interval of page.intervals) interval.callback(); await settle();
+  assert.equal(page.elements.get('world-canvas').getAttribute('data-selection'), 'workbuddy');
+  assert.equal(page.elements.get('world-detail-title').textContent, 'WorkBuddy');
+  assert.equal(page.calls.filter(call => call.path === '/api/client-admin').length, 1);
+  page.elements.get('world-node-codebuddy').trigger('click'); await settle();
+  assert.equal(page.calls.filter(call => call.path === '/api/client-admin').length, 1, 'Switching nodes reuses the existing read-only user metadata.');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('world tree draws only adapted one-way callers and separates pending desktop directions in a foldout', async () => {
+  const page = worldPage(); await settle();
+  assert.equal(page.elements.get('world-route-count').textContent, '3');
+  assert.equal(page.elements.get('world-ready-count').textContent, '3');
+  assert.equal(page.elements.get('world-route-codex-codebuddy').getAttribute('data-state'), 'configured');
+  assert.equal(page.elements.get('world-route-codex-cursor').getAttribute('data-state'), 'configured');
+  assert.equal(page.elements.get('world-route-claude-codebuddy').getAttribute('data-state'), 'configured');
+  assert.equal(page.elements.get('world-pending-details').tagName, 'DETAILS');
+  assert.equal(page.elements.get('world-pending-list').children.length, 5);
+  assert.equal(page.elements.get('world-pending-list').children.every(row => row.getAttribute('data-state') === 'pending'), true);
+  page.elements.get('world-node-codex').trigger('click');
+  assert.equal(page.elements.get('world-route-codex-codebuddy').getAttribute('data-highlight'), 'true');
+  assert.equal(page.elements.get('world-route-claude-codebuddy').getAttribute('data-highlight'), 'false');
+  assert.match(listText(page.elements.get('world-route-list')), /Codex 客户端 → CodeBuddy 额度/);
+  assert.doesNotMatch(listText(page.elements.get('world-route-list')), /CodeBuddy 客户端 → Codex 账号 B/);
+  assert.match(listText(page.elements.get('world-pending-list')), /CodeBuddy 客户端 → Codex 账号 B/);
+  assert.match(listText(page.elements.get('world-pending-list')), /客户端待接入/);
+  assert.equal(page.elements.get('world-route-list').querySelectorAll('script').length, 0);
+  assert.equal(page.elements.get('world-route-list').querySelectorAll('a').length, 0);
+  assert.equal(page.elements.get('world-pending-list').querySelectorAll('script').length, 0);
+  assert.equal(page.elements.get('world-pending-list').querySelectorAll('a').length, 0);
+});
+
+function worldPage(fetchOverride) {
+  const fixture = worldFixture();
+  return harness({ models: { revision: 1, models: fixture.models }, backend: fixture.backend,
+    codebuddy: fixture.codebuddy, cursor: fixture.cursor, fetch(call, api) {
+      const intercepted = fetchOverride?.(call, api);
+      if (intercepted !== undefined) return intercepted;
+      if (call.path === '/api/status') return json({ csrfToken: api.token, ready: true,
+        gateway: fixture.gateway, backend: api.backend, integration: fixture.integration, verification: {} });
+      if (call.path === '/api/with') return json(fixture.messages);
+      if (call.path === '/api/client-admin') return json({ accounts: [], invites: [], models: [],
+        registration: { mode: 'open', defaultKeyDays: 30 }, server: { enabled: true, ready: true } });
+    } });
+}
+
+test('world tree invalidates prior user entrance readiness on service replacement and rereads selected client metadata', async () => {
+  let replacement = false;
+  const fresh = deferred();
+  const page = worldPage(call => {
+    if (replacement && call.path === '/api/client-admin') return fresh.promise;
+  }); await settle();
+  assert.equal(page.calls.some(call => call.path === '/api/client-admin'), false);
+  page.elements.get('world-node-workbuddy').trigger('click'); await settle();
+  assert.equal(page.elements.get('world-ready-count').textContent, '3');
+  assert.equal(page.run('clientAdminData.server.ready'), true);
+  replacement = true; page.token = 'world-new-service-csrf';
+  await page.run('refreshStatus()'); await settle();
+  assert.equal(page.calls.filter(call => call.path === '/api/client-admin').length, 2);
+  assert.equal(page.elements.get('world-canvas').getAttribute('data-selection'), 'workbuddy');
+  assert.equal(page.run('clientAdminData'), null);
+  assert.equal(page.elements.get('world-pending-list').children.length, 3);
+  assert.equal(page.elements.get('world-pending-list').children.every(row => row.getAttribute('data-state') === 'pending'), true);
+  fresh.resolve(json({ accounts: [], invites: [], models: [], registration: { mode: 'open', defaultKeyDays: 30 },
+    server: { enabled: false, ready: false } })); await settle();
+  assert.equal(page.run('clientAdminData.server.ready'), false);
+  assert.equal(page.elements.get('world-pending-list').children.every(row => row.getAttribute('data-state') === 'pending'), true);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('world tree ignores old user metadata and its cleanup after a new service starts a separate read', async () => {
+  const old = deferred(), fresh = deferred();
+  let reads = 0;
+  const page = worldPage(call => {
+    if (call.path === '/api/client-admin') return ++reads === 1 ? old.promise : fresh.promise;
+  }); await settle();
+  page.elements.get('world-node-workbuddy').trigger('click'); await settle();
+  page.token = 'world-next-service-csrf'; await page.run('refreshStatus()'); await settle();
+  assert.equal(reads, 2);
+  old.resolve(json({ accounts: [], invites: [], models: [], registration: { mode: 'open', defaultKeyDays: 30 },
+    server: { enabled: true, ready: true } })); await settle();
+  assert.equal(page.run('clientAdminRequest !== null'), true, 'An old cleanup cannot clear the replacement service read.');
+  assert.equal(page.run('clientAdminData'), null);
+  assert.equal(page.elements.get('world-pending-list').children.every(row => row.getAttribute('data-state') === 'pending'), true);
+  fresh.resolve(json({ accounts: [], invites: [], models: [], registration: { mode: 'open', defaultKeyDays: 30 },
+    server: { enabled: false, ready: false } })); await settle();
+  assert.equal(page.run('clientAdminRequest'), null);
+  assert.equal(page.run('clientAdminData.server.ready'), false);
+  assert.equal(page.elements.get('world-pending-list').children.every(row => row.getAttribute('data-state') === 'pending'), true);
+});
+
+test('world tree key-management action opens the existing user page without creating a user or key', async () => {
+  const page = worldPage(); await settle();
+  page.elements.get('world-node-workbuddy').trigger('click'); await settle();
+  page.elements.get('world-manage-clients').trigger('click'); await settle();
+  assert.equal(page.elements.get('tab-clients').getAttribute('aria-selected'), 'true');
+  assert.equal(page.elements.get('panel-clients').hidden, false);
+  assert.equal(page.document.activeElement, page.elements.get('tab-clients'));
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('world tree clears CodeBuddy and Cursor source states immediately when their authorization is invalidated', async () => {
+  const page = worldPage(); await settle();
+  assert.equal(page.elements.get('world-route-codex-codebuddy').getAttribute('data-state'), 'configured');
+  assert.equal(page.elements.get('world-route-codex-cursor').getAttribute('data-state'), 'configured');
+  page.run("invalidateAccountStatus('codebuddy')");
+  assert.equal(page.elements.get('world-route-codex-codebuddy').getAttribute('data-state'), 'pending');
+  assert.equal(page.elements.get('world-route-claude-codebuddy').getAttribute('data-state'), 'pending');
+  assert.equal(page.elements.get('world-route-codex-cursor').getAttribute('data-state'), 'configured');
+  assert.equal(page.elements.get('world-ready-count').textContent, '1');
+  page.run("invalidateAccountStatus('cursor')");
+  assert.equal(page.elements.get('world-route-codex-cursor').getAttribute('data-state'), 'pending');
+  assert.equal(page.elements.get('world-ready-count').textContent, '0');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('world tree ignores a late Messages state from the replaced service until a fresh read confirms its channels', async () => {
+  const old = deferred(); let phase = 'initial';
+  const page = worldPage(call => {
+    if (call.path === '/api/with' && phase === 'old') return old.promise;
+    if (call.path === '/api/with' && phase === 'fresh') return json({ deployment: 'generic', channels: {} });
+  }); await settle();
+  page.elements.get('world-node-claude').trigger('click');
+  assert.equal(page.elements.get('world-route-claude-codebuddy').getAttribute('data-state'), 'configured');
+  phase = 'old'; const oldRead = page.run('refreshWith()'); await settle();
+  phase = 'fresh'; page.token = 'world-messages-next-csrf'; await page.run('refreshStatus()'); await settle();
+  assert.equal(page.elements.get('world-route-claude-codebuddy').getAttribute('data-state'), 'pending');
+  old.resolve(json(worldFixture().messages)); await oldRead; await settle();
+  assert.equal(page.elements.get('world-route-claude-codebuddy').getAttribute('data-state'), 'pending');
+  assert.equal(page.run('messagesStatus'), null);
+  await page.run('refreshWith()'); await settle();
+  assert.equal(page.elements.get('world-route-claude-codebuddy').getAttribute('data-state'), 'pending');
+  assert.equal(page.elements.get('world-detail-title').textContent, 'Claude');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});

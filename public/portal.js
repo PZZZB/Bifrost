@@ -18,6 +18,120 @@ let portalGeneration = 0;
 let displayedKeyId = null;
 let portalVisible = true;
 
+// A protocol endpoint is not evidence that a desktop client has been integrated.
+// Keep pending client integrations out of the adapted-direction drawing.
+function portalEcosystemRelations() {
+  return {
+    nodes: [
+      { id: 'codex', name: 'Codex', description: '调用方。已适配 Codex 客户端使用 CodeBuddy、Cursor 的模型额度。其他桌面客户端调用 Codex 账号 B，仍待接入与验收。' },
+      { id: 'claude', name: 'Claude', description: '作为 Messages 客户端，调用 CodeBuddy 模型。此用户入口当前不提供 Claude 订阅来源。' },
+      { id: 'codebuddy', name: 'CodeBuddy', description: '模型来源。Codex、Claude 客户端可调用 CodeBuddy 额度；CodeBuddy 客户端反向调用其他来源，尚未完成接入与完整回合验证。' },
+      { id: 'workbuddy', name: 'WorkBuddy', description: '待接入的调用方。通用 API 已实现，WorkBuddy 桌面端的配置与完整回合仍待验证，不计为已接通。' },
+      { id: 'cursor', name: 'Cursor', description: '当前作为模型来源。尚未适配 Cursor 客户端反向调用本网关。' },
+    ],
+    routes: [
+      { from: 'codex', to: 'codebuddy', source: 'CodeBuddy', path: 'codex-codebuddy' },
+      { from: 'codebuddy', to: 'codex', source: 'B', path: 'codex-codebuddy' },
+      { from: 'codex', to: 'cursor', source: 'Cursor', path: 'codex-cursor' },
+      { from: 'claude', to: 'codebuddy', source: 'CodeBuddy', path: 'claude-codebuddy' },
+      { from: 'workbuddy', to: 'codex', source: 'B', path: 'workbuddy-codex' },
+      { from: 'workbuddy', to: 'codebuddy', source: 'CodeBuddy', path: 'workbuddy-codebuddy' },
+      { from: 'workbuddy', to: 'cursor', source: 'Cursor', path: 'workbuddy-cursor' },
+      { from: 'codebuddy', to: 'cursor', source: 'Cursor', path: 'codebuddy-cursor' },
+    ].map(route => ({ ...route, maturity: ['codex', 'claude'].includes(route.from) ? 'adapted' : 'client_pending' })),
+  };
+}
+
+let portalEcosystemSelection = 'all';
+
+function paintOfficialBrandIcons() {
+  if (typeof document.querySelectorAll !== 'function' || typeof createImageBitmap !== 'function'
+    || typeof Blob !== 'function' || typeof atob !== 'function') return;
+  for (const canvas of document.querySelectorAll('canvas[data-brand-image]')) {
+    const encoded = canvas.getAttribute('data-brand-image'), mime = canvas.getAttribute('data-brand-mime');
+    if (!encoded || encoded.length > 500_000 || !['image/png', 'image/webp'].includes(mime)) continue;
+    try {
+      const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+      void createImageBitmap(new Blob([bytes], { type: mime })).then(bitmap => {
+        try {
+          const context = canvas.getContext('2d');
+          if (!context) return;
+          context.clearRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          canvas.setAttribute('data-icon-ready', 'true');
+        } finally { bitmap.close(); }
+      }).catch(() => { canvas.hidden = true; });
+    } catch { canvas.hidden = true; }
+  }
+}
+
+function selectPortalEcosystem(id = 'all') {
+  const { nodes, routes } = portalEcosystemRelations();
+  const selected = nodes.find(node => node.id === id);
+  portalEcosystemSelection = selected?.id ?? 'all';
+  const selectedRoutes = routes.filter(route => route.maturity === 'adapted'
+    && (!selected || route.from === selected.id || route.to === selected.id));
+  const pendingRoutes = routes.filter(route => route.maturity === 'client_pending'
+    && (!selected || route.from === selected.id || route.to === selected.id));
+  const related = new Set(selectedRoutes.flatMap(route => [route.from, route.to]));
+  for (const node of nodes) {
+    const button = document.getElementById(`portal-node-${node.id}`);
+    button?.setAttribute('aria-pressed', String(node.id === portalEcosystemSelection));
+    button?.setAttribute('data-muted', String(Boolean(selected && !related.has(node.id) && node.id !== selected.id)));
+  }
+  for (const path of new Set(routes.map(route => route.path))) {
+    const line = document.getElementById(`portal-route-${path}`);
+    const adapted = routes.some(route => route.path === path && route.maturity === 'adapted');
+    line?.setAttribute('data-stage', adapted ? 'adapted' : 'client_pending');
+    line?.setAttribute('marker-start', 'none');
+    line?.setAttribute('marker-end', adapted ? 'url(#portal-route-arrow)' : 'none');
+    line?.setAttribute('data-highlight', selected ? String(selectedRoutes.some(route => route.path === path)) : 'all');
+  }
+  const title = document.getElementById('portal-ecosystem-title'), copy = document.getElementById('portal-ecosystem-copy');
+  if (title) title.textContent = selected ? selected.name : '调用方 → 模型来源';
+  if (copy) copy.textContent = selected ? selected.description
+    : '例如：Codex 客户端使用 CodeBuddy 的模型额度。反向的桌面客户端尚未接入验收，不能视为双向可用。';
+  const rows = (items, pending = false) => items.map(route => {
+    const item = document.createElement('span');
+    const caller = `${nodes.find(node => node.id === route.from).name} 客户端`;
+    const provider = route.source === 'B' ? 'Codex 账号 B' : `${route.source} 额度`;
+    item.textContent = `${caller} → ${provider}${pending ? ' · 客户端待接入' : ''}`;
+    return item;
+  });
+  document.getElementById('portal-ecosystem-routes')?.replaceChildren(...rows(selectedRoutes));
+  document.getElementById('portal-ecosystem-pending')?.replaceChildren(...rows(pendingRoutes, true));
+  const details = document.getElementById('portal-pending-details');
+  const count = document.getElementById('portal-pending-count');
+  if (count) count.textContent = String(pendingRoutes.length);
+  if (details) {
+    details.hidden = pendingRoutes.length === 0;
+    details.open = Boolean(selected && selectedRoutes.length === 0 && pendingRoutes.length);
+  }
+}
+
+function installDirectionalArrowLayout(prefix, groupId) {
+  const svg = document.getElementById(groupId)?.ownerSVGElement;
+  if (!svg || typeof svg.getScreenCTM !== 'function' || typeof svg.createSVGPoint !== 'function') return;
+  const layout = () => {
+    const matrix = svg.getScreenCTM();
+    if (!matrix || !svg.getBoundingClientRect().width) return;
+    const point = (x, y) => { const value = svg.createSVGPoint(); value.x = x; value.y = y; return value.matrixTransform(matrix.inverse()); };
+    const box = id => document.getElementById(`${prefix}node-${id}`).getBoundingClientRect();
+    const codex = box('codex'), claude = box('claude'), buddy = box('codebuddy'), cursor = box('cursor');
+    const paths = [
+      ['codex-codebuddy', point((codex.left + codex.right) / 2, codex.bottom + 5), point((buddy.left + buddy.right) / 2, buddy.top - 10), -90, 25, -90, -40],
+      ['codex-cursor', point(codex.right + 5, (codex.top + codex.bottom) / 2), point((cursor.left + cursor.right) / 2, cursor.top - 10), 70, 15, -70, -50],
+      ['claude-codebuddy', point((claude.left + claude.right) / 2, claude.bottom + 5), point((buddy.left + buddy.right) / 2 + buddy.width / 4, buddy.top - 10), -60, 35, 120, -80],
+    ];
+    for (const [id, start, end, a, b, c, d] of paths) {
+      document.getElementById(`${prefix}route-${id}`)?.setAttribute('d', `M${start.x} ${start.y}C${start.x + a} ${start.y + b} ${end.x + c} ${end.y + d} ${end.x} ${end.y}`);
+    }
+  };
+  layout();
+  window.addEventListener('resize', layout);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(layout).observe(svg.parentElement);
+}
+
 const portalStateLabels = { active: '有效', enabled: '有效', disabled: '已停用', suspended: '已停用',
   revoked: '已撤销', expired: '已到期', pending: '待分配' };
 
@@ -383,10 +497,11 @@ async function logoutPortal() {
 }
 
 async function initializePortal() {
+  const entryMode = window.location?.pathname === '/register' ? 'register' : 'login';
   portalBusy = true; updatePortalControls();
   try {
     portalConfig = await portalApi('config');
-    setPortalAuthMode('login');
+    setPortalAuthMode(entryMode);
     try {
       const session = await portalApi('session');
       if (session.user) {
@@ -395,8 +510,18 @@ async function initializePortal() {
       }
     } catch (error) { if (error.status !== 401) handlePortalError(error); }
   } catch (error) { portalNotice(error.message); }
-  finally { portalBusy = false; setPortalAuthMode('login'); updatePortalControls(); }
+  finally { portalBusy = false; setPortalAuthMode(entryMode); updatePortalControls(); }
 }
+
+for (const { id } of portalEcosystemRelations().nodes) {
+  document.getElementById(`portal-node-${id}`)?.addEventListener('click', () => {
+    selectPortalEcosystem(portalEcosystemSelection === id ? 'all' : id);
+  });
+}
+document.getElementById('portal-map-reset')?.addEventListener('click', () => selectPortalEcosystem('all'));
+selectPortalEcosystem('all');
+paintOfficialBrandIcons();
+installDirectionalArrowLayout('portal-', 'portal-world-routes');
 
 portalElements['login-tab'].addEventListener('click', () => setPortalAuthMode('login'));
 portalElements['register-tab'].addEventListener('click', () => setPortalAuthMode('register'));

@@ -1,6 +1,50 @@
 'use strict';
 
 const byId = (id) => document.getElementById(id);
+
+function paintOfficialBrandIcons() {
+  if (typeof document.querySelectorAll !== 'function' || typeof createImageBitmap !== 'function'
+    || typeof Blob !== 'function' || typeof atob !== 'function') return;
+  for (const canvas of document.querySelectorAll('canvas[data-brand-image]')) {
+    const encoded = canvas.getAttribute('data-brand-image'), mime = canvas.getAttribute('data-brand-mime');
+    if (!encoded || encoded.length > 500_000 || !['image/png', 'image/webp'].includes(mime)) continue;
+    try {
+      const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+      void createImageBitmap(new Blob([bytes], { type: mime })).then(bitmap => {
+        try {
+          const context = canvas.getContext('2d');
+          if (!context) return;
+          context.clearRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          canvas.setAttribute('data-icon-ready', 'true');
+        } finally { bitmap.close(); }
+      }).catch(() => { canvas.hidden = true; });
+    } catch { canvas.hidden = true; }
+  }
+}
+
+function installDirectionalArrowLayout(prefix, groupId) {
+  const svg = document.getElementById(groupId)?.ownerSVGElement;
+  if (!svg || typeof svg.getScreenCTM !== 'function' || typeof svg.createSVGPoint !== 'function') return;
+  const layout = () => {
+    const matrix = svg.getScreenCTM();
+    if (!matrix || !svg.getBoundingClientRect().width) return;
+    const point = (x, y) => { const value = svg.createSVGPoint(); value.x = x; value.y = y; return value.matrixTransform(matrix.inverse()); };
+    const box = id => document.getElementById(`${prefix}node-${id}`).getBoundingClientRect();
+    const codex = box('codex'), claude = box('claude'), buddy = box('codebuddy'), cursor = box('cursor');
+    const paths = [
+      ['codex-codebuddy', point((codex.left + codex.right) / 2, codex.bottom + 5), point((buddy.left + buddy.right) / 2, buddy.top - 10), -90, 25, -90, -40],
+      ['codex-cursor', point(codex.right + 5, (codex.top + codex.bottom) / 2), point((cursor.left + cursor.right) / 2, cursor.top - 10), 70, 15, -70, -50],
+      ['claude-codebuddy', point((claude.left + claude.right) / 2, claude.bottom + 5), point((buddy.left + buddy.right) / 2 + buddy.width / 4, buddy.top - 10), -60, 35, 120, -80],
+    ];
+    for (const [id, start, end, a, b, c, d] of paths) {
+      document.getElementById(`${prefix}route-${id}`)?.setAttribute('d', `M${start.x} ${start.y}C${start.x + a} ${start.y + b} ${end.x + c} ${end.y + d} ${end.x} ${end.y}`);
+    }
+  };
+  layout();
+  window.addEventListener('resize', layout);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(layout).observe(svg.parentElement);
+}
 const elements = Object.fromEntries([
   'connection-dot', 'connection-label', 'version', 'notice', 'setup-state',
   'tab-console', 'tab-accounts', 'tab-clients', 'panel-console', 'panel-accounts', 'panel-clients',
@@ -74,6 +118,11 @@ let modelsRequest = null;
 let noticeTimer = null;
 let tokenUsageRequest = null;
 let withRequest = null;
+let messagesStatus = null;
+let worldSelection = 'all';
+let worldRenderSignature = '';
+let worldServiceGeneration = 0;
+const worldProviderGeneration = { codebuddy: -1, cursor: -1 };
 let codeBuddyRequest = null;
 let codeBuddyRequestEpoch = -1;
 let codeBuddyStatus = null;
@@ -667,17 +716,20 @@ function renderClientAdmin({ replaceDraft = false } = {}) {
 async function refreshClientAdmin({ clearSecret = false, replaceDraft = false } = {}) {
   if (clearSecret) clearClientSecret();
   if (clientAdminRequest) return clientAdminRequest;
+  const generation = worldServiceGeneration;
   const pending = (async () => {
     try {
       const data = await request('/api/client-admin', { signal: AbortSignal.timeout(10000) });
+      if (generation !== worldServiceGeneration) return;
       if (!Array.isArray(data.accounts) || !Array.isArray(data.invites)) throw new Error('用户管理返回格式不完整，请更新后台。');
       clientAdminData = data; clientAdminError = ''; clientAdminUnavailable = false; clientAdminLoaded = true;
       renderClientAdmin({ replaceDraft });
     } catch (error) {
+      if (generation !== worldServiceGeneration) return;
       clientAdminLoaded = true; clientAdminUnavailable = true;
       clientAdminError = error.status === 404 || error.status === 503 ? '接入用户管理需在更新并重启后台后可用。' : `用户管理读取失败：${error.message || '请重试。'}`;
       pill('client-admin-state', error.status === 404 || error.status === 503 ? '待更新后台' : '读取失败', 'pending');
-    } finally { if (clientAdminRequest === pending) clientAdminRequest = null; renderClientAdminControls(); }
+    } finally { if (clientAdminRequest === pending) clientAdminRequest = null; renderClientAdminControls(); renderWorldTree(); }
   })();
   clientAdminRequest = pending; renderClientAdminControls(); return pending;
 }
@@ -749,6 +801,151 @@ function renderAccountSummaries() {
     pending: ['starting', 'pending'].includes(cursorStatus?.login?.state) || busyAction === 'cursor-login',
     loggingOut: busyAction === 'cursor-logout', readError: cursorReadError, loading: !cursorStatus && !cursorReadError,
   });
+  renderWorldTree();
+}
+
+// Only adapted caller-to-quota directions appear in the drawing. A standard API
+// or a configured listener does not establish that a desktop app is integrated.
+function bridgeTopology({ connected, gateway, integration, models, modelError, backend, codebuddy, cursor, messages, clients }) {
+  const nodes = [
+    { id: 'codex', name: 'Codex', copy: '调用方。已适配 Codex 客户端使用 CodeBuddy 与 Cursor 额度。其他桌面客户端调用账号 B 的方向仍待接入与验收。' },
+    { id: 'claude', name: 'Claude', copy: 'Claude 客户端通过 Messages 网关调用 CLI 订阅或 CodeBuddy。CLI 保留在它的部署机器。' },
+    { id: 'codebuddy', name: 'CodeBuddy', copy: '模型来源。当前由 Codex、Claude 客户端调用；CodeBuddy 客户端反向调用其他来源，尚未完成接入和完整回合验证。' },
+    { id: 'workbuddy', name: 'WorkBuddy', copy: '待接入的调用方。通用 API 已实现，WorkBuddy 桌面端配置与完整回合仍待验收，不计为已接通。' },
+    { id: 'cursor', name: 'Cursor', copy: '目前提供账号额度与模型。尚未适配 Cursor 客户端调用本网关，因此只显示指向 Cursor 的箭头。' },
+  ];
+  const pending = (reason, label = '待配置') => ({ state: 'pending', label, reason });
+  const configured = reason => ({ state: 'configured', label: '入口已配置', reason });
+  const modelCount = channel => Array.isArray(models) && !modelError
+    ? models.filter(model => model.channel === channel && model.enabled === true && model.available !== false).length : null;
+  const source = (channel, { messagesRoute = false } = {}) => {
+    if (!connected) return pending('管理服务连接中断，先前状态不能作为当前连接证明。', '待确认');
+    if (channel === 'CodeBuddy' && messagesRoute) {
+      if (!codebuddy || codebuddy.configured !== true) return pending('CodeBuddy 渠道状态未确认。', '待确认');
+      if (codebuddy.provider?.authenticated !== true) return pending('CodeBuddy 尚未完成授权。', '待授权');
+      return codebuddy.provider.ready === true ? configured('CodeBuddy 已授权；使用 Messages 入口单独配置的模型范围。')
+        : pending('CodeBuddy 模型渠道尚未就绪。', '待确认');
+    }
+    const count = modelCount(channel);
+    if (count === null) return pending('模型目录状态未确认。请刷新模型目录。', '待确认');
+    if (count === 0) return pending('此来源尚无已保存并可用的模型。请在模型选择中开启。', '未开放模型');
+    if (channel === 'B') {
+      if (!backend || backend.error) return pending('账号 B 状态未确认。', '待确认');
+      if (!backend.account || !backend.pinnedAccount || !backend.account.email
+        || backend.account.email !== backend.pinnedAccount.email) return pending('请登录并确认当前账号 B；当前登录必须匹配已确认的绑定。', '待授权');
+      if (gateway?.enabled !== true) return pending('账号 B 网关尚未启用。');
+      return configured(`账号 B 已绑定；已开放 ${count} 个模型。不包含账号 A。`);
+    }
+    const provider = channel === 'CodeBuddy' ? codebuddy : cursor;
+    if (!provider) return pending(`${channel} 状态未返回。`, '待确认');
+    if (provider.configured !== true) return pending(`${channel} 渠道尚未配置。`);
+    if (provider.enabled !== true) return pending(provider.enabled === false ? `${channel} 渠道未启用。` : '后台未返回渠道启用状态，请更新服务后确认。', provider.enabled === false ? '未启用' : '待确认');
+    const authenticated = channel === 'CodeBuddy' ? provider.provider?.authenticated : provider.authReady;
+    if (authenticated !== true) return pending(`${channel} 尚未完成授权，或授权状态未确认。`, '待授权');
+    if (channel === 'CodeBuddy' && provider.provider?.ready !== true) return pending('CodeBuddy 模型渠道尚未就绪。', '待确认');
+    return configured(`${channel} 已授权；已开放 ${count} 个模型。实际权限与额度以该账号为准。`);
+  };
+  const ingress = client => {
+    if (!connected) return pending('管理服务连接中断。', '待确认');
+    if (client === 'codex') return integration?.installed === true ? configured('本机 Codex 已安装网关路由。') : pending('本机 Codex 网关路由尚未确认，请到账号管理检查。', '待接入');
+    if (client === 'claude') {
+      const running = messages?.channels?.CodeBuddy?.running;
+      return running === true ? configured('Claude Messages 入口已启动。') : pending('Claude Messages 入口尚未确认。', '待确认');
+    }
+    if (!clients) return pending('用户入口状态未确认，请在接入用户页检查。', '待确认');
+    if (clients.server?.ready !== true) return pending(clients.server?.enabled === false ? '独立 API Key 用户入口未启用。' : '独立 API Key 用户入口尚未就绪。', '待接入');
+    return configured('用户入口已就绪；客户端仍需填写 URL、Key 与获准模型。');
+  };
+  const specs = [
+    ['codex', 'codebuddy', 'CodeBuddy', 'Responses', 'world-route-codex-codebuddy'],
+    ['codebuddy', 'codex', 'B', 'Chat Completions / Responses', 'world-route-codex-codebuddy'],
+    ['codex', 'cursor', 'Cursor', 'Responses', 'world-route-codex-cursor'],
+    ['claude', 'codebuddy', 'CodeBuddy', 'Messages', 'world-route-claude-codebuddy'],
+    ['workbuddy', 'codex', 'B', 'Chat Completions / Responses', 'world-route-workbuddy-codex'],
+    ['workbuddy', 'codebuddy', 'CodeBuddy', 'Chat Completions / Responses', 'world-route-workbuddy-codebuddy'],
+    ['workbuddy', 'cursor', 'Cursor', 'Chat Completions / Responses', 'world-route-workbuddy-cursor'],
+    ['codebuddy', 'cursor', 'Cursor', 'Chat Completions / Responses', 'world-route-codebuddy-cursor'],
+  ];
+  const routes = specs.map(([from, to, channel, protocol, path]) => {
+    const entry = ingress(from), target = source(channel, { messagesRoute: from === 'claude' });
+    const readiness = entry.state !== 'configured' ? entry : target;
+    const maturity = ['codex', 'claude'].includes(from) ? 'adapted' : 'client_pending';
+    return { from, to, protocol, path, sourceName: channel === 'B' ? 'Codex 账号 B' : `${channel} 额度`, maturity, ...readiness,
+      ...(maturity === 'client_pending' ? { state: 'pending', label: '客户端待接入' } : {}),
+      reason: `${maturity === 'client_pending' ? '仅通用 API 已实现；尚未完成桌面客户端接入与完整回合验证。 ' : ''}${entry.reason} ${target.reason}${['workbuddy', 'codebuddy'].includes(from) ? ' 每个用户只能调用其 Key 获准的模型。' : ''}` };
+  });
+  const local = [
+    { from: 'codex', to: 'codex', name: '原模型 A / B', protocol: 'Responses',
+      ...(connected && integration?.installed === true ? configured('原模型 A 随 Codex 请求携带认证；B 需要独立绑定与模型授权。A 不通过公共用户 Key 开放。') : pending('原模型接入状态未确认。', '待确认')) },
+    { from: 'claude', to: 'claude', name: 'Claude 原订阅', protocol: 'Messages / CLI',
+      ...(connected && messages?.channels?.Claude?.running === true ? configured('CLI 订阅入口已启动；此状态未验证 CLI 登录、模型权限或真实推理。') : pending('CLI 订阅入口尚未确认。', '待确认')) },
+    { from: 'codebuddy', to: 'codebuddy', name: 'CodeBuddy 自有额度', protocol: '客户端原生 / 网关',
+      ...source('CodeBuddy') },
+  ];
+  return { nodes, routes, local };
+}
+
+function renderWorldTree() {
+  if (!byId('world-canvas')) return;
+  const topology = bridgeTopology({ connected: managementConnected && !managementStatusError && !restartInProgress,
+    gateway: status?.gateway, integration: status?.integration, backend: status?.backend,
+    models: modelSettings?.models, modelError: modelSettingsError || modelSettingsUnavailable || !modelSettingsLoaded,
+    codebuddy: codeBuddyReadError || worldProviderGeneration.codebuddy !== worldServiceGeneration ? null : codeBuddyStatus,
+    cursor: cursorReadError || worldProviderGeneration.cursor !== worldServiceGeneration ? null : cursorStatus,
+    messages: messagesStatus, clients: clientAdminUnavailable ? null : clientAdminData });
+  const signature = JSON.stringify([worldSelection, topology]);
+  if (signature === worldRenderSignature) return;
+  worldRenderSignature = signature;
+  const selected = topology.nodes.find(node => node.id === worldSelection);
+  const adaptedRoutes = topology.routes.filter(route => route.maturity === 'adapted');
+  const selectedRoutes = adaptedRoutes.filter(route => !selected || route.from === selected.id || route.to === selected.id);
+  const pendingRoutes = topology.routes.filter(route => route.maturity === 'client_pending'
+    && (!selected || route.from === selected.id || route.to === selected.id));
+  const related = new Set(selectedRoutes.flatMap(route => [route.from, route.to]));
+  byId('world-canvas').setAttribute('data-selection', worldSelection);
+  for (const node of topology.nodes) {
+    const button = byId(`world-node-${node.id}`);
+    button.setAttribute('aria-pressed', String(node.id === worldSelection));
+    button.setAttribute('class', `world-node node-${node.id}${selected && !related.has(node.id) && node.id !== selected.id ? ' node-muted' : ''}`);
+    const relevant = [...adaptedRoutes, ...topology.local].filter(route => route.from === node.id || route.to === node.id);
+    const count = relevant.filter(route => route.state === 'configured').length;
+    byId(`world-indicator-${node.id}`).setAttribute('data-state', relevant.length && count === relevant.length ? 'configured' : count ? 'partial' : 'pending');
+  }
+  for (const path of new Set(topology.routes.map(route => route.path))) {
+    const directions = adaptedRoutes.filter(route => route.path === path);
+    const count = directions.filter(route => route.state === 'configured').length;
+    byId(path).setAttribute('data-stage', directions.length ? 'adapted' : 'client_pending');
+    byId(path).setAttribute('marker-start', 'none');
+    byId(path).setAttribute('marker-end', directions.length ? 'url(#route-arrow)' : 'none');
+    byId(path).setAttribute('data-state', directions.length && count === directions.length ? 'configured' : count ? 'partial' : 'pending');
+    byId(path).setAttribute('data-highlight', selected ? String(directions.some(route => route.from === selected.id || route.to === selected.id)) : 'all');
+  }
+  byId('world-detail-eyebrow').textContent = selected ? 'EXPLORE / CONNECTION DETAILS' : 'EXPLORE THE CONNECTIONS';
+  byId('world-detail-title').textContent = selected ? selected.name : '调用方 → 模型来源';
+  byId('world-detail-copy').textContent = selected ? selected.copy : '例如：Codex 客户端使用 CodeBuddy 额度。反向桌面接入未完成，不表示双向可用。';
+  byId('world-node-count').textContent = String(topology.nodes.length);
+  byId('world-route-count').textContent = String(adaptedRoutes.length);
+  byId('world-ready-count').textContent = String(adaptedRoutes.filter(route => route.state === 'configured').length);
+  byId('world-connection-note').textContent = !managementConnected ? '当前连接未确认。可查看适配关系；恢复连接后更新状态。'
+    : selected?.id === 'cursor' ? 'Cursor 当前只提供额度，不接收来自本网关的客户端配置。'
+      : '主图仅显示已适配方向。API 入口就绪，不代表桌面客户端已接入。';
+  const rows = items => items.map(route => {
+    const row = document.createElement('div'); row.className = 'world-route-row'; row.setAttribute('data-state', route.state);
+    const heading = document.createElement('div'); heading.className = 'world-route-heading';
+    const title = document.createElement('strong'), state = document.createElement('span'), copy = document.createElement('p');
+    const name = id => topology.nodes.find(node => node.id === id).name;
+    title.textContent = route.name || `${name(route.from)} 客户端 → ${route.sourceName}`;
+    state.textContent = route.label; copy.textContent = `${route.protocol} · ${route.reason}`;
+    heading.append(title, state); row.append(heading, copy); return row;
+  });
+  byId('world-route-list').replaceChildren(...rows([...selectedRoutes, ...topology.local.filter(route => selected && route.from === selected.id)]));
+  byId('world-pending-list')?.replaceChildren(...rows(pendingRoutes));
+  const pendingDetails = byId('world-pending-details');
+  if (byId('world-pending-count')) byId('world-pending-count').textContent = String(pendingRoutes.length);
+  if (pendingDetails) {
+    pendingDetails.hidden = pendingRoutes.length === 0;
+    pendingDetails.open = Boolean(selected && selectedRoutes.length === 0 && pendingRoutes.length);
+  }
 }
 
 function invalidateAccountStatus(account) {
@@ -1243,13 +1440,16 @@ function renderCursor(data) {
 
 async function refreshCursor() {
   const epoch = accountStateEpoch.cursor;
+  const worldGeneration = worldServiceGeneration;
   if (cursorRequest && cursorRequestEpoch === epoch) return cursorRequest;
   const pending = (async () => {
     try {
       const previous = cursorStatus;
       const incoming = await request('/api/cursor', { signal: AbortSignal.timeout(20000) });
       if (epoch !== accountStateEpoch.cursor) return;
-      cursorStatus = incoming; cursorReadError = ''; renderCursor(cursorStatus);
+      cursorStatus = incoming; cursorReadError = '';
+      if (worldGeneration === worldServiceGeneration) worldProviderGeneration.cursor = worldGeneration;
+      renderCursor(cursorStatus);
       const refreshMetadata = accountMetadataNeedsRefresh.delete('cursor');
       if (refreshMetadata || previous && (previous.authReady !== cursorStatus.authReady || previous.profile?.email !== cursorStatus.profile?.email)) {
         void refreshAuthorizedModelSettings(); void refreshAuthorizedAccountQuotas();
@@ -1401,6 +1601,12 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         modelSettingsGeneration++;
         modelSettingsRequest = null;
         modelSettingsLoaded = false;
+        worldServiceGeneration++;
+        messagesStatus = null;
+        clientAdminData = null;
+        clientAdminLoaded = false;
+        clientAdminUnavailable = true;
+        clientAdminRequest = null;
       }
       if (queuedRestartToken && status.csrfToken && status.csrfToken !== queuedRestartToken) {
         queuedRestartToken = null;
@@ -1421,7 +1627,8 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         void refreshCursor();
         void refreshServiceStatus();
         if (!modelSettingsLoaded) void refreshModelSettings();
-        if (elements['tab-clients'].getAttribute('aria-selected') === 'true' && !clientAdminLoaded) void refreshClientAdmin();
+        if (!clientAdminLoaded && (elements['tab-clients'].getAttribute('aria-selected') === 'true'
+          || ['codebuddy', 'workbuddy'].includes(worldSelection))) void refreshClientAdmin();
         if (!status.backend?.error && accountMetadataNeedsRefresh.delete('b')) {
           void refreshAuthorizedModelSettings(); void refreshAuthorizedAccountQuotas();
         }
@@ -1433,7 +1640,7 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
       managementStatusError = true;
       elements['connection-dot'].className = 'status-dot failed';
       text('connection-label', restartInProgress || queuedRestartToken ? '正在等待网关恢复连接' : '本机服务连接中断，正在重试');
-      document.querySelectorAll('button:not(#quota-refresh-button):not([role="tab"])').forEach((button) => { button.disabled = true; });
+      document.querySelectorAll('button:not(#quota-refresh-button):not([role="tab"]):not([data-world-action])').forEach((button) => { button.disabled = true; });
       renderAccountSummaries();
       renderClientAdminControls();
       throw error;
@@ -1608,15 +1815,22 @@ function renderWith(data) {
 
 async function refreshWith() {
   if (withRequest) return withRequest;
+  const generation = worldServiceGeneration;
   withRequest = (async () => {
     try {
-      renderWith(await request('/api/with'));
+      const incoming = await request('/api/with');
+      if (generation !== worldServiceGeneration) return;
+      messagesStatus = incoming;
+      renderWith(messagesStatus);
     } catch (error) {
+      if (generation !== worldServiceGeneration) return;
+      messagesStatus = null;
       pill('with-state', '读取失败', 'error');
       elements['with-error'].hidden = false;
       text('with-error', `With 状态暂时无法读取：${error.message || '请稍后重试。'}`);
     } finally {
       withRequest = null;
+      renderWorldTree();
     }
   })();
   return withRequest;
@@ -1776,6 +1990,7 @@ function renderCodeBuddy(data) {
 
 async function refreshCodeBuddy() {
   const epoch = accountStateEpoch.codebuddy;
+  const worldGeneration = worldServiceGeneration;
   if (codeBuddyRequest && codeBuddyRequestEpoch === epoch) return codeBuddyRequest;
   const pending = (async () => {
     try {
@@ -1784,6 +1999,7 @@ async function refreshCodeBuddy() {
       if (epoch !== accountStateEpoch.codebuddy) return;
       codeBuddyStatus = incoming;
       codeBuddyReadError = '';
+      if (worldGeneration === worldServiceGeneration) worldProviderGeneration.codebuddy = worldGeneration;
       renderCodeBuddy(codeBuddyStatus);
       const refreshMetadata = accountMetadataNeedsRefresh.delete('codebuddy');
       if (refreshMetadata || previous && (previous.provider?.authenticated !== codeBuddyStatus.provider?.authenticated
@@ -2220,6 +2436,28 @@ elements['model-settings-refresh-button'].addEventListener('click', () => {
   });
 });
 elements['model-settings-search'].addEventListener('input', renderModelSettingsList);
+
+for (const id of ['codex', 'claude', 'codebuddy', 'workbuddy', 'cursor']) {
+  const button = byId(`world-node-${id}`);
+  button?.setAttribute('data-world-action', '');
+  button?.addEventListener('click', () => {
+    worldSelection = worldSelection === id ? 'all' : id;
+    renderWorldTree();
+    if (['codebuddy', 'workbuddy'].includes(worldSelection) && !clientAdminLoaded && managementConnected) void refreshClientAdmin();
+  });
+}
+for (const id of ['world-reset', 'world-manage-models', 'world-manage-accounts', 'world-manage-clients']) byId(id)?.setAttribute('data-world-action', '');
+byId('world-reset')?.addEventListener('click', () => { worldSelection = 'all'; renderWorldTree(); });
+byId('world-manage-models')?.addEventListener('click', () => {
+  selectManagementTab('console');
+  byId('model-settings-title')?.scrollIntoView?.({ block: 'start' });
+  byId('model-settings-search')?.focus();
+});
+byId('world-manage-accounts')?.addEventListener('click', () => { selectManagementTab('accounts', { focus: true }); });
+byId('world-manage-clients')?.addEventListener('click', () => { selectManagementTab('clients', { focus: true }); });
+renderWorldTree();
+paintOfficialBrandIcons();
+installDirectionalArrowLayout('world-', 'world-routes');
 
 void refreshAccountQuotas();
 void refreshStatus().catch(() => {});

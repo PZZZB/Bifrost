@@ -1,0 +1,82 @@
+{
+  "verifiedOn": "2026-10-24",
+  "files": [
+    {
+      "id": "codex",
+      "file": "codex.png",
+      "sourcePage": "https://openai.com/codex/",
+      "provenance": "Original asset from the installed official Microsoft Store package OpenAI.Codex 26.1021.3705.0",
+      "sourceArtifact": "OpenAI.Codex_26.1021.3705.0_x64__2p2nqsd0c76g0/assets/Square44x44Logo.targetsize-256_altform-unplated.png",
+      "appearance": "White knot on transparent background; the installed package default, not a custom glyph",
+      "bytes": 9264,
+      "sha256": "2b001fb1f4e7d76e4d459c2ad8f9739e963ffc1c2137abcfffe8da3ee7775f7c",
+      "size": [
+        256,
+        256
+      ]
+    },
+    {
+      "id": "claude",
+      "file": "claude.png",
+      "sourcePage": "https://claude.com/",
+      "sourceUrl": "https://assets.claude.com/95a868946ac8a31e5ff832e2899f294aa368b836.png",
+      "provenance": "Original PNG linked by the official Claude homepage favicon",
+      "appearance": "Orange Claude starburst on transparent background",
+      "bytes": 1198,
+      "sha256": "4004381309500f25e49a1ae639912ce307ea81da74cc383954a1ac8b9d343fe6",
+      "size": [
+        32,
+        32
+      ]
+    },
+    {
+      "id": "codebuddy",
+      "file": "codebuddy.png",
+      "sourcePage": "https://www.codebuddy.cn/ide/",
+      "sourceArtifact": "CodeBuddy CN/resources/app/resources/win32/code_150x150.png",
+      "provenance": "Original application icon from the installed official CodeBuddy CN package",
+      "appearance": "Purple gradient cat-face application icon",
+      "bytes": 23433,
+      "sha256": "3628c1891ff84443439bb1905b81a816367b3e994e9de4ee4a3baeb0bc9ab314",
+      "size": [
+        150,
+        150
+      ]
+    },
+    {
+      "id": "workbuddy",
+      "file": "workbuddy.webp",
+      "sourcePage": "https://www.codebuddy.cn/work/",
+      "sourceUrl": "https://download.codebuddy.cn/web/website/7bc2216f75dd7246caa4b03e8a7504bf8fef8d68/assets/app_icon-9ltaIE5a.webp",
+      "discoveredIn": "https://download.codebuddy.cn/web/website/7bc2216f75dd7246caa4b03e8a7504bf8fef8d68/assets/constants-C77qCxTb.js",
+      "provenance": "Original app_icon asset referenced by the official WorkBuddy website bundle",
+      "appearance": "Green gradient cat-face application icon",
+      "bytes": 12706,
+      "sha256": "51c8fc4b58609c5a58ccca81991e75bbe314adfe4fc70e789c6b20420a1420d6",
+      "size": [
+        400,
+        400
+      ]
+    },
+    {
+      "id": "cursor",
+      "file": "cursor.svg",
+      "sourcePage": "https://cursor.com/brand",
+      "sourceUrl": "https://cursor.com/marketing-static/favicon.svg",
+      "provenance": "Original SVG favicon linked by the official Cursor brand page",
+      "appearance": "Cursor cube application mark",
+      "bytes": 4373,
+      "sha256": "878309a7f82021e76cdf211188dd052fe6aaf2f435c24887a731d8a19582d260"
+    },
+    {
+      "id": "codebuddy-web",
+      "file": "codebuddy.svg",
+      "sourcePage": "https://www.codebuddy.cn/",
+      "sourceUrl": "https://download.codebuddy.cn/web/website/7bc2216f75dd7246caa4b03e8a7504bf8fef8d68/assets/logo.svg",
+      "provenance": "Original SVG favicon linked by the official CodeBuddy website",
+      "appearance": "Official website favicon variant; prefer codebuddy.png when representing the installed desktop application",
+      "bytes": 4186,
+      "sha256": "149baa45b9f9370c15f20d599afe381aa138e4fc13acf503f435c571ac93ecf5"
+    }
+  ]
+}
