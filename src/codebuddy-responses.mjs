@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { clientScope as validateClientScope } from './client-scope.mjs';
 import { CODEBUDDY_MODEL } from './codebuddy-provider.mjs';
 import { CODEBUDDY_STATE_PREFIX } from './codebuddy-thinking-state.mjs';
 import { resolveCodeBuddyAlias } from './codebuddy-models.mjs';
@@ -601,9 +602,10 @@ export class CodeBuddyResponsesProvider {
     this.instructionMarker = `bifrost-priority-${randomUUID()}`;
   }
   async status() { return { ...await this.provider.status(), responsesCapabilities: CODEBUDDY_RESPONSES_CAPABILITIES }; }
-  async request({ path, body, headers: _headers, signal } = {}) {
+  async request({ path, body, headers: _headers, signal, clientScope = null } = {}) {
     let request, profile = {};
     try {
+      clientScope = validateClientScope(clientScope);
       let url;
       try {
         if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) throw new Error();
@@ -658,6 +660,7 @@ export class CodeBuddyResponsesProvider {
     try {
       // Inbound ChatGPT credentials and client metadata never reach CodeBuddy.
       upstream = await this.provider.request({ path: '/v1/messages', body: Buffer.from(JSON.stringify(request.upstream)),
+        clientScope,
         headers: new Headers({ 'content-type': 'application/json', 'anthropic-version': '2023-06-01' }), signal: abort.signal });
       if (!upstream?.ok) {
         let message = 'CodeBuddy 上游请求失败。';

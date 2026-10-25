@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { clientScope as validateClientScope } from './client-scope.mjs';
 import { mkdir, readFile, writeFile, unlink, lstat, realpath, readdir, rm } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { cursorEffortParameter, resolveCursorModel, cursorImageCapability, cursorModelAvailability } from './cursor-service.mjs';
@@ -428,10 +429,11 @@ export class CursorResponsesProvider {
       }
     })();
   }
-  async request({ path, body, headers: _headers, signal } = {}) {
+  async request({ path, body, headers: _headers, signal, clientScope = null } = {}) {
     const epoch = this.#epoch;
     let parsed, model, credential, translated, selection, handle, checkpoint, auth;
     try {
+      clientScope = validateClientScope(clientScope);
       if (this.#closed) throw new CursorError('Cursor 推理桥已停止。', 503, 'cursor_closed');
       if (signal?.aborted) throw new CursorError('Cursor 请求已取消。', 499, 'request_cancelled');
       if (!['/responses', '/v1/responses'].includes(path)) throw new CursorError('Cursor 未提供此接口。', path?.includes('compact') ? 501 : 404);
@@ -450,7 +452,7 @@ export class CursorResponsesProvider {
       if (!source) throw new CursorError('当前 Cursor 账号没有此模型。', 403, 'cursor_model_unavailable');
       const availability = cursorModelAvailability(source);
       if (!availability.available) throw new CursorError(availability.reason, 403, 'cursor_model_unavailable');
-      auth = digest(credential.apiKey + '\n' + (credential.teamId ?? ''));
+      auth = digest(credential.apiKey + '\n' + (credential.teamId ?? '') + (clientScope === null ? '' : `\nclient:${clientScope}`));
       const incomingStates = Array.isArray(parsed.input) ? parsed.input.filter(item => item?.type === 'reasoning' && item.encrypted_content != null).map(item => item.encrypted_content) : [];
       const lastState = incomingStates.at(-1), liveRecord = this.#handles.get(lastState)?.record;
       if (lastState !== undefined && !liveRecord) checkpoint = await this.#loadCheckpoint(lastState, epoch);

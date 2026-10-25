@@ -1,0 +1,34 @@
+<view class="page">
+  <view class="brand"><view class="brand-mark">B</view><text>Bifröst</text><text class="brand-caption">用户中心</text></view>
+  <view wx:if="{{error}}" class="notice error">{{error}}</view>
+  <view wx:if="{{message}}" class="notice success">{{message}}</view>
+
+  <block wx:if="{{!loggedIn}}">
+    <view class="intro"><view class="eyebrow">ONE KEY. YOUR MODELS.</view><view class="title">连接你的模型</view><view class="muted">注册账号，创建 API Key。在 CodeBuddy、WorkBuddy 中填入接入地址和模型 ID，即可连接 Bifröst。</view></view>
+    <view class="card">
+      <view class="tabs"><button class="tab {{authMode === 'login' ? 'selected' : ''}}" data-mode="login" bindtap="setAuthMode" disabled="{{busy}}">登录</button><button class="tab {{authMode === 'register' ? 'selected' : ''}}" data-mode="register" bindtap="setAuthMode" disabled="{{busy || !registrationEnabled}}">注册</button></view>
+      <view class="field"><label>用户名</label><input value="{{username}}" data-field="username" bindinput="input" disabled="{{busy}}" maxlength="64" placeholder="3–64 个字母、数字或 _.-" /></view>
+      <view class="field"><label>密码</label><input password value="{{password}}" data-field="password" bindinput="input" disabled="{{busy}}" maxlength="256" placeholder="至少 12 个字符" /></view>
+      <view wx:if="{{authMode === 'register'}}" class="field"><label>邀请码{{invitationRequired ? '' : '（可选）'}}</label><input value="{{inviteToken}}" data-field="inviteToken" bindinput="input" disabled="{{busy}}" maxlength="256" /><view class="small muted">{{invitationRequired ? '请填写管理员提供的邀请码。' : '无邀请码注册后，由管理员分配可用模型。'}}</view></view>
+      <button class="button primary" bindtap="submitCredentials" loading="{{busy}}" disabled="{{busy || !configLoaded}}">{{authMode === 'register' ? '注册账号' : '登录'}}</button>
+      <view class="small muted spaced">密码用于登录用户中心，客户端使用单独的 API Key。</view>
+    </view>
+  </block>
+
+  <block wx:else>
+    <view class="heading"><view><view class="eyebrow">YOUR GATEWAY</view><view class="title">我的工作台</view><view class="muted">{{userLabel}}</view></view><view class="heading-actions"><button class="button compact" bindtap="refreshButton" disabled="{{busy}}">刷新</button><button class="button compact" bindtap="logout" disabled="{{busy}}">退出</button></view></view>
+    <view wx:if="{{accountNotice}}" class="notice error">{{accountNotice}}</view>
+    <view class="card"><view class="eyebrow">BALANCE & USAGE</view><view class="card-title">余额与用量 <text class="count">{{billingLabel}}</text></view><view class="small muted">{{billingNote}}</view><view class="billing-metrics"><view wx:for="{{billingMetrics}}" wx:key="label" class="billing-metric"><view class="small muted">{{item.label}}</view><view class="billing-value">{{item.value}}</view></view></view><view class="billing-ledger-title">最近账单 <text class="count">{{billingHistory.length}} 条</text></view><view wx:if="{{!billingHistory.length}}" class="empty">{{billingReady ? '暂无账单。' : '账单信息尚未返回。'}}</view><view wx:for="{{billingHistory}}" wx:key="id" class="billing-row"><view class="billing-row-heading"><text>{{item.title}}</text><text class="billing-amount">{{item.amount}}</text></view><view class="small muted">{{item.time}}</view><view wx:if="{{item.model}}" class="code small muted">{{item.model}}</view><view wx:if="{{item.note}}" class="small muted">{{item.note}}</view><view wx:if="{{item.usage}}" class="small muted">{{item.usage}}</view><view wx:if="{{item.reserved}}" class="small muted">{{item.reserved}}</view></view></view>
+    <view class="card"><view class="eyebrow">CONNECT</view><view class="card-title">接入客户端</view>
+      <view class="field"><label>CodeBuddy / WorkBuddy · OpenAI Chat 完整接口地址</label><view class="code">{{chatCompletionsUrl || '管理员尚未配置'}}</view><button wx:if="{{chatCompletionsUrl}}" class="text-button" data-kind="chatCompletionsUrl" bindtap="copyValue">复制地址</button></view>
+      <view wx:if="{{baseUrl}}" class="field"><label>支持 Base URL 的客户端</label><view class="code">{{baseUrl}}</view><button class="text-button" data-kind="baseUrl" bindtap="copyValue">复制地址</button></view>
+      <view wx:if="{{messagesUrl}}" class="field"><label>Anthropic Messages · 仅 CodeBuddy 渠道模型</label><view class="code">{{messagesUrl}}</view><button class="text-button" data-kind="messagesUrl" bindtap="copyValue">复制地址</button></view>
+      <view class="small muted">CodeBuddy 使用完整 Chat 地址。WorkBuddy 在设置→模型→自定义中填写地址、Key 和模型 ID；使用完整地址时可开启高级“自定义协议”。</view>
+    </view>
+    <view class="card"><view class="eyebrow">API KEY</view><view class="card-title">创建密钥</view><view class="field"><label>密钥名称</label><input value="{{keyName}}" data-field="keyName" bindinput="input" maxlength="80" placeholder="例如：办公电脑" disabled="{{busy}}" /></view><view class="field"><label>有效天数</label><input type="number" value="{{keyDays}}" data-field="keyDays" bindinput="input" disabled="{{busy}}" /><view class="small muted">到期仅 Key 失效，账号仍可登录。当前授权最晚截止：{{keyDeadline}}。新建 Key 不会延长该截止时间。</view></view><button class="button primary" bindtap="createKey" loading="{{busy}}" disabled="{{busy || !canCreateKey}}">创建 API Key</button></view>
+    <view wx:if="{{newSecret}}" class="card secret-card"><view class="eyebrow">SAVE YOUR KEY</view><view class="card-title">请保存新密钥</view><view class="muted small spaced">完整 Key 只显示这一次。离开当前页面后会清除，无法再次读取。</view><text class="secret code" user-select>{{newSecret}}</text><button class="button primary" bindtap="copySecret">复制 API Key</button><button class="text-button centered" bindtap="clearSecret">关闭并清除</button></view>
+    <view class="card"><view class="eyebrow">MY KEYS</view><view class="card-title">我的密钥 <text class="count">{{keys.length}} 个</text></view><view wx:if="{{!keys.length}}" class="empty">尚无密钥，在上方创建 API Key。</view><view wx:for="{{keys}}" wx:key="id" class="key-row"><view class="key-title"><text>{{item.name}}</text><text class="pill {{item.status}}">{{item.statusLabel}}</text></view><view class="code muted small">{{item.prefix}}</view><view class="small muted spaced"><view>创建：{{item.createdAt}}</view><view>到期：{{item.expiresAt}}</view><view>最近使用：{{item.lastUsedAt}}</view></view><button wx:if="{{item.canRevoke}}" class="button danger compact" data-id="{{item.id}}" bindtap="revokeKey" disabled="{{busy}}">撤销密钥</button></view></view>
+    <view class="card"><view class="eyebrow">AVAILABLE MODELS</view><view class="card-title">可用模型 <text class="count">{{models.length}} 个</text></view><view class="small muted">{{modelPricingNote}}</view><view wx:if="{{!models.length}}" class="empty">暂未分配可用模型，请联系管理员。</view><view wx:for="{{models}}" wx:key="id" class="model-row"><view>{{item.name}}</view><view class="code muted small">{{item.id}}</view><view wx:if="{{item.protocols}}" class="small muted">{{item.protocols}}</view><view class="small muted">{{item.pricingText}}</view><button class="text-button" data-kind="model" data-id="{{item.id}}" bindtap="copyValue">复制模型 ID</button></view></view>
+  </block>
+  <view class="footer">Bifröst · 模型网关</view>
+</view>

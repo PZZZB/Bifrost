@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { clientScope as validateClientScope } from './client-scope.mjs';
 import { imagePart, ImageConversionError } from './codebuddy-images.mjs';
 import { documentParts, DocumentConversionError } from './codebuddy-documents.mjs';
 import { thinkingOptions, thinkingText, ThinkingConversionError } from './codebuddy-thinking.mjs';
@@ -593,7 +594,7 @@ export class CodeBuddyProvider {
         billing: { verified: false, employeeTokenMultiplier: null, sourceCredits: null, sourcePromotion: null } };
     }
   }
-  async request({ path, body, headers: _headers, signal } = {}) {
+  async request({ path, body, headers: _headers, signal, clientScope = null } = {}) {
     let parsedPath;
     try {
       if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) throw new Error();
@@ -603,6 +604,7 @@ export class CodeBuddyProvider {
     if (parsedPath !== '/v1/messages') return errorResponse(new AdapterError('CodeBuddy 未提供此接口。', 404));
     let request, model, identity, thinkingState;
     try {
+      clientScope = validateClientScope(clientScope);
       thinkingState = await this.#state();
       const scopes = [];
       // Validate client content before any authenticated catalog or model request.
@@ -623,7 +625,7 @@ export class CodeBuddyProvider {
         if (request.images && selected.descriptor.inputModalities?.includes('image') !== true) invalid('当前 CodeBuddy 模型目录未确认支持图片输入。');
         if (request.toolNames.size && selected.descriptor.supportsToolCall === false) invalid('当前 CodeBuddy 模型明确不支持工具调用。');
       }
-      if (scopes.some(state => state.identity !== identity || state.model !== model.id)) {
+      if (scopes.some(state => state.identity !== identity || state.model !== model.id || (state.client_scope ?? null) !== clientScope)) {
         throw new AdapterError('思考接续状态与当前 CodeBuddy 账号或模型不匹配，请使用原账号或新建会话。', 403);
       }
     } catch (error) { return errorResponse(aborted(signal) ? new AdapterError('CodeBuddy 请求已取消。', 499) : error); }
@@ -632,6 +634,7 @@ export class CodeBuddyProvider {
     signal?.addEventListener('abort', onAbort, { once: true }); if (aborted(signal)) abort.abort();
     const state = new Completion(request, (reasoning, extraFields) => {
       try { return thinkingState.seal({ reasoning, identity, model: model.id,
+        ...(clientScope !== null ? { client_scope: clientScope } : {}),
         ...(extraFields !== undefined ? { extra_fields: extraFields } : {}) }); }
       catch { protocol(extraFields !== undefined ? 'CodeBuddy extra_fields 接续状态无效、超过大小限制或无法生成（extra_fields:'
         + (Array.isArray(extraFields) ? 'array' : typeof extraFields) + '）。' : 'CodeBuddy 思考接续状态超过大小限制或无法生成。'); }

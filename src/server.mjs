@@ -16,7 +16,7 @@ function json(res, status, data) {
 }
 
 export function createBridgeServer({ backend, gateway, integration, state, publicDir, baseUrl,
-  usageLedger = null, accountQuotas = null, providerQuotas = null, requestDiagnostics = null,
+  usageLedger = null, accountQuotas = null, providerQuotas = null, requestDiagnostics = null, clientAdmin = null,
   codeBuddyService = null, serviceControl = null, modelPolicy = null, modelDiscovery = null, cursorService = null, cursorProvider = null,
   getWithStatus = async () => ({ configured: false, running: false,
     model: { id: 'claude-opus-5-5', name: 'With · Opus 5.5' },
@@ -126,6 +126,21 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       if (!url.pathname.startsWith('/api/')) throw new BridgeError('页面不存在。', 404);
       checkBrowser(req);
       if (req.method === 'GET') {
+        if (url.pathname === '/api/client-admin/billing/unresolved') {
+          if (!clientAdmin) throw new BridgeError('接入用户管理尚未就绪。', 503, 'client_admin_unavailable');
+          json(res, 200, clientAdmin.outstanding({ limit: 50,
+            ...(url.searchParams.has('accountId') ? { accountId: url.searchParams.get('accountId') } : {}),
+            ...(url.searchParams.has('before') ? { before: url.searchParams.get('before') } : {}) })); return;
+        }
+        const billingHistory = /^\/api\/client-admin\/accounts\/([0-9a-f-]{36})\/billing\/history$/.exec(url.pathname);
+        if (billingHistory) {
+          if (!clientAdmin) throw new BridgeError('接入用户管理尚未就绪。', 503, 'client_admin_unavailable');
+          json(res, 200, clientAdmin.history(billingHistory[1], { limit: 50, ...(url.searchParams.has('before') ? { before: url.searchParams.get('before') } : {}) })); return;
+        }
+        if (url.pathname === '/api/client-admin') {
+          if (!clientAdmin) throw new BridgeError('当前后台尚未启用接入用户管理，请重启加载。', 503, 'client_admin_unavailable');
+          json(res, 200, await clientAdmin.snapshot()); return;
+        }
         if (url.pathname === '/api/request-diagnostics' || url.pathname.startsWith('/api/request-diagnostics/')) {
           if (!requestDiagnostics) throw new BridgeError('当前后台尚未启用请求诊断。', 503, 'diagnostics_unavailable');
           if (url.pathname === '/api/request-diagnostics') {
@@ -221,6 +236,10 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       adminOperation = url.pathname;
       try {
         const body = await bodyJson(req, url.pathname === '/api/model-settings' ? 1024 * 1024 : 64 * 1024);
+        if (url.pathname.startsWith('/api/client-admin/')) {
+          if (!clientAdmin) throw new BridgeError('当前后台尚未启用接入用户管理，请重启加载。', 503, 'client_admin_unavailable');
+          json(res, 200, await clientAdmin.mutate(url.pathname, body)); return;
+        }
         if (url.pathname === '/api/service/restart/cancel') {
           if (!serviceControl) throw new BridgeError('当前运行版本尚未启用网页服务控制。', 503);
           if (body === null || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) throw new BridgeError('取消排队只接受空对象。', 400);

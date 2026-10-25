@@ -3,7 +3,24 @@
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'connection-dot', 'connection-label', 'version', 'notice', 'setup-state',
-  'tab-console', 'tab-accounts', 'panel-console', 'panel-accounts',
+  'tab-console', 'tab-accounts', 'tab-clients', 'panel-console', 'panel-accounts', 'panel-clients',
+  'client-admin-refresh', 'client-admin-error', 'client-admin-message', 'client-admin-state',
+  'client-api-base', 'client-portal-link', 'client-access-note', 'client-users-count', 'client-user-list',
+  'client-user-create-form', 'client-create-username', 'client-create-password', 'client-user-create',
+  'client-detail-title', 'client-user-state', 'client-user-empty', 'client-user-detail', 'client-user-meta', 'client-user-toggle',
+  'client-user-limit-form', 'client-user-key-limit', 'client-user-limit-save',
+  'client-model-form', 'client-model-list', 'client-model-save', 'client-model-message',
+  'client-key-list', 'client-key-create-form', 'client-key-name', 'client-key-days', 'client-key-create',
+  'client-registration-form', 'client-registration-mode', 'client-registration-days', 'client-registration-save',
+  'client-invitation-list', 'client-invitation-create-form', 'client-invitation-days', 'client-invitation-uses', 'client-invitation-models', 'client-invitation-create',
+  'client-secret-panel', 'client-secret-title', 'client-secret-note', 'client-secret-label', 'client-secret-value', 'client-secret-copy', 'client-secret-close',
+  'client-billing-state', 'client-billing-note', 'client-billing-metrics', 'client-billing-policy-form', 'client-billing-enforce',
+  'client-billing-token-limit', 'client-billing-policy-save', 'client-billing-reset-confirm', 'client-billing-quota-reset',
+  'client-balance-form', 'client-balance-amount', 'client-balance-note', 'client-balance-submit', 'client-balance-pending',
+  'client-prices-state', 'client-prices-form', 'client-price-model', 'client-price-input', 'client-price-cached', 'client-price-output',
+  'client-price-reserve-input', 'client-price-reserve-output', 'client-price-enabled', 'client-price-save',
+  'client-ledger-count', 'client-ledger-note', 'client-ledger-list', 'client-ledger-error', 'client-ledger-more',
+  'client-unresolved-count', 'client-unresolved-error', 'client-unresolved-list', 'client-unresolved-more',
   ...['a', 'b', 'codebuddy', 'cursor'].flatMap(account =>
     ['state', 'identity', 'plan', 'method', 'catalog', 'enabled'].map(field => `account-${account}-${field}`)),
   'step-login', 'step-bind', 'step-verify', 'login-button', 'device-login-button', 'authorization-link',
@@ -91,6 +108,55 @@ let cursorRequest = null;
 let cursorRequestEpoch = -1;
 const accountStateEpoch = { b: 0, codebuddy: 0, cursor: 0 };
 const accountMetadataNeedsRefresh = new Set();
+let clientAdminData = null;
+let clientAdminRequest = null;
+let clientAdminLoaded = false;
+let clientAdminError = '';
+let clientAdminUnavailable = true;
+let clientSelectedId = '';
+let clientModelDraft = new Set();
+let clientInviteDraft = new Set();
+let clientSecret = '';
+let clientDefaultDays = 30;
+const clientBillingOperations = new Map();
+let clientBillingRenderedId = '';
+let clientUnresolvedRows = [];
+let clientUnresolvedNextBefore = null;
+let clientUnresolvedLoading = false;
+let clientUnresolvedError = '';
+let clientUnresolvedGeneration = 0;
+let clientLedgerRows = [];
+let clientLedgerNextBefore = null;
+let clientLedgerLoading = false;
+let clientLedgerError = '';
+let clientLedgerGeneration = 0;
+const clientBillingStorageKey = 'bifrost.admin.billing.pending.v1';
+try {
+  const stored = JSON.parse(window.sessionStorage?.getItem(clientBillingStorageKey) || '[]');
+  if (Array.isArray(stored)) for (const item of stored) {
+    if (!item || typeof item.slot !== 'string' || typeof item.path !== 'string' || !item.body || typeof item.body !== 'object'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item.body.operationId)) continue;
+    const balance = /^balance:([0-9a-f-]{36})$/i.exec(item.slot), resolve = /^resolve:([0-9a-f-]{36})$/i.exec(item.slot);
+    const { operationId, ...body } = item.body;
+    if (balance && item.path === `/api/client-admin/accounts/${balance[1]}/balance`
+      && Number.isSafeInteger(body.amountMicros) && body.amountMicros !== 0 && Object.keys(body).every(key => ['amountMicros', 'note'].includes(key))
+      && (body.note === undefined || typeof body.note === 'string' && body.note.length <= 240)
+      || resolve && item.path === `/api/client-admin/billing/requests/${resolve[1]}/resolve` && ['release', 'settle'].includes(body.action)
+      && Object.keys(body).every(key => ['action', 'usage'].includes(key)) && (body.action === 'release' && body.usage === undefined
+        || body.action === 'settle' && body.usage && ['inputTokens', 'cachedInputTokens', 'outputTokens', 'totalTokens'].every(key => Number.isSafeInteger(body.usage[key]) && body.usage[key] >= 0)
+        && body.usage.cachedInputTokens <= body.usage.inputTokens && body.usage.inputTokens + body.usage.outputTokens === body.usage.totalTokens)) {
+      clientBillingOperations.set(item.slot, { path: item.path, body: item.body, signature: JSON.stringify({ path: item.path, body }), uncertain: true });
+    }
+  }
+} catch { /* New mutations verify session persistence before sending a request. */ }
+
+function persistClientBillingOperations() {
+  try {
+    if (typeof window.sessionStorage?.setItem !== 'function') return false;
+    window.sessionStorage.setItem(clientBillingStorageKey, JSON.stringify([...clientBillingOperations].map(([slot, item]) => ({ slot, path: item.path, body: item.body }))));
+    return true;
+  } catch { return false; }
+}
 
 function text(id, value) {
   elements[id].textContent = value == null ? '' : String(value);
@@ -102,8 +168,8 @@ function pill(id, label, kind = '') {
 }
 
 function selectManagementTab(name, { focus = false, updateLocation = true } = {}) {
-  const selected = name === 'accounts' ? 'accounts' : 'console';
-  for (const tab of ['console', 'accounts']) {
+  const selected = ['accounts', 'clients'].includes(name) ? name : 'console';
+  for (const tab of ['console', 'accounts', 'clients']) {
     const active = selected === tab;
     elements[`tab-${tab}`].setAttribute('aria-selected', String(active));
     elements[`tab-${tab}`].tabIndex = active ? 0 : -1;
@@ -111,6 +177,518 @@ function selectManagementTab(name, { focus = false, updateLocation = true } = {}
   }
   if (focus) elements[`tab-${selected}`].focus();
   if (updateLocation && window.history?.replaceState) window.history.replaceState(null, '', `#${selected}`);
+  if (selected === 'clients' && !clientAdminLoaded && managementConnected) void refreshClientAdmin();
+}
+
+function clientAccount() {
+  return clientAdminData?.accounts?.find(account => account.id === clientSelectedId) ?? null;
+}
+
+function clientAdminReady() {
+  return managementConnected && !busyAction && !restartInProgress && !clientAdminRequest && !clientAdminUnavailable && clientAdminData !== null;
+}
+
+function clientModelSelectionDirty() {
+  const saved = new Set(clientAccount()?.allowedModels ?? []);
+  return saved.size !== clientModelDraft.size || [...saved].some(id => !clientModelDraft.has(id));
+}
+
+function renderClientAdminControls() {
+  const ready = clientAdminReady();
+  const selected = Boolean(clientAccount());
+  elements['client-secret-close'].disabled = false;
+  elements['client-secret-copy'].disabled = !clientSecret;
+  elements['client-admin-refresh'].disabled = !managementConnected || Boolean(busyAction) || restartInProgress || Boolean(clientAdminRequest);
+  for (const id of ['client-user-create', 'client-registration-save', 'client-invitation-create']) elements[id].disabled = !ready;
+  for (const id of ['client-user-toggle', 'client-user-limit-save', 'client-key-create']) elements[id].disabled = !ready || !selected;
+  elements['client-model-save'].disabled = !ready || !selected || !clientModelSelectionDirty();
+  for (const button of document.querySelectorAll('[data-client-write]')) button.disabled = !ready;
+  const billingReady = ready && clientAdminData?.billing?.available === true;
+  for (const id of ['client-billing-policy-save', 'client-balance-submit']) elements[id].disabled = !billingReady || !selected || !clientAccount()?.billing;
+  elements['client-price-save'].disabled = !billingReady || !elements['client-price-model'].value;
+  const accountBilling = clientAccount()?.billing;
+  elements['client-billing-quota-reset'].disabled = !billingReady || !accountBilling || !elements['client-billing-reset-confirm'].checked
+    || accountBilling.pendingCount !== 0 || accountBilling.unresolvedCount !== 0;
+  for (const button of document.querySelectorAll('[data-client-billing-write]')) button.disabled = !billingReady;
+  elements['client-unresolved-more'].disabled = !billingReady || clientUnresolvedLoading;
+  elements['client-ledger-more'].disabled = !billingReady || clientLedgerLoading;
+  const pendingBalance = clientBillingOperations.get(`balance:${clientSelectedId}`);
+  text('client-balance-pending', pendingBalance ? '上次提交结果尚未确认。再次提交将重试同一笔调整，金额与备注暂不可修改。' : '');
+  for (const id of ['client-balance-amount', 'client-balance-note']) elements[id].disabled = !billingReady || Boolean(pendingBalance);
+  text('client-balance-submit', pendingBalance ? '重试同一笔余额调整' : '提交余额调整');
+  text('client-admin-error', clientAdminError);
+  elements['client-admin-error'].hidden = !clientAdminError;
+}
+
+function clientLocalDate(value) {
+  const date = new Date(value);
+  return value && Number.isFinite(date.getTime()) ? new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
+}
+
+function clientTime(value) {
+  return value ? tokenTime(value, 'America/Los_Angeles') : '未设置';
+}
+
+function clientInteger(id, label, maximum = 3650) {
+  const value = elements[id].value.trim();
+  const number = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(number) || number < 1 || number > maximum) throw new Error(`${label}需为 1–${maximum} 的整数。`);
+  return number;
+}
+
+function clientAccountPath(id = clientSelectedId) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('用户标识无效，请刷新用户列表。');
+  return `/api/client-admin/accounts/${encodeURIComponent(id)}`;
+}
+
+function clientKeyPath(id, accountId = clientSelectedId) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('Key 标识无效，请刷新用户列表。');
+  return `${clientAccountPath(accountId)}/keys/${encodeURIComponent(id)}`;
+}
+
+function clientInvitationPath(id) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('邀请码标识无效，请刷新用户列表。');
+  return `/api/client-admin/invites/${encodeURIComponent(id)}`;
+}
+
+function clientDecimalMicros(value, { signed = false, nonzero = false, label = '金额' } = {}) {
+  const normalized = String(value).trim();
+  if (!(signed ? /^-?\d+(?:\.\d{1,6})?$/ : /^\d+(?:\.\d{1,6})?$/).test(normalized)) throw new Error(`${label}需为十进制数字，最多 6 位小数。`);
+  const negative = normalized.startsWith('-');
+  const [whole, fraction = ''] = normalized.replace(/^-/, '').split('.');
+  const amount = (BigInt(whole) * 1000000n + BigInt(fraction.padEnd(6, '0'))) * (negative ? -1n : 1n);
+  if (amount > BigInt(Number.MAX_SAFE_INTEGER) || amount < BigInt(Number.MIN_SAFE_INTEGER) || nonzero && amount === 0n) throw new Error(`${label}超出范围或为零。`);
+  return Number(amount);
+}
+
+function clientMoney(value, { unit = true } = {}) {
+  if (!Number.isSafeInteger(value)) return '未返回';
+  const amount = BigInt(value), absolute = amount < 0n ? -amount : amount;
+  const fraction = (absolute % 1000000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return `${amount < 0n ? '-' : ''}${absolute / 1000000n}${fraction ? `.${fraction}` : ''}${unit ? ' 元' : ''}`;
+}
+
+function clientTokenValue(value) { return Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString('zh-CN') : '未返回'; }
+
+function clientNonnegativeInteger(value, label, { optional = false } = {}) {
+  const normalized = String(value).trim();
+  if (optional && !normalized) return null;
+  const number = Number(normalized);
+  if (!/^\d+$/.test(normalized) || !Number.isSafeInteger(number) || number < 0) throw new Error(`${label}需为非负整数。`);
+  return number;
+}
+
+function clientBillingReady() { return clientAdminReady() && clientAdminData?.billing?.available === true; }
+
+async function clientIdempotentPost(slot, path, body) {
+  const signature = JSON.stringify({ path, body });
+  let pending = clientBillingOperations.get(slot);
+  if (pending && pending.signature !== signature) throw new Error('上次操作结果尚未确认，请先重试原操作，再填写新的调整。');
+  if (!pending) {
+    if (clientBillingOperations.size >= 100) throw new Error('已有 100 笔未确认操作。请先重试并核对原操作，再提交新的调整。');
+    if (typeof globalThis.crypto?.randomUUID !== 'function') throw new Error('当前浏览器无法生成安全操作标识，请使用本机地址或 HTTPS。');
+    pending = { signature, path, body: { ...body, operationId: globalThis.crypto.randomUUID() }, uncertain: false };
+    clientBillingOperations.set(slot, pending);
+    if (!persistClientBillingOperations()) {
+      clientBillingOperations.delete(slot);
+      throw new Error('当前浏览器无法保存未确认操作，尚未发送调整。请在允许会话存储的浏览器窗口中重试。');
+    }
+  }
+  renderClientAdminControls();
+  try {
+    const response = await fetch(pending.path, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Bridge-CSRF': status.csrfToken }, body: JSON.stringify(pending.body), signal: AbortSignal.timeout(15000) });
+    let data;
+    try { data = await response.json(); }
+    catch { throw new Error('服务响应不完整，结果尚未确认。请重试同一操作。'); }
+    if (!response.ok) {
+      if (!pending.uncertain && response.status >= 400 && response.status < 500 && response.status !== 408) { clientBillingOperations.delete(slot); persistClientBillingOperations(); }
+      throw Object.assign(new Error(data?.error?.message || `请求失败（HTTP ${response.status}）`), { status: response.status });
+    }
+    const confirmed = slot.startsWith('balance:') ? data?.billing?.accountId === slot.slice(8) && Number.isSafeInteger(data.billing.balanceMicros)
+      : slot.startsWith('resolve:') ? data?.record?.requestId === slot.slice(8) && ['settled', 'released'].includes(data.record.status) : false;
+    if (!confirmed) throw new Error('服务响应不完整，结果尚未确认。请重试同一操作。');
+    clientBillingOperations.delete(slot);
+    persistClientBillingOperations();
+    return data;
+  } catch (error) {
+    if (clientBillingOperations.has(slot)) { pending.uncertain = true; error.message = `${error.message || '连接中断。'} 操作结果尚未确认，重试会复用原操作标识。`; }
+    if (slot.startsWith('resolve:')) renderClientUnresolved();
+    throw error;
+  }
+}
+
+function renderClientAccountBilling(account) {
+  const billing = account?.billing;
+  const available = clientAdminData?.billing?.available === true && billing && typeof billing === 'object';
+  pill('client-billing-state', available ? billing.accountingBlocked ? '计费需人工处理' : billing.enforceBalance ? '余额计费已启用' : '仅统计 Token' : '待更新后台', available && !billing.accountingBlocked ? 'success' : 'pending');
+  text('client-billing-note', available ? `${billing.pendingCount || 0} 个进行中预留 · ${billing.unresolvedCount || 0} 个待核对请求。${billing.accountingBlocked ? '计费异常正在阻止新调用，请核对挂单。' : ''}充值由管理员记账，不包含线上支付。` : '余额与配额未返回。更新并重启后台后读取，当前不按零余额展示。');
+  const metrics = available ? [['账户余额', clientMoney(billing.balanceMicros)], ['预留金额', clientMoney(billing.reservedMicros)], ['可用余额', clientMoney(billing.availableMicros)],
+    ['本周期已用 Token', clientTokenValue(billing.usedTokens)], ['预留 Token', clientTokenValue(billing.reservedTokens)], ['剩余 Token', billing.tokenLimit === null ? '未设上限' : clientTokenValue(billing.remainingTokens)]] : [];
+  elements['client-billing-metrics'].replaceChildren(...metrics.map(([label, value]) => {
+    const row = document.createElement('div'), term = document.createElement('dt'), detail = document.createElement('dd');
+    term.textContent = label; detail.textContent = value; row.append(term, detail); return row;
+  }));
+  elements['client-billing-enforce'].checked = available && billing.enforceBalance === true;
+  elements['client-billing-token-limit'].value = available && Number.isSafeInteger(billing.tokenLimit) ? String(billing.tokenLimit) : '';
+  elements['client-billing-reset-confirm'].checked = false;
+  if (clientBillingRenderedId !== account?.id) {
+    clientBillingRenderedId = account?.id || '';
+    const pending = clientBillingOperations.get(`balance:${account?.id}`);
+    elements['client-balance-amount'].value = pending ? clientMoney(pending.body.amountMicros, { unit: false }) : '';
+    elements['client-balance-note'].value = pending?.body.note || '';
+  }
+  renderClientLedger(account);
+}
+
+function renderClientPriceFields() {
+  const price = clientAdminData?.billing?.prices?.find(item => item.model === elements['client-price-model'].value);
+  for (const [id, key] of [['client-price-input', 'inputRateMicros'], ['client-price-cached', 'cachedInputRateMicros'], ['client-price-output', 'outputRateMicros']]) elements[id].value = price && Number.isSafeInteger(price[key]) ? clientMoney(price[key], { unit: false }) : '';
+  for (const [id, key] of [['client-price-reserve-input', 'reserveInputTokens'], ['client-price-reserve-output', 'reserveOutputTokens']]) elements[id].value = price && Number.isSafeInteger(price[key]) ? String(price[key]) : '';
+  elements['client-price-enabled'].checked = price?.enabled === true;
+  renderClientAdminControls();
+}
+
+function renderClientPrices() {
+  const available = clientAdminData?.billing?.available === true;
+  const prices = Array.isArray(clientAdminData?.billing?.prices) ? clientAdminData.billing.prices : [];
+  pill('client-prices-state', available ? `${prices.filter(item => item.enabled).length} 个模型启用计费` : '待更新后台', available ? 'success' : 'pending');
+  const previous = elements['client-price-model'].value;
+  const models = Array.isArray(clientAdminData?.models) ? clientAdminData.models : [];
+  elements['client-price-model'].replaceChildren(...models.map(model => {
+    const option = document.createElement('option'); option.value = model.id;
+    option.textContent = `${model.name || model.id}${prices.some(price => price.model === model.id) ? '' : ' · 价格未设置'}`; return option;
+  }));
+  elements['client-price-model'].value = models.some(model => model.id === previous) ? previous : models[0]?.id || '';
+  renderClientPriceFields();
+}
+
+function clientLedgerLabel(entry) {
+  const types = { balance_adjustment: '余额调整', account_configured: '计费与配额设置', price_updated: '模型价格更新', adjustment: '余额调整', credit: '充值', debit: '扣减', reserve: '请求预留', reserved: '请求预留', settle: '用量结算', settled: '用量结算', release: '预留释放', released: '预留释放', unresolved: '待核对', quota_reset: '配额周期重置', policy: '计费设置', resolve: '人工核销' };
+  const states = { pending: '进行中', started: '调用中', reserved: '预留中', unresolved: '待核对', settled: '已结算', released: '已释放', failed: '失败', completed: '已完成' };
+  const type = entry.type === 'account_configured' && entry.configuration?.resetQuota === true ? '配额周期重置' : types[entry.type] || entry.type || '账单', state = states[entry.status] || entry.status;
+  return `${type}${state && state !== type ? ` · ${state}` : ''}`;
+}
+
+function renderClientLedger(account) {
+  const available = clientAdminData?.billing?.available === true;
+  const entries = account ? clientLedgerRows : [];
+  text('client-ledger-count', !available ? '待更新后台' : clientLedgerLoading ? '正在读取…' : clientLedgerError ? '读取失败' : `${entries.length} 条${clientLedgerNextBefore ? '（有更多）' : ''}`);
+  text('client-ledger-note', account ? `${account.username} · 最近账单。余额预留尚未扣费，待核对请求需查明真实用量后处理。` : '选择用户查看最近账单。');
+  text('client-ledger-error', clientLedgerError); elements['client-ledger-error'].hidden = !clientLedgerError; elements['client-ledger-more'].hidden = !clientLedgerNextBefore;
+  const cards = entries.map(entry => {
+    const card = document.createElement('article'); card.className = 'client-ledger-entry';
+    const heading = document.createElement('div'); heading.className = 'client-access-item-heading';
+    const title = document.createElement('strong'); title.textContent = clientLedgerLabel(entry);
+    const amount = document.createElement('span'); amount.className = 'client-ledger-amount'; amount.textContent = entry.type === 'settled' && entry.charged === false ? '仅统计 Token' : Number.isSafeInteger(entry.amountMicros) ? clientMoney(entry.amountMicros) : '—'; heading.append(title, amount); card.append(heading);
+    for (const value of [entry.createdAt || entry.time ? clientTime(entry.createdAt || entry.time) : '', entry.model || '', entry.note || '',
+      entry.usage ? `输入 ${clientTokenValue(entry.usage.inputTokens)} · 缓存 ${clientTokenValue(entry.usage.cachedInputTokens)} · 输出 ${clientTokenValue(entry.usage.outputTokens)} · 合计 ${clientTokenValue(entry.usage.totalTokens)} Token` : '',
+      Number.isSafeInteger(entry.reservedMicros) ? `预留 ${clientMoney(entry.reservedMicros)} · ${clientTokenValue(entry.reservedTokens)} Token` : '', entry.requestId ? `请求 ${entry.requestId}` : '']) {
+      if (!value) continue; const line = document.createElement('p'); line.textContent = value; card.append(line);
+    }
+    return card;
+  });
+  if (!cards.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = !available ? '计费账本需更新并重启后台后读取。' : clientLedgerLoading ? '正在读取账单…' : clientLedgerError ? '暂时无法确认账单，请刷新用户重试。' : account ? '此用户暂无账单。' : '选择用户查看账单。'; cards.push(empty); }
+  elements['client-ledger-list'].replaceChildren(...cards);
+}
+
+async function refreshClientLedger({ more = false } = {}) {
+  const accountId = clientSelectedId, generation = ++clientLedgerGeneration;
+  if (!more) { clientLedgerRows = []; clientLedgerNextBefore = null; }
+  if (clientAdminData?.billing?.available !== true || !accountId) { clientLedgerLoading = false; clientLedgerError = ''; renderClientLedger(clientAccount()); return; }
+  const before = more ? clientLedgerNextBefore : null;
+  if (more && !before) return;
+  clientLedgerLoading = true; clientLedgerError = ''; renderClientLedger(clientAccount()); renderClientAdminControls();
+  try {
+    const data = await request(`${clientAccountPath(accountId)}/billing/history${before ? `?before=${encodeURIComponent(before)}` : ''}`, { signal: AbortSignal.timeout(15000) });
+    if (generation !== clientLedgerGeneration || clientSelectedId !== accountId) return;
+    if (!Array.isArray(data.rows) || data.rows.some(row => row?.accountId !== accountId || typeof row.id !== 'string')
+      || data.nextBefore !== null && (typeof data.nextBefore !== 'string' || !/^[0-9a-f-]{36}$/i.test(data.nextBefore))) throw new Error('账单列表返回不完整，请更新后台。');
+    const seen = new Set(more ? clientLedgerRows.map(row => row.id) : []);
+    clientLedgerRows = [...(more ? clientLedgerRows : []), ...data.rows.filter(row => { if (seen.has(row.id)) return false; seen.add(row.id); return true; })]; clientLedgerNextBefore = data.nextBefore;
+  } catch (error) {
+    if (generation === clientLedgerGeneration && clientSelectedId === accountId) clientLedgerError = `账单读取失败：${error.message || '请重试。'}`;
+  } finally {
+    if (generation === clientLedgerGeneration) { clientLedgerLoading = false; renderClientLedger(clientAccount()); renderClientAdminControls(); }
+  }
+}
+
+function renderClientUnresolved() {
+  const available = clientAdminData?.billing?.available === true;
+  text('client-unresolved-count', !available ? '待更新后台' : clientUnresolvedLoading ? '正在读取…' : clientUnresolvedError ? '读取失败' : `${clientUnresolvedRows.length} 个${clientUnresolvedNextBefore ? '（有更多）' : ''}`);
+  text('client-unresolved-error', clientUnresolvedError); elements['client-unresolved-error'].hidden = !clientUnresolvedError;
+  elements['client-unresolved-more'].hidden = !clientUnresolvedNextBefore;
+  const cards = clientUnresolvedRows.map(entry => {
+    const card = document.createElement('article'); card.className = 'client-ledger-entry';
+    const title = document.createElement('strong'); title.textContent = entry.model || '待核对请求'; card.append(title);
+    for (const value of [entry.requestId ? `请求 ${entry.requestId}` : '', clientTime(entry.time || entry.createdAt),
+      `预留 ${clientMoney(entry.reservedMicros)} · ${clientTokenValue(entry.reservedTokens)} Token`,
+      entry.usage ? `已报告用量：输入 ${clientTokenValue(entry.usage.inputTokens)} · 输出 ${clientTokenValue(entry.usage.outputTokens)} Token` : '未返回可结算的完整用量。']) {
+      const detail = document.createElement('p'); detail.textContent = value; card.append(detail);
+    }
+    if (typeof entry.requestId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(entry.requestId)) renderClientResolution(card, entry);
+    return card;
+  });
+  if (!cards.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = !available ? '待核对列表需更新并重启后台后读取。' : clientUnresolvedLoading ? '正在读取待核对请求…' : clientUnresolvedError ? '暂时无法确认待核对请求，请刷新用户重试。' : !clientAccount() ? '选择用户查看待核对请求。' : '此用户暂无待核对请求。'; cards.push(empty); }
+  elements['client-unresolved-list'].replaceChildren(...cards); renderClientAdminControls();
+}
+
+async function refreshClientUnresolved({ more = false } = {}) {
+  const accountId = clientSelectedId;
+  const generation = ++clientUnresolvedGeneration;
+  if (!more) { clientUnresolvedRows = []; clientUnresolvedNextBefore = null; }
+  if (clientAdminData?.billing?.available !== true || !accountId) { clientUnresolvedLoading = false; clientUnresolvedError = ''; renderClientUnresolved(); return; }
+  const before = more ? clientUnresolvedNextBefore : null;
+  if (more && !before) return;
+  clientUnresolvedLoading = true; clientUnresolvedError = ''; renderClientUnresolved();
+  try {
+    const path = `/api/client-admin/billing/unresolved?accountId=${encodeURIComponent(accountId)}${before ? `&before=${encodeURIComponent(before)}` : ''}`;
+    const data = await request(path, { signal: AbortSignal.timeout(15000) });
+    if (generation !== clientUnresolvedGeneration || clientSelectedId !== accountId) return;
+    if (!Array.isArray(data.rows) || data.rows.some(row => row?.status !== 'unresolved' || row.accountId !== accountId || typeof row.requestId !== 'string')
+      || data.nextBefore !== null && (typeof data.nextBefore !== 'string' || !/^[0-9a-f-]{36}$/i.test(data.nextBefore))) throw new Error('待核对列表返回不完整，请更新后台。');
+    const seen = new Set(more ? clientUnresolvedRows.map(row => row.requestId) : []);
+    clientUnresolvedRows = [...(more ? clientUnresolvedRows : []), ...data.rows.filter(row => { if (seen.has(row.requestId)) return false; seen.add(row.requestId); return true; })];
+    clientUnresolvedNextBefore = data.nextBefore;
+  } catch (error) {
+    if (generation === clientUnresolvedGeneration && clientSelectedId === accountId) clientUnresolvedError = `待核对请求读取失败：${error.message || '请重试。'}`;
+  } finally {
+    if (generation === clientUnresolvedGeneration) { clientUnresolvedLoading = false; renderClientUnresolved(); }
+  }
+}
+
+function renderClientResolution(card, entry) {
+  const slot = `resolve:${entry.requestId}`, pending = clientBillingOperations.get(slot);
+  const form = document.createElement('form'); form.className = 'client-resolution-form';
+  const selectLabel = document.createElement('label'); selectLabel.className = 'client-field'; selectLabel.textContent = '核对结果';
+  const select = document.createElement('select');
+  for (const [value, label] of [['settle', '按核实用量结算'], ['release', '确认未产生用量，释放预留']]) { const option = document.createElement('option'); option.value = value; option.textContent = label; select.append(option); }
+  select.value = pending?.body.action || 'settle'; select.disabled = Boolean(pending); selectLabel.append(select); form.append(selectLabel);
+  const fields = document.createElement('div'); fields.className = 'client-resolution-fields'; const inputs = {};
+  for (const [key, label] of [['inputTokens', '输入 Token'], ['cachedInputTokens', '其中缓存输入'], ['outputTokens', '输出 Token'], ['totalTokens', '合计 Token']]) {
+    const field = document.createElement('label'); field.className = 'client-field'; field.textContent = label;
+    const input = document.createElement('input'); input.type = 'text'; input.inputMode = 'numeric'; input.maxLength = 16; input.placeholder = '核实后的非负整数';
+    input.value = pending?.body.usage && Number.isSafeInteger(pending.body.usage[key]) ? String(pending.body.usage[key]) : ''; input.disabled = Boolean(pending); field.append(input); inputs[key] = input; fields.append(field);
+  }
+  const update = () => { fields.hidden = select.value !== 'settle'; }; select.addEventListener('change', update); update(); form.append(fields);
+  const note = document.createElement('p'); note.className = 'footnote'; note.textContent = pending ? '上次核销结果尚未确认。重试同一笔核销，继续复用原操作标识。' : '仅填写已核实的用量。释放预留不会伪造零 Token 账单。'; form.append(note);
+  const confirm = document.createElement('label'); confirm.className = 'client-checkbox'; const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = Boolean(pending); const confirmationText = document.createElement('span'); confirmationText.textContent = '已核实此请求的真实用量'; confirm.append(checkbox, confirmationText); form.append(confirm);
+  const button = document.createElement('button'); button.type = 'submit'; button.className = 'button secondary'; button.textContent = pending ? '重试同一笔核销' : '确认核销'; button.setAttribute('data-client-billing-write', ''); form.append(button);
+  form.addEventListener('submit', event => {
+    event.preventDefault(); if (!clientBillingReady()) return;
+    void runClientAdminAction(async () => {
+      if (!checkbox.checked) throw new Error('请先确认已经核实此请求的真实用量。');
+      const currentPending = clientBillingOperations.get(slot);
+      const body = currentPending ? { action: currentPending.body.action, ...(currentPending.body.usage ? { usage: currentPending.body.usage } : {}) } : { action: select.value };
+      if (!currentPending && body.action === 'settle') {
+        const usage = Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, clientNonnegativeInteger(input.value, key)]));
+        if (usage.cachedInputTokens > usage.inputTokens || usage.inputTokens + usage.outputTokens !== usage.totalTokens) throw new Error('缓存输入不得大于输入；合计 Token 必须等于输入加输出。'); body.usage = usage;
+      }
+      await clientIdempotentPost(slot, `/api/client-admin/billing/requests/${encodeURIComponent(entry.requestId)}/resolve`, body);
+    });
+  }); card.append(form);
+}
+
+function clearClientSecret() {
+  clientSecret = '';
+  elements['client-secret-value'].value = '';
+  elements['client-secret-panel'].hidden = true;
+}
+
+function showClientSecret(value, invitation = false) {
+  clearClientSecret();
+  if (typeof value !== 'string' || !value || value.length > 4096) throw new Error('服务未返回完整凭证。请检查列表；已生成的凭证无法再次读取。');
+  clientSecret = value;
+  elements['client-secret-value'].value = value;
+  text('client-secret-title', invitation ? '新邀请码' : '新 API Key');
+  text('client-secret-label', invitation ? '邀请码' : 'API Key');
+  text('client-secret-note', invitation ? '完整邀请码只展示这一次。请立即复制；刷新后无法重新读取。' : '完整 Key 只展示这一次。请立即复制；刷新后只能看到前缀。');
+  elements['client-secret-panel'].hidden = false;
+}
+
+function clientModelOptions(containerId, selected, onChange) {
+  const models = Array.isArray(clientAdminData?.models) ? [...clientAdminData.models] : [];
+  const known = new Set(models.map(model => model.id));
+  for (const id of selected) if (!known.has(id)) models.push({ id, name: id, available: false, missing: true });
+  const options = models.filter(model => typeof model?.id === 'string' && model.id).map(model => {
+    const label = document.createElement('label'); label.className = 'model-option';
+    const input = document.createElement('input'); input.type = 'checkbox'; input.value = model.id; input.checked = selected.has(model.id);
+    input.disabled = model.available === false && !input.checked;
+    input.addEventListener('change', () => {
+      if (input.checked) selected.add(model.id); else selected.delete(model.id);
+      onChange?.();
+    });
+    const content = document.createElement('span');
+    const title = document.createElement('strong'); title.textContent = model.name || model.id;
+    const detail = document.createElement('small'); detail.textContent = `${model.channel || '模型'} · ${model.id}${model.missing ? ' · 当前目录未返回' : model.available === false ? ' · 当前不可用' : model.enabled === false ? ' · 全局未开放' : ''}`;
+    content.append(title, detail); label.append(input, content); return label;
+  });
+  if (!options.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = '模型目录尚未返回；可先创建用户，刷新目录后再授权。'; options.push(empty); }
+  elements[containerId].replaceChildren(...options);
+}
+
+function clientWriteButton(label, operation, { danger = false } = {}) {
+  const button = document.createElement('button'); button.type = 'button'; button.className = `button ${danger ? 'danger' : 'secondary'} small`;
+  button.textContent = label; button.setAttribute('data-client-write', '');
+  button.addEventListener('click', () => { void runClientAdminAction(operation); }); return button;
+}
+
+function clientRevocationControls(container, label, operation) {
+  const trigger = document.createElement('button'); trigger.type = 'button'; trigger.className = 'button quiet small'; trigger.textContent = '撤销'; trigger.setAttribute('data-client-write', '');
+  const confirmation = document.createElement('div'); confirmation.className = 'client-item-confirm'; confirmation.hidden = true;
+  const warning = document.createElement('p'); warning.textContent = `${label}撤销后无法恢复。确认撤销？`;
+  const buttons = document.createElement('div'); buttons.className = 'button-row';
+  const confirm = clientWriteButton('确认撤销', operation, { danger: true });
+  const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'button quiet small'; cancel.textContent = '取消';
+  cancel.addEventListener('click', () => { confirmation.hidden = true; trigger.hidden = false; });
+  trigger.addEventListener('click', () => { confirmation.hidden = false; trigger.hidden = true; });
+  buttons.append(confirm, cancel); confirmation.append(warning, buttons); container.append(trigger, confirmation);
+}
+
+function renderClientKeys(account) {
+  const keys = Array.isArray(account.keys) ? account.keys : [];
+  const nodes = keys.map(key => {
+    const card = document.createElement('section'); card.className = 'client-access-item';
+    const heading = document.createElement('div'); heading.className = 'client-access-item-heading';
+    const title = document.createElement('div'); const name = document.createElement('strong'); name.textContent = key.name || '未命名 Key';
+    const prefix = document.createElement('code'); prefix.textContent = typeof key.lastFour === 'string' ? `••••${key.lastFour}` : '尾号未返回'; title.append(name, prefix);
+    const state = document.createElement('span');
+    const revoked = Boolean(key.revokedAt) || key.status === 'revoked';
+    const labels = { active: '有效', expired: '已过期', disabled: '已停用', revoked: '已撤销', account_disabled: '用户已停用', account_expired: '账号到期上限已过' };
+    state.className = `pill ${key.status === 'active' && account.enabled !== false ? 'success' : 'pending'}`;
+    state.textContent = revoked ? '已撤销' : account.enabled === false ? '用户已停用' : labels[key.status] || (key.enabled === false ? '已停用' : '状态未返回');
+    heading.append(title, state); card.append(heading);
+    const expiry = document.createElement('p'); expiry.textContent = `Key 到期：${clientTime(key.expiresAt)} · 实际到期：${clientTime(key.effectiveExpiresAt ?? key.expiresAt)}`; card.append(expiry);
+    if (!revoked) {
+      const actions = document.createElement('div'); actions.className = 'client-item-actions';
+      actions.append(clientWriteButton(key.enabled === false ? '启用' : '停用', async () => {
+        await post(clientKeyPath(key.id, account.id), { enabled: key.enabled === false });
+      }));
+      const renewal = document.createElement('label'); renewal.className = 'client-field'; renewal.textContent = '增加天数';
+      const days = document.createElement('input'); days.type = 'number'; days.min = '1'; days.max = '3650'; days.value = '30'; renewal.append(days);
+      actions.append(renewal, clientWriteButton('续期', async () => {
+        const number = Number(days.value);
+        if (!/^\d+$/.test(days.value) || !Number.isSafeInteger(number) || number < 1 || number > 3650) throw new Error('续期天数需为 1–3650 的整数。');
+        const currentExpiry = new Date(key.expiresAt).getTime();
+        const expiresAt = new Date(Math.max(Date.now(), Number.isFinite(currentExpiry) ? currentExpiry : 0) + number * 86400000).toISOString();
+        await post(clientKeyPath(key.id, account.id), { expiresAt });
+      }));
+      clientRevocationControls(actions, '此 Key ', async () => { await post(`${clientKeyPath(key.id, account.id)}/revoke`); clearClientSecret(); });
+      card.append(actions);
+    }
+    return card;
+  });
+  if (!nodes.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = '此用户还没有 API Key。'; nodes.push(empty); }
+  elements['client-key-list'].replaceChildren(...nodes);
+}
+
+function selectClientAccount(id, { preserveDraft = false } = {}) {
+  clientSelectedId = id;
+  const account = clientAccount();
+  if (!preserveDraft) clientModelDraft = new Set(account?.allowedModels ?? []);
+  elements['client-user-empty'].hidden = Boolean(account);
+  elements['client-user-detail'].hidden = !account;
+  text('client-detail-title', account?.username || '选择一个用户');
+  pill('client-user-state', account ? account.enabled === false ? '已停用' : '已启用' : '—', account?.enabled ? 'success' : 'pending');
+  text('client-model-message', '');
+  if (account) {
+    const fields = [['用户名', account.username], ['创建时间', clientTime(account.createdAt)], ['Key 到期上限', account.keyExpiresAtLimit ? clientTime(account.keyExpiresAtLimit) : '无账号上限']];
+    elements['client-user-meta'].replaceChildren(...fields.map(([name, value]) => {
+      const row = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = name; dd.textContent = value; row.append(dt, dd); return row;
+    }));
+    text('client-user-toggle', account.enabled === false ? '启用用户' : '停用用户');
+    elements['client-user-key-limit'].value = clientLocalDate(account.keyExpiresAtLimit);
+    clientModelOptions('client-model-list', clientModelDraft, renderClientAdminControls);
+    renderClientKeys(account);
+  }
+  renderClientAccountBilling(account);
+  void refreshClientLedger();
+  void refreshClientUnresolved();
+  for (const button of elements['client-user-list'].querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.getAttribute('data-client-id') === id));
+  renderClientAdminControls();
+}
+
+function renderClientInvitations() {
+  const invites = Array.isArray(clientAdminData?.invites) ? clientAdminData.invites : [];
+  const nodes = invites.map(invite => {
+    const card = document.createElement('section'); card.className = 'client-access-item';
+    const heading = document.createElement('div'); heading.className = 'client-access-item-heading';
+    const name = document.createElement('strong'); name.textContent = typeof invite.lastFour === 'string' ? `邀请码 ••••${invite.lastFour}` : `邀请码 ${invite.id}`;
+    const status = document.createElement('span'); status.className = 'pill pending';
+    const labels = { active: '有效', used: '已用完', exhausted: '已用完', expired: '已过期', revoked: '已撤销' };
+    status.textContent = invite.revokedAt ? '已撤销' : labels[invite.status] || '状态未返回'; heading.append(name, status);
+    const description = document.createElement('p'); description.textContent = `到期：${clientTime(invite.expiresAt)} · 已使用 ${Number.isSafeInteger(invite.uses) ? invite.uses : 0} / ${Number.isSafeInteger(invite.maxUses) ? invite.maxUses : '未返回'} · 模型 ${Array.isArray(invite.allowedModels) ? invite.allowedModels.length : 0} 项`;
+    card.append(heading, description);
+    if (!invite.revokedAt && invite.status !== 'revoked') {
+      const actions = document.createElement('div'); actions.className = 'client-item-actions';
+      clientRevocationControls(actions, '此邀请码', async () => { await post(`${clientInvitationPath(invite.id)}/revoke`); clearClientSecret(); }); card.append(actions);
+    }
+    return card;
+  });
+  if (!nodes.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = '尚未创建邀请码。'; nodes.push(empty); }
+  elements['client-invitation-list'].replaceChildren(...nodes);
+}
+
+function renderClientAdmin({ replaceDraft = false } = {}) {
+  const data = clientAdminData;
+  if (!data) { renderClientAdminControls(); return; }
+  const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+  text('client-api-base', data.endpoint?.baseUrl || '入口尚未配置');
+  const portal = typeof data.endpoint?.portalUrl === 'string' ? data.endpoint.portalUrl : '/register';
+  try {
+    const url = new URL(portal, window.location);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid portal URL');
+    elements['client-portal-link'].href = url.href; elements['client-portal-link'].hidden = false;
+  } catch { elements['client-portal-link'].removeAttribute('href'); elements['client-portal-link'].hidden = true; }
+  pill('client-admin-state', data.server?.ready ? '接入已就绪' : data.server?.enabled ? '入口尚未就绪' : '入口待启用', data.server?.ready ? 'success' : 'pending');
+  text('client-access-note', data.server?.message || '客户端配置基础地址、独立 API Key 和获准模型。Key 的到期与撤销不删除用户账号。');
+  text('client-users-count', `${accounts.length} 位用户`);
+  const users = accounts.map(account => {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'client-user-option'; button.setAttribute('data-client-id', account.id);
+    const identity = document.createElement('span'), title = document.createElement('strong'), detail = document.createElement('small');
+    title.textContent = account.username; detail.textContent = `${account.allowedModels?.length ?? 0} 个模型 · ${account.keys?.length ?? 0} 个 Key`;
+    identity.append(title, detail); const state = document.createElement('span'); state.className = `pill ${account.enabled ? 'success' : 'pending'}`; state.textContent = account.enabled ? '已启用' : '已停用';
+    button.append(identity, state); button.addEventListener('click', () => { if (!busyAction) selectClientAccount(account.id); }); return button;
+  });
+  if (!users.length) { const empty = document.createElement('p'); empty.className = 'model-settings-empty'; empty.textContent = '尚无接入用户。可在此创建，或通过用户页面注册。'; users.push(empty); }
+  elements['client-user-list'].replaceChildren(...users);
+  const selectedStillPresent = accounts.some(account => account.id === clientSelectedId);
+  selectClientAccount(selectedStillPresent ? clientSelectedId : accounts[0]?.id || '', { preserveDraft: selectedStillPresent && !replaceDraft });
+  elements['client-registration-mode'].value = ['open', 'invite', 'closed'].includes(data.registration?.mode) ? data.registration.mode : 'closed';
+  const defaultDays = Number.isSafeInteger(data.registration?.defaultKeyDays) ? data.registration.defaultKeyDays : 30;
+  elements['client-registration-days'].value = String(defaultDays);
+  if (!elements['client-key-days'].value || elements['client-key-days'].value === String(clientDefaultDays)) elements['client-key-days'].value = String(defaultDays);
+  clientDefaultDays = defaultDays;
+  clientModelOptions('client-invitation-models', clientInviteDraft);
+  renderClientPrices();
+  renderClientInvitations(); renderClientAdminControls();
+}
+
+async function refreshClientAdmin({ clearSecret = false, replaceDraft = false } = {}) {
+  if (clearSecret) clearClientSecret();
+  if (clientAdminRequest) return clientAdminRequest;
+  const pending = (async () => {
+    try {
+      const data = await request('/api/client-admin', { signal: AbortSignal.timeout(10000) });
+      if (!Array.isArray(data.accounts) || !Array.isArray(data.invites)) throw new Error('用户管理返回格式不完整，请更新后台。');
+      clientAdminData = data; clientAdminError = ''; clientAdminUnavailable = false; clientAdminLoaded = true;
+      renderClientAdmin({ replaceDraft });
+    } catch (error) {
+      clientAdminLoaded = true; clientAdminUnavailable = true;
+      clientAdminError = error.status === 404 || error.status === 503 ? '接入用户管理需在更新并重启后台后可用。' : `用户管理读取失败：${error.message || '请重试。'}`;
+      pill('client-admin-state', error.status === 404 || error.status === 503 ? '待更新后台' : '读取失败', 'pending');
+    } finally { if (clientAdminRequest === pending) clientAdminRequest = null; renderClientAdminControls(); }
+  })();
+  clientAdminRequest = pending; renderClientAdminControls(); return pending;
+}
+
+async function runClientAdminAction(operation) {
+  if (!clientAdminReady()) return;
+  await action('client-admin', async () => {
+    clientAdminError = ''; renderClientAdminControls();
+    try { await operation(); await refreshClientAdmin(); text('client-admin-message', clientAdminUnavailable ? '操作已提交，列表刷新失败。请刷新核对结果。' : '已保存，用户配置已刷新。'); }
+    catch (error) { clientAdminError = error.message || '操作未完成，请重试。'; renderClientAdminControls(); throw error; }
+  });
 }
 
 function channelModelCounts(channel, authenticated) {
@@ -798,6 +1376,7 @@ function render() {
   renderServiceControl();
   renderModelSettingsControls();
   renderAccountSummaries();
+  renderClientAdminControls();
 }
 
 async function refreshStatus({ duringRestart = false, signal } = {}) {
@@ -842,6 +1421,7 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         void refreshCursor();
         void refreshServiceStatus();
         if (!modelSettingsLoaded) void refreshModelSettings();
+        if (elements['tab-clients'].getAttribute('aria-selected') === 'true' && !clientAdminLoaded) void refreshClientAdmin();
         if (!status.backend?.error && accountMetadataNeedsRefresh.delete('b')) {
           void refreshAuthorizedModelSettings(); void refreshAuthorizedAccountQuotas();
         }
@@ -855,6 +1435,7 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
       text('connection-label', restartInProgress || queuedRestartToken ? '正在等待网关恢复连接' : '本机服务连接中断，正在重试');
       document.querySelectorAll('button:not(#quota-refresh-button):not([role="tab"])').forEach((button) => { button.disabled = true; });
       renderAccountSummaries();
+      renderClientAdminControls();
       throw error;
     } finally {
       if (statusRequest === pending) statusRequest = null;
@@ -1446,16 +2027,131 @@ elements['copy-button'].addEventListener('click', () => {
 
 elements['quota-refresh-button'].addEventListener('click', () => { void refreshAccountQuotas(); });
 
-for (const [index, name] of ['console', 'accounts'].entries()) {
+const managementTabs = ['console', 'accounts', 'clients'];
+for (const [index, name] of managementTabs.entries()) {
   elements[`tab-${name}`].addEventListener('click', () => selectManagementTab(name));
   elements[`tab-${name}`].addEventListener('keydown', event => {
-    const next = event.key === 'Home' ? 'console' : event.key === 'End' ? 'accounts'
-      : ['ArrowLeft', 'ArrowRight'].includes(event.key) ? ['console', 'accounts'][1 - index] : null;
+    const next = event.key === 'Home' ? 'console' : event.key === 'End' ? 'clients'
+      : event.key === 'ArrowLeft' ? managementTabs[(index + managementTabs.length - 1) % managementTabs.length]
+        : event.key === 'ArrowRight' ? managementTabs[(index + 1) % managementTabs.length] : null;
     if (next) { event.preventDefault(); selectManagementTab(next, { focus: true }); }
   });
 }
-window.addEventListener('hashchange', () => selectManagementTab(window.location.hash === '#accounts' ? 'accounts' : 'console', { updateLocation: false }));
-selectManagementTab(window.location?.hash === '#accounts' ? 'accounts' : 'console', { updateLocation: false });
+window.addEventListener('hashchange', () => selectManagementTab(window.location.hash.slice(1), { updateLocation: false }));
+selectManagementTab(window.location?.hash?.slice(1), { updateLocation: false });
+
+elements['client-admin-refresh'].addEventListener('click', () => { void refreshClientAdmin({ clearSecret: true }); });
+elements['client-price-model'].addEventListener('change', renderClientPriceFields);
+elements['client-unresolved-more'].addEventListener('click', () => { if (clientBillingReady() && !clientUnresolvedLoading) void refreshClientUnresolved({ more: true }); });
+elements['client-ledger-more'].addEventListener('click', () => { if (clientBillingReady() && !clientLedgerLoading) void refreshClientLedger({ more: true }); });
+elements['client-billing-reset-confirm'].addEventListener('change', renderClientAdminControls);
+elements['client-billing-policy-form'].addEventListener('submit', event => {
+  event.preventDefault(); if (!clientBillingReady() || !clientAccount()?.billing) return;
+  void runClientAdminAction(async () => {
+    await post(`${clientAccountPath()}/billing`, { enforceBalance: elements['client-billing-enforce'].checked,
+      tokenLimit: clientNonnegativeInteger(elements['client-billing-token-limit'].value, 'Token 总配额', { optional: true }) });
+  });
+});
+elements['client-billing-quota-reset'].addEventListener('click', () => {
+  const billing = clientAccount()?.billing;
+  if (!clientBillingReady() || !billing || !elements['client-billing-reset-confirm'].checked || billing.pendingCount !== 0 || billing.unresolvedCount !== 0) return;
+  void runClientAdminAction(async () => { await post(`${clientAccountPath()}/billing`, { enforceBalance: billing.enforceBalance,
+    tokenLimit: billing.tokenLimit, resetQuota: true }); });
+});
+elements['client-balance-form'].addEventListener('submit', event => {
+  event.preventDefault(); if (!clientBillingReady() || !clientAccount()?.billing) return;
+  const accountId = clientSelectedId, slot = `balance:${accountId}`;
+  void runClientAdminAction(async () => {
+    const pending = clientBillingOperations.get(slot);
+    const body = pending ? Object.fromEntries(Object.entries(pending.body).filter(([key]) => key !== 'operationId'))
+      : { amountMicros: clientDecimalMicros(elements['client-balance-amount'].value, { signed: true, nonzero: true }), note: elements['client-balance-note'].value.trim() };
+    if (body.note?.length > 240) throw new Error('备注最多 240 个字符。');
+    await clientIdempotentPost(slot, `${clientAccountPath(accountId)}/balance`, body);
+    elements['client-balance-amount'].value = ''; elements['client-balance-note'].value = '';
+  });
+});
+elements['client-prices-form'].addEventListener('submit', event => {
+  event.preventDefault(); if (!clientBillingReady()) return;
+  void runClientAdminAction(async () => {
+    const model = elements['client-price-model'].value;
+    if (!clientAdminData?.models?.some(item => item.id === model)) throw new Error('请先选择目录中的模型。');
+    const reserveInputTokens = clientNonnegativeInteger(elements['client-price-reserve-input'].value, '预留输入 Token');
+    const reserveOutputTokens = clientNonnegativeInteger(elements['client-price-reserve-output'].value, '预留输出 Token');
+    if (!Number.isSafeInteger(reserveInputTokens + reserveOutputTokens) || reserveInputTokens + reserveOutputTokens === 0) throw new Error('请求预留 Token 合计需为正的安全整数。');
+    await post('/api/client-admin/billing/prices', { model,
+      inputRateMicros: clientDecimalMicros(elements['client-price-input'].value, { label: '输入价格' }),
+      cachedInputRateMicros: clientDecimalMicros(elements['client-price-cached'].value, { label: '缓存输入价格' }),
+      outputRateMicros: clientDecimalMicros(elements['client-price-output'].value, { label: '输出价格' }),
+      reserveInputTokens, reserveOutputTokens, enabled: elements['client-price-enabled'].checked });
+  });
+});
+elements['client-secret-close'].addEventListener('click', clearClientSecret);
+elements['client-secret-copy'].addEventListener('click', () => {
+  if (!clientSecret) return;
+  void copyText(clientSecret).then(() => notify('完整凭证已复制，请妥善保存。')).catch(error => notify(error.message || '复制失败，请选中凭证复制。', true));
+});
+elements['client-user-create-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const username = elements['client-create-username'].value.trim();
+    const password = elements['client-create-password'].value;
+    if (username.length < 3 || username.length > 64) throw new Error('用户名需为 3–64 个字符。');
+    if (password.length < 12 || password.length > 256) throw new Error('密码需为 12–256 个字符。');
+    elements['client-create-password'].value = '';
+    const result = await post('/api/client-admin/accounts', { username, password, allowedModels: [], enabled: true });
+    if (typeof result.account?.id === 'string') { clientSelectedId = result.account.id; clientModelDraft = new Set(result.account.allowedModels ?? []); }
+    elements['client-create-username'].value = '';
+  });
+});
+elements['client-user-toggle'].addEventListener('click', () => {
+  const account = clientAccount(); if (!account) return;
+  void runClientAdminAction(async () => { await post(clientAccountPath(account.id), { enabled: account.enabled === false }); });
+});
+elements['client-user-limit-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const value = elements['client-user-key-limit'].value;
+    const date = value ? new Date(value) : null;
+    if (date && !Number.isFinite(date.getTime())) throw new Error('Key 到期上限格式无效。');
+    await post(clientAccountPath(), { keyExpiresAtLimit: date ? date.toISOString() : null });
+  });
+});
+elements['client-model-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    await post(clientAccountPath(), { allowedModels: [...clientModelDraft].sort() });
+  });
+});
+elements['client-key-create-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const expiresInDays = clientInteger('client-key-days', 'Key 有效天数');
+    const name = elements['client-key-name'].value.trim() || 'Default';
+    if (name.length > 80) throw new Error('Key 名称最多 80 个字符。');
+    clearClientSecret();
+    const result = await post(`${clientAccountPath()}/keys`, { name, expiresInDays });
+    showClientSecret(result.secret); elements['client-key-name'].value = '';
+  });
+});
+elements['client-registration-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const mode = elements['client-registration-mode'].value;
+    if (!['open', 'invite', 'closed'].includes(mode)) throw new Error('注册方式无效。');
+    const defaultKeyDays = clientInteger('client-registration-days', '默认有效天数');
+    await post('/api/client-admin/registration', { mode, defaultKeyDays });
+  });
+});
+elements['client-invitation-create-form'].addEventListener('submit', event => {
+  event.preventDefault();
+  void runClientAdminAction(async () => {
+    const expiresInDays = clientInteger('client-invitation-days', '邀请码有效天数');
+    const maxUses = clientInteger('client-invitation-uses', '可注册人数', 10000);
+    clearClientSecret();
+    const result = await post('/api/client-admin/invites', { expiresInDays, maxUses, allowedModels: [...clientInviteDraft].sort() });
+    showClientSecret(result.token, true);
+  });
+});
 
 elements['cursor-login-button'].addEventListener('click', () => {
   if (busyAction || restartInProgress) return;
