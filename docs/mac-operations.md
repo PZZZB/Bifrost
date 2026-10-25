@@ -41,6 +41,8 @@ Mac 当前部署采用普通用户 LaunchAgent，登录时执行一次，并每�
 
 后台 UTM 操作使用 `examples/mac-claude-vm/bifrost-runtime.applescript` 构建的本机助手；先执行 `python3 scripts/build-mac-runtime-helper.py PRIVATE_HEALTH_CONFIG`，再通过 LaunchAgent 的 `open -W -g APP_PATH` 托管。首次启动由本人在 macOS 系统窗口允许它控制 UTM，不能修改系统隐私数据库代替授权。助手只在启动时尝试启动指定 VM，随后定期刷新普通用户串口地址；健康探针读取这个私有状态文件，不再从无 GUI 授权的后台进程发 AppleEvent。状态超过 45 秒或 VM 不匹配即拒绝探测。交互终端另可使用 `scripts/start-mac-vm.mjs PRIVATE_HEALTH_CONFIG`。
 
+助手处理器显式声明局部变量，并在 UTM 字典中比较运行状态，再写出普通字符串。避免把 `machine` 当作可设置属性而触发 `-10006`，也避免 Foundation 脚本环境将枚举序列化成 AppleEvent 常量，导致实际运行中的 VM 被误报。2026-10-25 已用实际后台助手及读取其私有缓存的 HTTPS 探针复核，基础监测为 `ready_without_model`；这仍不代表 Claude 已登录或真实推理已验收。
+
 不会因每分钟健康检查而启动被手动关掉的 VM。主服务、代理和隧道继续由各自 launchd 任务恢复。UTM 的 URL 启停命令已被移除，使用官方 AppleScript / utmctl 接口，见[官方远程控制说明](https://docs.getutm.app/advanced/remote-control/)。
 
 安装时记录 `kern.bootsessionuuid`。只有后来检测到**不同的整机 boot UUID** 且全部基础检查通过，才写 `passed_after_new_boot` 验收记录；进程重启、VM 重启或当前会话中的检查均不能冒充整机重启通过。验收不自动登录 Claude，也不代替真实推理。

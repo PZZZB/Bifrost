@@ -15,16 +15,18 @@ on writeStatus(payload)
 end writeStatus
 
 on refreshMachine()
+    local shouldStart, targetVM, currentState, serialAddress
     try
         set shouldStart to initialStartPending
         with timeout of 30 seconds
             tell application "UTM"
-                set machine to virtual machine id "__VM_ID__"
-                if shouldStart and status of machine is not started then start machine
-                set currentState to status of machine as string
-                if currentState is "started" then
-                    set serialAddress to address of serial port 2 of machine
+                set targetVM to virtual machine id "__VM_ID__"
+                if shouldStart and status of targetVM is not started then start targetVM
+                if status of targetVM is started then
+                    set currentState to "started"
+                    set serialAddress to address of serial port 2 of targetVM
                 else
+                    set currentState to "not_started"
                     set serialAddress to ""
                 end if
             end tell
