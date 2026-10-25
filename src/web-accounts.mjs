@@ -47,17 +47,27 @@ function cookies(req) {
   return values;
 }
 
-export function createWebAccounts({ store, csrfKey, publicOrigin, apiBaseUrl,
+export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPublicOrigins = [], apiBaseUrl,
   publicDir = fileURLToPath(new URL('../public/accounts/', import.meta.url)), clock = Date.now } = {}) {
-  const origin = new URL(publicOrigin);
-  validateExternalAuthorities([origin.host]);
+  if (!Array.isArray(additionalPublicOrigins) || additionalPublicOrigins.length > 2) throw new TypeError('Invalid web account settings.');
+  const publicOrigins = Object.freeze([publicOrigin, ...additionalPublicOrigins]);
+  const originsByHost = new Map();
+  for (const value of publicOrigins) {
+    const origin = new URL(value);
+    validateExternalAuthorities([origin.host]);
+    if (origin.protocol !== 'https:' || origin.origin !== value || originsByHost.has(origin.host)) throw new TypeError('Invalid web account settings.');
+    originsByHost.set(origin.host, value);
+  }
+  const api = new URL(apiBaseUrl);
+  validateExternalAuthorities([api.host]);
   if (!store || typeof csrfKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(csrfKey) ||
-      origin.protocol !== 'https:' || origin.origin !== publicOrigin || apiBaseUrl !== publicOrigin + '/v1') throw new TypeError('Invalid web account settings.');
-  const mac = value => createHmac('sha256', csrfKey).update('bifrost-web-csrf-v1:' + value).digest('hex');
-  function validCsrf(value) {
+      api.protocol !== 'https:' || apiBaseUrl !== api.origin + '/v1') throw new TypeError('Invalid web account settings.');
+  // A token issued on one allowed website cannot authorize writes on another.
+  const mac = (value, requestOrigin) => createHmac('sha256', csrfKey).update('bifrost-web-csrf-v2:' + requestOrigin + ':' + value).digest('hex');
+  function validCsrf(value, requestOrigin) {
     const match = typeof value === 'string' && /^([0-9]{1,13})\.([A-Za-z0-9_-]{22})\.([a-f0-9]{64})$/.exec(value);
     return !!match && Number(match[1]) <= clock() && clock() - Number(match[1]) <= 86_400_000 &&
-      safeEqual(match[3], mac(match[1] + '.' + match[2]));
+      safeEqual(match[3], mac(match[1] + '.' + match[2], requestOrigin));
   }
   function json(res, status, data) {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...(status === 429 ? { 'retry-after': '60' } : {}),
@@ -67,7 +77,7 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, apiBaseUrl,
   let windowEnd = 0, requests = 0, authRequests = 0, authActive = 0;
   const attempts = new Map();
   return {
-    publicOrigin, maxAccounts: store.maxAccounts,
+    publicOrigin, publicOrigins, apiBaseUrl, maxAccounts: store.maxAccounts,
     handles: url => typeof url === 'string' && (['/register', '/account'].includes(url.split('?')[0]) ||
       STATIC.has(url.split('?')[0]) || url.startsWith(PREFIX)),
     getClients: () => store.clients(),
@@ -78,11 +88,12 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, apiBaseUrl,
       res.setHeader('content-security-policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'");
       res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
       try {
-        if (req.headers.host?.toLowerCase() !== origin.host || req.headers.origin !== undefined && req.headers.origin !== publicOrigin ||
+        const requestOrigin = originsByHost.get(req.headers.host?.toLowerCase());
+        if (!requestOrigin || req.headers.origin !== undefined && req.headers.origin !== requestOrigin ||
             req.headers.authorization !== undefined || req.headers['x-api-key'] !== undefined) fail(403, 'access_denied');
         if (!req.url.startsWith('/')) fail(400, 'invalid_request');
-        const url = new URL(req.url, publicOrigin);
-        if (url.origin !== publicOrigin) fail(403, 'access_denied');
+        const url = new URL(req.url, requestOrigin);
+        if (url.origin !== requestOrigin) fail(403, 'access_denied');
         if (['/register', '/account'].includes(url.pathname)) {
           if (req.method !== 'GET' && req.method !== 'HEAD') fail(405, 'method_not_allowed');
           res.writeHead(303, { location: '/account/' }); res.end(); return;
@@ -105,8 +116,8 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, apiBaseUrl,
         let csrf = values.get(CSRF_COOKIE);
         if (action === 'session') {
           if (req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0)) fail(400, 'invalid_request');
-          if (!validCsrf(csrf)) {
-            const payload = clock() + '.' + randomBytes(16).toString('base64url'); csrf = payload + '.' + mac(payload);
+          if (!validCsrf(csrf, requestOrigin)) {
+            const payload = clock() + '.' + randomBytes(16).toString('base64url'); csrf = payload + '.' + mac(payload, requestOrigin);
             res.setHeader('set-cookie', cookie(CSRF_COOKIE, csrf, 86_400));
           }
           let identity = null;
@@ -121,7 +132,7 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, apiBaseUrl,
           json(res, 200, { authenticated: !!identity, ...(identity ?? {}), csrfToken: csrf, apiBaseUrl,
             registrationMode: 'email_invite', emailVerificationRequired: false, privacyVersion: WEB_PRIVACY_VERSION }); return;
         }
-        if (req.headers.origin !== publicOrigin || !validCsrf(csrf) || !safeEqual(csrf, req.headers['x-bifrost-csrf'])) fail(403, 'csrf_rejected');
+        if (req.headers.origin !== requestOrigin || !validCsrf(csrf, requestOrigin) || !safeEqual(csrf, req.headers['x-bifrost-csrf'])) fail(403, 'csrf_rejected');
         let body = {};
         if (req.method === 'POST') {
           if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '')) fail(400, 'invalid_request');
@@ -159,5 +170,6 @@ export async function loadWebAccounts(path) {
   if (config?.version !== 1) throw new TypeError('Invalid web accounts configuration.');
   const store = new WebAccountStore(config); await store.read();
   const csrfKey = (await readPrivateAccountFile(join(config.directory, 'csrf.key'), 128)).trim();
-  return createWebAccounts({ store, csrfKey, publicOrigin: config.publicOrigin, apiBaseUrl: config.apiBaseUrl });
+  return createWebAccounts({ store, csrfKey, publicOrigin: config.publicOrigin,
+    additionalPublicOrigins: config.additionalPublicOrigins, apiBaseUrl: config.apiBaseUrl });
 }

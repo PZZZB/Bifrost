@@ -15,13 +15,13 @@ const gatewayKey = 'private-gateway-fixture-'.repeat(3), sessionKey = 'private-n
 const legacyKey = 'legacy-key-fixture-'.repeat(3);
 const sha = value => createHash('sha256').update(value).digest('hex');
 
-async function fixture(t, { clock = Date.now, ...settings } = {}) {
+async function fixture(t, { clock = Date.now, webSettings = {}, ...settings } = {}) {
   const temporary = await mkdtemp(join(tmpdir(), 'bifrost-web-'));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const directory = join(temporary, 'web'); await initializeWebAccounts(directory);
   const store = new WebAccountStore({ directory, clock, checkEmailDomain: async () => 'mx', ...settings });
   const webAccounts = createWebAccounts({ store, csrfKey: (await readFile(join(directory, 'csrf.key'), 'utf8')).trim(),
-    publicOrigin: ORIGIN, apiBaseUrl: ORIGIN + '/v1', clock });
+    publicOrigin: ORIGIN, apiBaseUrl: ORIGIN + '/v1', clock, ...webSettings });
   const sessions = [];
   const server = createExternalClaudeGateway({ gatewayKey, sessionKey, allowedHosts: ['api.example.net:47846', 'fallback.example.net'],
     webAccounts, accountApi: { handle: async (_req, res) => { res.writeHead(200); res.end('{"wechat":true}'); } },
@@ -29,13 +29,13 @@ async function fixture(t, { clock = Date.now, ...settings } = {}) {
     fetchImpl: async (_url, { headers }) => { sessions.push(headers.get('x-session-id')); return Response.json({ data: [] }); } });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
-  function client() {
+  function client(origin = ORIGIN) {
     const jar = new Map(); let csrf = '';
     const send = (path, { method = 'GET', body, headers = {}, cookie = true } = {}) => new Promise((resolve, reject) => {
       const bytes = body === undefined ? undefined : JSON.stringify(body);
       const request = http.request({ hostname: '127.0.0.1', port: server.address().port, path, method,
-        headers: { host: 'api.example.net:47846', ...(cookie && jar.size ? { cookie: [...jar].map(([k, v]) => `${k}=${v}`).join('; ') } : {}),
-          ...(method === 'GET' || method === 'HEAD' ? {} : { origin: ORIGIN, 'x-bifrost-csrf': csrf }),
+        headers: { host: new URL(origin).host, ...(cookie && jar.size ? { cookie: [...jar].map(([k, v]) => `${k}=${v}`).join('; ') } : {}),
+          ...(method === 'GET' || method === 'HEAD' ? {} : { origin, 'x-bifrost-csrf': csrf }),
           ...(bytes === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(bytes) }), ...headers } }, response => {
         const chunks = [];
         response.on('data', chunk => chunks.push(chunk)); response.on('error', reject);
@@ -59,6 +59,39 @@ async function fixture(t, { clock = Date.now, ...settings } = {}) {
   }
   return { client, store, sessions };
 }
+
+test('standard HTTPS registration can display a separate approved model API while retaining the original website', async t => {
+  const standard = 'https://fallback.example.net';
+  const { client, store } = await fixture(t, { webSettings: { publicOrigin: standard, additionalPublicOrigins: [ORIGIN] } });
+  const old = client(), visitor = client(standard);
+  assert.equal((await old.send('/account/')).status, 200); assert.equal((await visitor.send('/account/')).status, 200);
+  const oldCsrf = (await old.session()).data.csrfToken; await visitor.session();
+  const invite = (await store.invite()).inviteCode;
+  const body = { email: 'standard@example.test', password: PASSWORD, inviteCode: invite, privacyAccepted: true };
+  assert.equal((await visitor.send('/account/web/v1/register', { method: 'POST', body,
+    headers: { origin: ORIGIN } })).status, 403);
+  assert.equal((await visitor.send('/account/web/v1/register', { method: 'POST', body,
+    headers: { cookie: '__Host-bifrost_csrf=' + oldCsrf, 'x-bifrost-csrf': oldCsrf } })).data.error.code, 'csrf_rejected');
+  await visitor.session();
+  const registered = await visitor.register(body.email, invite); assert.equal(registered.status, 200);
+  assert.equal(registered.data.apiBaseUrl, ORIGIN + '/v1');
+  assert.equal((await visitor.send('/v1/models', { headers: { authorization: 'Bearer ' + registered.data.apiKey } })).status, 200);
+  assert.equal((await visitor.send('/v1/models', { headers: { authorization: 'Bearer ' + registered.data.apiKey, origin: standard } })).status, 403);
+  assert.equal((await visitor.send('/v1/models')).status, 401);
+  const login = await old.login(body.email); assert.equal(login.status, 200);
+  assert.equal(login.data.account.id, registered.data.account.id); assert.equal((await visitor.session()).data.authenticated, false);
+  assert.equal((await old.send('/v1/models', { headers: { authorization: 'Bearer ' + registered.data.apiKey } })).status, 200);
+  assert.equal((await old.send('/api/admin', { headers: { authorization: 'Bearer ' + registered.data.apiKey } })).status, 404);
+});
+
+test('web origins and displayed API URLs must be explicit canonical HTTPS addresses', () => {
+  const settings = { store: { maxAccounts: 1 }, csrfKey: randomBytes(32).toString('base64url'), publicOrigin: ORIGIN, apiBaseUrl: ORIGIN + '/v1' };
+  for (const extra of [{ additionalPublicOrigins: 'https://fallback.example.net' }, { additionalPublicOrigins: [ORIGIN] },
+    { additionalPublicOrigins: ['http://fallback.example.net'] }, { additionalPublicOrigins: ['https://fallback.example.net/path'] },
+    { additionalPublicOrigins: ['https://one.example.net','https://two.example.net','https://three.example.net'] },
+    { apiBaseUrl: 'http://api.example.net/v1' }, { apiBaseUrl: ORIGIN + '/v1?target=other' }, { apiBaseUrl: ORIGIN + '/v1/' },
+    { apiBaseUrl: 'https://user:password@api.example.net/v1' }]) assert.throws(() => createWebAccounts({ ...settings, ...extra }));
+});
 
 test('web pages are anonymous, have restrictive headers, and tolerate WeChat share tracking parameters', async t => {
   const { client } = await fixture(t); const visitor = client();

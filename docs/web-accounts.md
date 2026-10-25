@@ -12,7 +12,9 @@
 node scripts/manage-web-accounts.mjs init /absolute/private/External/WebAccounts
 ```
 
-将 `examples/mac-claude-vm/web-accounts.example.json` 复制为私有 `config.json`，设置绝对 `directory`、既有公网 `publicOrigin` 和该 origin 下的 `/v1` API Base URL。目录 0700，配置、账号库与 `csrf.key` 均为所属网关用户的 0600 文件。网页只在该规范 origin 提供，要求它的域名及端口已经包含在原网关的 `additionalPublicAuthorities` 中。
+将 `examples/mac-claude-vm/web-accounts.example.json` 复制为私有 `config.json`，设置绝对 `directory`、公网 `publicOrigin` 和供客户端填写的 `apiBaseUrl`。后者必须是规范 HTTPS origin 下的 `/v1`，可以与注册页使用不同的域名及端口；它仅作为连接信息展示，服务端转发目标仍固定。可选 `additionalPublicOrigins` 最多两个，保留旧注册入口；不配置时只开放主入口。目录 0700，配置、账号库与 `csrf.key` 均为所属网关用户的 0600 文件。所有注册页 origin 及模型 API 的 authority 都必须已在外部网关的 Host 白名单内，否则拒绝启动。
+
+微信对非标准端口的提示出现在加载网页之前，前端代码不能关闭。分享给微信的注册页应使用标准 HTTPS 443 地址，例如 `https://accounts.example.net/account/`，不是简单从已有 TCP 隧道地址中删去端口。现有 Tailscale Funnel 可以单独提供标准端口注册页，客户端继续填写原国内 API 地址；应实测其大陆访问延迟，并保留原入口。标准端口只消除这项触发条件，不保证微信不会因其他客户端规则提示，真实手机仍需验证。国内 Sakura HTTP(S) 标准端口隧道需要自有备案域名，免费的 TCP 子域绑定仍使用分配端口。
 
 在已有私有 `External/gateway.json` 新增一个字段，保留其他配置：
 
@@ -49,13 +51,13 @@ node scripts/manage-web-accounts.mjs reset-password /absolute/private/External/W
 
 ## 浏览器和模型权限
 
-浏览器登录使用 `__Host-`、Secure、HttpOnly、SameSite=Strict Cookie；登录令牌只保存摘要，不放进页面 JSON 或浏览器 localStorage/sessionStorage。默认 24 小时有效，重新登录撤销此前的浏览器登录态；模型 API key 不因此改变。
+浏览器登录使用 `__Host-`、Secure、HttpOnly、SameSite=Strict Cookie；登录令牌只保存摘要，不放进页面 JSON 或浏览器 localStorage/sessionStorage。默认 24 小时有效，重新登录撤销此前的浏览器登录态；模型 API key 不因此改变。多个明确配置的注册入口共用账号、邀请码、限流和容量，各域名的浏览器 Cookie 分开，切换域名需重新登录。
 
-所有写操作要求规范 HTTPS Origin、签名 CSRF Cookie 与一致的自定义 CSRF 请求头；注册和登录同样检查。拒绝跨站请求、重复账号 Cookie、请求凭证混用、非 JSON 或压缩正文及超过 8 KiB 的正文。不开放 CORS，不接受调用方选择其他账号编号或网络目标。
+所有写操作要求当前 Host 对应的规范 HTTPS Origin、签名 CSRF Cookie 与一致的自定义 CSRF 请求头；注册和登录同样检查。CSRF 签名绑定具体 origin，即使另一个已配置的入口也不能代替当前入口授权写操作。拒绝跨站请求、重复账号 Cookie、请求凭证混用、非 JSON 或压缩正文及超过 8 KiB 的正文。不开放 CORS，不接受调用方选择其他账号编号或网络目标。
 
 页面使用固定静态文件映射、严格 CSP、禁止嵌入和 no-referrer；没有外部脚本、字体、埋点或自动获取微信资料。原生微信内浏览器的复制能力有差异，页面提供长按复制回退。完整新 API key 只在生成时临时展示，离开页面或切到后台后清除。
 
-仅网页账号接口单独允许其规范 Origin，原 `/v1` 模型接口继续拒绝带浏览器 Origin 的请求。模型请求仍需独立 API key，Cookie 不能替代；本机管理页、SSH、VM 和任意目标代理均未公开。网页账号不能生成邀请码或操作其他人，管理员操作仍在本机 CLI 中完成。
+仅网页账号接口单独允许与当前 Host 相符的已配置 Origin，原 `/v1` 模型接口继续拒绝带浏览器 Origin 的请求。模型请求仍需独立 API key，Cookie 不能替代；本机管理页、SSH、VM 和任意目标代理均未公开。网页账号不能生成邀请码或操作其他人，管理员操作仍在本机 CLI 中完成。
 
 ## 验证
 
@@ -70,4 +72,4 @@ npm run verify:web-accounts
 
 单元/协议测试覆盖邮箱格式、Null MX、A/AAAA 后备、域名不存在与 DNS 超时、未验证状态、旧用户名兼容、微信旧接口兼容、客户端会话隔离、旧客户端兼容、Origin 与 CSRF 拒绝、Cookie 隔离、密码摘要、一次性邀请码竞争、注册上限、禁用、注销、密码恢复及登录限流。测试及离线浏览器注入 DNS 结果，不依赖真实邮箱或发信。桌面 Chrome 手机视口或模拟微信 UA 的结果，不代表已在真实微信手机中验收；正式公网 HTTPS 仍应从实际用户网络检查，模型权限仍需管理员完成 Claude 登录后单独验收。
 
-依据：[微信网页授权](https://developers.weixin.qq.com/doc/service/guide/h5/auth.html)、[OWASP 输入校验](https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html#email-address-validation)、[RFC 7505 Null MX](https://www.rfc-editor.org/rfc/rfc7505.html)、[OWASP 密码存储](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)、[Node scrypt](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptoscryptpassword-salt-keylen-options-callback)。
+依据：[Sakura Web 穿透](https://doc.natfrp.com/app/http.html)、[Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel)、[微信网页授权](https://developers.weixin.qq.com/doc/service/guide/h5/auth.html)、[OWASP 输入校验](https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html#email-address-validation)、[RFC 7505 Null MX](https://www.rfc-editor.org/rfc/rfc7505.html)、[OWASP 密码存储](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)、[Node scrypt](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptoscryptpassword-salt-keylen-options-callback)。

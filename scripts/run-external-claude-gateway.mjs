@@ -36,7 +36,8 @@ try {
   const allowedHosts = ['127.0.0.1:43158', 'localhost:43158',
     ...validateExternalAuthorities(config.additionalPublicAuthorities)];
   if (config.publicHostname) allowedHosts.push(config.publicHostname, `${config.publicHostname}:443`);
-  if (webAccounts && !allowedHosts.includes(new URL(webAccounts.publicOrigin).host)) throw new Error();
+  if (webAccounts && [...webAccounts.publicOrigins, new URL(webAccounts.apiBaseUrl).origin]
+    .some(origin => !allowedHosts.includes(new URL(origin).host))) throw new Error();
   server = createExternalClaudeGateway({ gatewayKey, sessionKey, getClients, allowedHosts, accountApi, webAccounts });
   await new Promise((yes, no) => { server.once('error', no); server.listen(43158, '127.0.0.1', yes); });
   const close = () => { server.close(); server.closeAllConnections(); };

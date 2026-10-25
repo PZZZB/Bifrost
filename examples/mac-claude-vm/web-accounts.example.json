@@ -1,7 +1,8 @@
 {
   "version": 1,
   "directory": "/Users/ACCOUNT/Library/Application Support/ClaudeVPS/Bifrost/External/WebAccounts",
-  "publicOrigin": "https://api.example.net:47846",
+  "publicOrigin": "https://accounts.example.net",
+  "additionalPublicOrigins": ["https://api.example.net:47846"],
   "apiBaseUrl": "https://api.example.net:47846/v1",
   "maxAccounts": 50,
   "maxConcurrent": 1,
