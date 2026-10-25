@@ -34,6 +34,7 @@ async function fixture(t, { usage = true } = {}) {
   const server = createClientServer({ access, billing, webAccounts, publicDir: fileURLToPath(new URL('../public', import.meta.url)),
     publicBaseUrl: ORIGIN, allowedHosts: [], getModels: () => models, requestChat: source, requestMessages: source,
     requestResponses: () => { throw new Error('Wrong provider'); }, csrfSecret: randomBytes(32).toString('base64url') });
+  assert.equal(server.clientEndpoint().portalUrl, ORIGIN + '/account/');
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const fixed = createClientGatewayForwarder({ fetchImpl: async (url, options) => {
     assert.ok(url.startsWith('http://127.0.0.1:43159/'));

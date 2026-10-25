@@ -88,8 +88,8 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
   const meteredResponses = request => dispatch(request, 'responses', requestResponses);
   const chat = new ClientChatAdapter({ requestResponses: meteredResponses });
   function endpoint() {
-    const root = publicUrl.origin;
-    return { baseUrl: `${root}/v1`, portalUrl: `${root}/portal`, modelsUrl: `${root}/v1/models`,
+    const root = webAccounts ? new URL(webAccounts.apiBaseUrl).origin : publicUrl.origin;
+    return { baseUrl: `${root}/v1`, portalUrl: webAccounts ? `${webAccounts.publicOrigin}/account/` : `${root}/portal`, modelsUrl: `${root}/v1/models`,
       responsesUrl: `${root}/v1/responses`, messagesUrl: `${root}/v1/messages`, chatCompletionsUrl: `${root}/v1/chat/completions` };
   }
   function rate(key, maximum, interval) {

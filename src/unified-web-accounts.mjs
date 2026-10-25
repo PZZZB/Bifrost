@@ -34,7 +34,7 @@ export class UnifiedWebAccounts {
     if (!['mx', 'address'].includes(method)) fail(503, 'email_domain_unavailable');
     const checkedAt = new Date(this.clock()).toISOString();
     try {
-      const result = await this.access.register({ username, password: value, inviteToken: inviteCode,
+      const result = await this.access.register({ username, password: value, inviteToken: inviteCode }, {
         registration: { privacyVersion: WEB_PRIVACY_VERSION, acceptedAt: checkedAt, emailVerified: false, emailDomainCheck: { method, checkedAt } } });
       return { account: this.publicAccount(result.account), apiKey: result.secret, sessionToken: result.sessionToken, expiresAt: Date.parse(result.expiresAt) };
     } catch (error) { translate(error); }

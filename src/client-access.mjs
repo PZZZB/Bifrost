@@ -311,11 +311,11 @@ export class ClientAccess {
       next.accounts.push(account); await this.#commit(next); return this.#publicAccount(account);
     });
   }
-  async register(options) {
-    if (!fields(options, ['username', 'password', 'inviteToken', 'registration'], ['username', 'password'])
-      || options.registration !== undefined && !validRegistration(options.registration)) throw error();
+  async register(options, { registration } = {}) {
+    if (!fields(options, ['username', 'password', 'inviteToken'], ['username', 'password'])
+      || registration !== undefined && !validRegistration(registration)) throw error();
     const name = username(options.username), credential = await passwordHash(password(options.password));
-    if (options.registration !== undefined && !name.includes('@')) throw error();
+    if (registration !== undefined && !name.includes('@')) throw error();
     if (options.inviteToken !== undefined && (typeof options.inviteToken !== 'string' || !TOKEN_PATTERNS.invite.test(options.inviteToken))) {
       throw error('邀请无效或已到期。', 403, 'client_invite_invalid');
     }
@@ -333,7 +333,7 @@ export class ClientAccess {
       const account = { id: randomUUID(), username: name, password: credential, allowedModels: this.#models(invite?.allowedModels ?? []),
         enabled: true, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
         keyExpiresAtLimit: new Date(now + next.registrationPolicy.defaultKeyDays * DAY).toISOString(), keys: [],
-        ...(options.registration ? { registration: structuredClone(options.registration) } : {}) };
+        ...(registration ? { registration: structuredClone(registration) } : {}) };
       const created = this.#newKey(account);
       const sessionToken = secret('session'), expiresAt = new Date(now + SESSION_LIFETIME).toISOString();
       next.accounts.push(account); if (invite) invite.uses++;
