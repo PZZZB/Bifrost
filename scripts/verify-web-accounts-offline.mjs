@@ -56,9 +56,25 @@ try {
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     const page = await context.newPage(), errors = [];
     page.on('pageerror', error => errors.push(error.name));
+    let sessionCalls = 0, registrationCalls = 0;
+    await page.route('**/account/web/v1/session', route => {
+      if (++sessionCalls === 1) return route.fulfill({ status: 429, contentType: 'text/html',
+        headers: { 'retry-after': '30' }, body: '<h1>Too Many Requests</h1>' });
+      return route.continue();
+    });
+    await page.route('**/account/web/v1/register', route => {
+      if (++registrationCalls === 1) return route.fulfill({ status: 429, contentType: 'text/html', body: '<h1>Too Many Requests</h1>' });
+      return route.continue();
+    });
     const { inviteCode } = await store.invite();
     await page.goto(origin + '/account/?from=singlemessage&isappinstalled=0#invite=' + inviteCode);
+    await page.locator('#retry-connect').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#error').textContent(), /服务繁忙.*30 秒/);
+    assert.equal(sessionCalls, 1);
+    assert.equal(await page.locator('#auth-view').isVisible(), false);
+    await page.click('#retry-connect');
     await page.locator('#auth-view').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#retry-connect').isVisible(), false);
     assert.equal(new URL(page.url()).hash, '');
     assert.equal(await page.locator('#invite').inputValue(), inviteCode);
     await page.fill('#invite', '');
@@ -66,6 +82,13 @@ try {
     await page.screenshot({ path: join(output, name + '-registration.png'), fullPage: true });
     await page.fill('#email', name + 'owner@example.test'); await page.fill('#password', password);
     await page.fill('#password-confirm', password); await page.fill('#invite', inviteCode); await page.check('#consent');
+    await page.click('#submit');
+    await page.locator('#error').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#error').textContent(), '服务繁忙，请稍后再试。');
+    assert.equal(registrationCalls, 1);
+    assert.equal(await page.locator('#password').inputValue(), password);
+    assert.equal(await page.locator('#invite').inputValue(), inviteCode);
+    assert.equal(await page.locator('#account-view').isVisible(), false);
     await page.click('#submit'); await page.locator('#account-view').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#account-name').textContent(), name + 'owner@example.test');
     assert.match(await page.locator('#email-status').textContent(), /邮箱未验证/);
@@ -93,7 +116,9 @@ try {
     assert.equal(await page.locator('#api-key').inputValue(), '');
     assert.deepEqual(errors, []);
     checks.push({ viewport: name, registration: true, email_unverified_notice: true, rotation_and_old_key_rejection: true,
-      logout_and_login: true, reload_keeps_session: true, navigation_hides_key: true, no_storage_credentials: true, no_page_errors: true });
+      logout_and_login: true, reload_keeps_session: true, navigation_hides_key: true, no_storage_credentials: true, no_page_errors: true,
+      non_json_429_notice: true, retry_after_notice: true, initial_connection_manual_retry: true,
+      rate_limited_registration_preserves_input: true, no_automatic_mutation_retry: true });
     await context.close();
   }
   const report = { passed: true, fixture_only: true, checks, real_wechat_phone_verified: false, real_model_requests: 0 };

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  let mode = 'register', csrf = '', busy = false, revealedKey = '';
+  let mode = 'register', csrf = '', busy = false, revealedKey = '', ready = false;
   const invitation = new URLSearchParams(location.hash.slice(1)).get('invite');
   if (invitation && /^bfi_[A-Za-z0-9_-]{43}$/.test(invitation)) {
     $('invite').value = invitation;
@@ -48,17 +48,29 @@
         headers: { accept: 'application/json', ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
           ...(method !== 'GET' ? { 'x-bifrost-csrf': csrf } : {}) },
         ...(method === 'POST' ? { body: JSON.stringify(body || {}) } : {}) });
-      data = await response.json();
     } catch { throw new Error('网络暂时不可用，请稍后重试。'); }
+    if (response.status === 429) {
+      const value = response.headers.get('retry-after');
+      const seconds = /^[1-9]\d{0,3}$/.test(value || '') && Number(value) <= 3600 ? Number(value) : null;
+      const error = new Error(seconds ? `服务繁忙，请 ${seconds} 秒后再试。` : '服务繁忙，请稍后再试。');
+      error.code = 'rate_limited'; throw error;
+    }
+    if ([502, 503, 504].includes(response.status)) throw new Error('服务暂时不可用，请稍后再试。');
+    try { data = await response.json(); }
+    catch { throw new Error('服务响应异常，请稍后再试。'); }
     if (!response.ok) {
       if (response.status === 401 && action !== 'login') { clearKey(); render({}); }
-      const error = new Error(typeof data.error?.message === 'string' ? data.error.message : '操作未完成，请稍后重试。');
-      error.code = data.error?.code; throw error;
+      const error = new Error(typeof data?.error?.message === 'string' ? data.error.message : '操作未完成，请稍后重试。');
+      error.code = data?.error?.code; throw error;
     }
     return data;
   }
   async function boot() {
-    const data = await request('session', undefined, 'GET'); csrf = data.csrfToken; render(data);
+    $('loading').hidden = false;
+    try {
+      const data = await request('session', undefined, 'GET'); csrf = data.csrfToken; render(data);
+      ready = true; $('retry-connect').hidden = true;
+    } finally { $('loading').hidden = true; }
   }
   async function perform(action) {
     if (busy) return;
@@ -68,9 +80,11 @@
     catch (error) {
       if (error.code === 'csrf_rejected') { try { await boot(); } catch {} }
       showError(error.message || '操作未完成，请稍后重试。');
+      if (!ready) $('retry-connect').hidden = false;
     } finally { busy = false; for (const button of document.querySelectorAll('button')) button.disabled = false; }
   }
   $('register-tab').addEventListener('click', () => authMode('register'));
+  $('retry-connect').addEventListener('click', () => void perform(boot));
   $('login-tab').addEventListener('click', () => authMode('login'));
   $('toggle-password').addEventListener('click', () => {
     const visible = $('password').type === 'password'; $('password').type = visible ? 'text' : 'password';
@@ -116,5 +130,5 @@
   $('copy-key').addEventListener('click', () => void copy('api-key', revealedKey));
   document.addEventListener('visibilitychange', () => { if (document.hidden) clearKey(); });
   window.addEventListener('pagehide', clearKey);
-  void perform(boot).finally(() => { $('loading').hidden = true; });
+  void perform(boot);
 })();
