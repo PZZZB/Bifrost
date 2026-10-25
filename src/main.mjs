@@ -34,6 +34,7 @@ import { ClientBilling } from './client-billing.mjs';
 import { loadMacClaudeClient } from './mac-claude-client.mjs';
 import { UnifiedWebAccounts } from './unified-web-accounts.mjs';
 import { createWebAccounts } from './web-accounts.mjs';
+import { loadPaymentRuntime } from './payments/runtime.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serviceVersion = await createServiceVersion({ projectDir });
@@ -62,6 +63,7 @@ try { usageLedger = await UsageLedger.open({ path: join(stateDir, 'usage.jsonl')
 catch (error) { console.error(`Token statistics unavailable: ${redact(error.message)}`); }
 let backendRpc, configRpc, backend, integration, gateway, clientVersion, accountQuotas, serviceControl;
 let withService, cursorProvider, requestDiagnostics, clientAccess = null, clientService = null, clientAdmin = null, clientBilling = null;
+let paymentRuntime = null, paymentsFault = false;
 const modelPolicy = await ModelPolicy.open({ path: join(stateDir, 'model-policy.json') });
 try { requestDiagnostics = await RequestDiagnostics.open({ path: join(stateDir, 'request-diagnostics.jsonl') }); }
 catch { console.error('Request diagnostics unavailable; model forwarding remains enabled.'); }
@@ -115,6 +117,7 @@ try {
   try { clientBilling = await ClientBilling.open({ path: join(stateDir, 'client-billing.json') }); }
   catch { console.error('Client billing unavailable; client inference remains closed until the ledger is repaired.'); }
   clientAdmin = new ClientAdmin({ access: clientAccess, billing: clientBilling, getModels: clientModels,
+    getPaymentsStatus: () => paymentRuntime?.service.status() ?? { enabled: false, unavailable: paymentsFault },
     getEndpoint: () => clientService?.endpoint() ?? null,
     getServerStatus: () => clientService?.status() ?? { enabled: false, ready: false,
       message: clientBilling ? '用户入口尚未启动。' : '用户计费账本未就绪，入口已停止接入。' } });
@@ -189,8 +192,14 @@ server.listen(port, '127.0.0.1', () => {
 });
 if (clientAccess && clientBilling && !delegation) {
   const codec = new ClientStateCodec({ secret: state.gatewayKey });
+  if (process.env.BRIDGE_PAYMENTS_CONFIG) {
+    try { paymentRuntime = await loadPaymentRuntime({ configPath: process.env.BRIDGE_PAYMENTS_CONFIG, stateDir,
+      access: clientAccess, billing: clientBilling, publicOrigin: macClaude?.web.publicOrigin }); }
+    catch { paymentsFault = true; console.error('Payments unavailable; automatic top-ups remain closed. Check the private payment configuration and journal.'); }
+  }
   const webAccounts = macClaude ? createWebAccounts({ ...macClaude.web, csrfKey: macClaude.csrfKey,
-    publicDir: join(projectDir, 'public/accounts'), store: new UnifiedWebAccounts({ access: clientAccess, billing: clientBilling, ...macClaude.web }) }) : null;
+    payments: paymentRuntime?.service, publicDir: join(projectDir, 'public/accounts'),
+    store: new UnifiedWebAccounts({ access: clientAccess, billing: clientBilling, ...macClaude.web, payments: paymentRuntime?.service }) }) : null;
   clientService = await startClientService({ stateDir, reservedPorts: [port, 43157], publicDir: join(projectDir, 'public'), access: clientAccess, billing: clientBilling,
     webAccounts, ...(macClaude ? { requestChat: macClaude.requestChat, maxConcurrent: 4, maxConcurrentPerAccount: macClaude.web.maxConcurrent,
       requestsPerMinute: macClaude.web.requestsPerMinute } : {}),
@@ -228,6 +237,7 @@ async function shutdown(code = 0) {
   }
   server.close(); server.closeAllConnections();
   await clientService?.close();
+  await paymentRuntime?.close();
   await macClaude?.close();
   await Promise.allSettled([modelDiscovery.close(), providerQuotas.close()]);
   await Promise.allSettled([backendRpc?.close(), configRpc?.close(), withService.close(), codeBuddyService.close(), cursorProvider.close(), cursorService.close()]);

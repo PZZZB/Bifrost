@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "enabled": false,
+  "products": [],
+  "channels": {
+    "alipay": {
+      "enabled": false,
+      "appId": "REPLACE_WITH_APPROVED_APP_ID",
+      "sellerId": "REPLACE_WITH_ACTUAL_SELLER_ID",
+      "privateKeyFile": "/absolute/private/path/alipay-application-private.pem",
+      "alipayPublicKeyFile": "/absolute/private/path/alipay-public.pem"
+    },
+    "wechat": {
+      "enabled": false,
+      "appId": "REPLACE_WITH_APPROVED_APP_ID",
+      "mchId": "REPLACE_WITH_SIGNING_MERCHANT_ID",
+      "subMchId": null,
+      "serialNo": "REPLACE_WITH_MERCHANT_CERTIFICATE_SERIAL",
+      "privateKeyFile": "/absolute/private/path/wechat-merchant-private.pem",
+      "apiV3KeyFile": "/absolute/private/path/wechat-api-v3.key",
+      "publicKeyFiles": {
+        "REPLACE_WITH_WECHAT_PUBLIC_KEY_ID": "/absolute/private/path/wechat-payment-public.pem"
+      }
+    }
+  }
+}

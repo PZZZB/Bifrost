@@ -2,6 +2,7 @@ import { once } from 'node:events';
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { readBody } from './gateway.mjs';
+import { paymentNotificationChannel } from './payments/http.mjs';
 
 const WEB = new Set(['/register', '/account', '/account/', '/account/privacy', '/account/app.js', '/account/style.css',
   '/account/web/v1/session', '/account/web/v1/register', '/account/web/v1/login', '/account/web/v1/logout', '/account/web/v1/me', '/account/web/v1/api-key']);
@@ -32,7 +33,8 @@ export function createClientGatewayForwarder({ port = 43159, fetchImpl = loopbac
   return {
     handles: url => WEB.has(url?.split('?')[0]) || url?.startsWith('/account/web/v1/'),
     async handle(req, res, signal) {
-      const web = WEB.has(req.url?.split('?')[0]);
+      const web = WEB.has(req.url?.split('?')[0]) || req.url?.startsWith('/account/web/v1/');
+      const notification = paymentNotificationChannel(req.url);
       if (web) {
         if (!['GET', 'HEAD', 'POST', 'DELETE'].includes(req.method)) fail(405);
       } else if (!API.has(req.url)) fail(404);
@@ -43,12 +45,15 @@ export function createClientGatewayForwarder({ port = 43159, fetchImpl = loopbac
       const allowed = web ? ['origin', 'cookie', 'x-bifrost-csrf', 'sec-fetch-site', 'content-type', 'authorization', 'x-api-key']
         : ['authorization', 'x-api-key', 'content-type', 'accept', 'anthropic-version', 'anthropic-beta'];
       for (const name of allowed) if (typeof req.headers[name] === 'string') headers.set(name, req.headers[name]);
+      if (notification === 'wechat') for (const name of ['wechatpay-timestamp', 'wechatpay-nonce', 'wechatpay-serial', 'wechatpay-signature']) {
+        if (typeof req.headers[name] === 'string') headers.set(name, req.headers[name]);
+      }
       if (!web) {
         const session = SESSION.map(name => req.headers[name]).find(Boolean) ?? '';
         if (typeof session !== 'string' || session.length > 1024) fail(400);
         headers.set('x-session-id', session);
       }
-      const body = req.method === 'POST' ? await readBody(req, web ? 8192 : 16 * 1024 * 1024) : undefined;
+      const body = req.method === 'POST' ? await readBody(req, notification ? 65_536 : web ? 8192 : 16 * 1024 * 1024) : undefined;
       const response = await fetchImpl(`http://127.0.0.1:${port}${req.url}`, { method: req.method, headers, body,
         redirect: 'manual', signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(600_000)]) });
       if (response.status >= 300 && response.status < 400 && !(web && response.status === 303 && response.headers.get('location') === '/account/')) {

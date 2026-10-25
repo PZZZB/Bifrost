@@ -16,8 +16,8 @@ function translate(error) {
 /** Compatibility view, never a second database or credential owner. */
 export class UnifiedWebAccounts {
   constructor({ access, billing, maxAccounts = 50, maxConcurrent = 1, requestsPerMinute = 20,
-    clock = Date.now, checkEmailDomain = defaultCheck }) {
-    Object.assign(this, { access, billing, maxAccounts, maxConcurrent, requestsPerMinute, clock, checkEmailDomain });
+    clock = Date.now, checkEmailDomain = defaultCheck, payments = null }) {
+    Object.assign(this, { access, billing, maxAccounts, maxConcurrent, requestsPerMinute, clock, checkEmailDomain, payments });
   }
   publicAccount(account) {
     return { id: account.id, username: account.username, email: account.username.includes('@') ? account.username : null,
@@ -53,8 +53,12 @@ export class UnifiedWebAccounts {
       ...(this.billing ? { billing: this.billing.account(principal.accountId) } : {}) };
   }
   async change(token, operation) {
-    if (!this.access.authenticateSession(token)) fail(401, 'session_expired');
+    const principal = this.access.authenticateSession(token);
+    if (!principal) fail(401, 'session_expired');
     if (operation === 'logout') { await this.access.logout(token); return { ok: true }; }
+    if (operation === 'delete' && (this.payments?.hasPending(principal.accountId) || this.billing?.account(principal.accountId).balanceMicros)) {
+      fail(409, 'payment_account_pending');
+    }
     const result = await this.access.changeSession(token, operation);
     return { ...(result.ok ? { ok: true } : {}), ...(result.account ? { account: this.publicAccount(result.account) } : {}),
       ...(result.secret ? { apiKey: result.secret } : {}) };

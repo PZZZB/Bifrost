@@ -14,6 +14,7 @@
     "desktop": "node scripts/desktop.mjs",
     "start:claude-relay": "node scripts/run-claude-relay.mjs",
     "test": "node --test tests/*.test.mjs",
+    "test:payments": "node --test tests/payment-*.test.mjs",
     "test:wechat": "node --test tests/wechat-*.test.mjs tests/external-claude-gateway.test.mjs",
     "test:accounts": "node --test tests/email-address.test.mjs tests/web-accounts.test.mjs tests/wechat-*.test.mjs tests/external-claude-gateway.test.mjs",
     "verify:web-accounts": "node scripts/verify-web-accounts-offline.mjs",

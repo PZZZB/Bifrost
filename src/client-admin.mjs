@@ -2,8 +2,8 @@ import { BridgeError } from './storage.mjs';
 
 /** Used only behind the existing loopback administrator session and CSRF gate. */
 export class ClientAdmin {
-  constructor({ access, billing = null, getModels, getEndpoint, getServerStatus = () => ({ enabled: true, ready: true }) }) {
-    Object.assign(this, { access, billing, getModels, getEndpoint, getServerStatus });
+  constructor({ access, billing = null, getModels, getEndpoint, getServerStatus = () => ({ enabled: true, ready: true }), getPaymentsStatus = null }) {
+    Object.assign(this, { access, billing, getModels, getEndpoint, getServerStatus, getPaymentsStatus });
   }
   async snapshot() {
     const data = this.access.snapshot();
@@ -12,7 +12,8 @@ export class ClientAdmin {
       billing: this.billing?.account(account.id) ?? null })), invites: data.invites,
       billing: billing ? { available: true, currency: billing.currency, prices: billing.prices, recent: billing.recent,
         unresolved: billing.unresolved, unresolvedNextBefore: billing.unresolvedNextBefore } : { available: false },
-      models: this.getModels(), endpoint: this.getEndpoint(), server: this.getServerStatus() };
+      models: this.getModels(), endpoint: this.getEndpoint(), server: this.getServerStatus(),
+      ...(this.getPaymentsStatus ? { payments: this.getPaymentsStatus() } : {}) };
   }
   ledger() {
     if (!this.billing) throw new BridgeError('计费账本尚未就绪，请重启加载或检查账本文件。', 503, 'client_billing_unavailable');

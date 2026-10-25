@@ -7,6 +7,8 @@ import { validateExternalAuthorities } from './external-claude-gateway.mjs';
 import { readPrivateAccountFile } from './private-account-files.mjs';
 import { WebAccountStore, WEB_PRIVACY_VERSION, webUsername } from './web-account-store.mjs';
 import { webEmail } from './email-address.mjs';
+import { PAYMENT_ERRORS } from './payments/topups.mjs';
+import { createPaymentNotifications, paymentNotificationChannel } from './payments/http.mjs';
 
 const STATIC = new Map([['/account/', ['index.html', 'text/html; charset=utf-8']],
   ['/account/privacy', ['privacy.html', 'text/html; charset=utf-8']],
@@ -17,6 +19,7 @@ const ROUTES = new Map([['session', 'GET'], ['register', 'POST'], ['login', 'POS
 const SESSION_COOKIE = '__Host-bifrost_session', CSRF_COOKIE = '__Host-bifrost_csrf';
 const fail = (status, code) => { throw Object.assign(new Error(code), { status, code }); };
 const ERRORS = {
+  ...PAYMENT_ERRORS,
   invalid_request: '请求格式不正确。', not_found: '页面或接口不存在。', method_not_allowed: '操作方式不支持。',
   access_denied: '请求来源校验失败，请重新打开注册网页。', csrf_rejected: '页面校验已过期，请刷新页面后重试。',
   invalid_username: '请输入邮箱地址；旧版账号可使用原用户名登录。',
@@ -48,7 +51,7 @@ function cookies(req) {
 }
 
 export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPublicOrigins = [], apiBaseUrl,
-  publicDir = fileURLToPath(new URL('../public/accounts/', import.meta.url)), clock = Date.now } = {}) {
+  publicDir = fileURLToPath(new URL('../public/accounts/', import.meta.url)), clock = Date.now, payments = null } = {}) {
   if (!Array.isArray(additionalPublicOrigins) || additionalPublicOrigins.length > 2) throw new TypeError('Invalid web account settings.');
   const publicOrigins = Object.freeze([publicOrigin, ...additionalPublicOrigins]);
   const originsByHost = new Map();
@@ -76,6 +79,7 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPubl
   }
   let windowEnd = 0, requests = 0, authRequests = 0, authActive = 0;
   const attempts = new Map();
+  const notification = createPaymentNotifications(payments);
   return {
     publicOrigin, publicOrigins, apiBaseUrl, maxAccounts: store.maxAccounts,
     handles: url => typeof url === 'string' && (['/register', '/account'].includes(url.split('?')[0]) ||
@@ -94,6 +98,7 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPubl
         if (!req.url.startsWith('/')) fail(400, 'invalid_request');
         const url = new URL(req.url, requestOrigin);
         if (url.origin !== requestOrigin) fail(403, 'access_denied');
+        if (paymentNotificationChannel(req.url)) { await notification(req, res); return; }
         if (['/register', '/account'].includes(url.pathname)) {
           if (req.method !== 'GET' && req.method !== 'HEAD') fail(405, 'method_not_allowed');
           res.writeHead(303, { location: '/account/' }); res.end(); return;
@@ -104,7 +109,9 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPubl
           res.writeHead(200, { 'content-type': type }); res.end(req.method === 'HEAD' ? undefined : bytes); return;
         }
         if (!req.url.startsWith(PREFIX) || url.search || req.url !== url.pathname) fail(404, 'not_found');
-        const action = req.url.slice(PREFIX.length), methods = ROUTES.get(action);
+        const action = req.url.slice(PREFIX.length), topupId = /^topups\/([a-f0-9]{32})$/.exec(action)?.[1];
+        const topup = action === 'topups' || !!topupId;
+        const methods = topup ? topupId ? 'GET' : ['GET', 'POST'] : ROUTES.get(action);
         if (!methods) fail(404, 'not_found');
         if (!(Array.isArray(methods) ? methods : [methods]).includes(req.method)) fail(405, 'method_not_allowed');
         if (req.headers['sec-fetch-site'] === 'cross-site') fail(403, 'access_denied');
@@ -130,7 +137,14 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPubl
             }
           }
           json(res, 200, { authenticated: !!identity, ...(identity ?? {}), csrfToken: csrf, apiBaseUrl,
-            registrationMode: 'email_invite', emailVerificationRequired: false, privacyVersion: WEB_PRIVACY_VERSION }); return;
+            registrationMode: 'email_invite', emailVerificationRequired: false, privacyVersion: WEB_PRIVACY_VERSION,
+            payments: { enabled: payments?.catalog().enabled === true } }); return;
+        }
+        if (topup && req.method === 'GET') {
+          if (req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0)) fail(400, 'invalid_request');
+          const identity = await store.me(session);
+          if (!payments) fail(503, 'payments_unavailable');
+          json(res, 200, topupId ? { order: payments.get(identity.account.id, topupId) } : payments.list(identity.account.id)); return;
         }
         if (req.headers.origin !== requestOrigin || !validCsrf(csrf, requestOrigin) || !safeEqual(csrf, req.headers['x-bifrost-csrf'])) fail(403, 'csrf_rejected');
         let body = {};
@@ -140,10 +154,15 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPubl
           try { body = JSON.parse(bytes.toString('utf8')); } catch { fail(400, 'invalid_request'); }
           if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request');
         } else if (req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0)) fail(400, 'invalid_request');
-        const allowed = action === 'register' ? ['email', 'password', 'inviteCode', 'privacyAccepted'] : action === 'login' ? ['username', 'password'] : [];
+        const allowed = action === 'register' ? ['email', 'password', 'inviteCode', 'privacyAccepted'] : action === 'login' ? ['username', 'password']
+          : topup ? ['channel', 'product', 'requestId'] : [];
         if (Object.keys(body).some(name => !allowed.includes(name))) fail(400, 'invalid_request');
         let result;
-        if (action === 'register' || action === 'login') {
+        if (topup) {
+          const identity = await store.me(session);
+          if (!payments) fail(503, 'payments_unavailable');
+          result = { order: await payments.create(identity.account.id, body) };
+        } else if (action === 'register' || action === 'login') {
           const username = action === 'register' ? webEmail(body.email) : webUsername(body.username);
           if (++authRequests > 30 || authActive >= 2 || (attempts.get(username) ?? 0) >= 5) fail(429, 'rate_limited');
           attempts.set(username, (attempts.get(username) ?? 0) + 1); authActive++; reserved = true;
