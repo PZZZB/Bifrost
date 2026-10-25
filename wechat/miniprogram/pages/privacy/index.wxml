@@ -1,0 +1,12 @@
+<view class="page">
+  <view class="title">账号隐私说明</view>
+  <view class="muted">版本：2026-10-25</view>
+  <view class="card">
+    <view class="text">微信登录用于识别你的网关账号。服务端向微信校验一次性登录凭证，不收集你的微信密码、手机号、姓名、头像或通讯录。</view>
+    <view class="text spaced">网关保存经加密摘要处理的微信身份标识、账号编号、创建和同意时间、账号状态、密钥摘要、登录有效期及请求频率设置，用于登录、发放和停用 API key。摘要处理后的标识仍按账号数据保护。</view>
+    <view class="text spaced">完整 API key 只在生成时返回，不在网关中保存明文；小程序只在当前页面临时展示。登录令牌保存在本机小程序存储中，有效期届满后需要重新登录。</view>
+    <view class="text spaced">启用微信云开发接入时，登录和账号操作经腾讯云函数转送到网关。该云函数不负责转发模型推理内容。</view>
+    <view class="text spaced">你可以退出登录、停用密钥或注销网关账号。注销会删除本账号记录并拒绝旧凭证的新请求；已开始的模型请求可能继续完成。模型调用和上游渠道的数据处理应以运营方正式公布的服务与隐私说明为准。</view>
+    <view class="text spaced">需要帮助时，请联系向你提供邀请码的网关管理员。</view>
+  </view>
+</view>

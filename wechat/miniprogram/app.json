@@ -1,0 +1,12 @@
+{
+  "pages": ["pages/account/index", "pages/privacy/index"],
+  "window": {
+    "navigationBarTitleText": "Bifrost 账号",
+    "navigationBarBackgroundColor": "#f5f7fb",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f5f7fb"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json",
+  "networkTimeout": { "request": 15000 }
+}

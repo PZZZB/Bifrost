@@ -63,7 +63,8 @@ function errorResponse(res, status) {
  * all remote sessions by the authenticated client rather than caller headers. */
 export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients,
   allowedHosts, upstreamPort = 43157, maxConcurrent = 4, maxBodyBytes = 16 * 1024 * 1024,
-  headerTimeoutMs = 20_000, requestTimeoutMs = 10 * 60_000, fetchImpl = fetch, clock = Date.now } = {}) {
+  headerTimeoutMs = 20_000, requestTimeoutMs = 10 * 60_000, fetchImpl = fetch, clock = Date.now,
+  accountApi = null } = {}) {
   if (!key(gatewayKey) || !key(sessionKey) || gatewayKey === sessionKey || typeof getClients !== 'function' ||
       !Array.isArray(allowedHosts) || !allowedHosts.length || allowedHosts.some(host => typeof host !== 'string' || !host) ||
       !Number.isInteger(upstreamPort) || upstreamPort < 1024 || upstreamPort > 65535 ||
@@ -87,6 +88,9 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
       if (counts.get('host') !== 1 || !hosts.has(req.headers.host?.toLowerCase()) ||
           req.headers.origin !== undefined) fail(403);
       if (['authorization', 'x-api-key', ...SESSION_HEADERS].some(name => (counts.get(name) ?? 0) > 1)) fail(400);
+      if (accountApi && req.url.startsWith('/account/v1/')) {
+        await accountApi.handle(req, res); return;
+      }
       const supplied = [];
       if (req.headers.authorization !== undefined) supplied.push(/^Bearer (\S+)$/i.exec(req.headers.authorization)?.[1]);
       if (req.headers['x-api-key'] !== undefined) supplied.push(req.headers['x-api-key']);

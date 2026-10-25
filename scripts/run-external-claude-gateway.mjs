@@ -1,6 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { createExternalClaudeGateway, validateExternalClients, validateExternalAuthorities } from '../src/external-claude-gateway.mjs';
+import { loadWeChatAccounts } from '../src/wechat-accounts.mjs';
 
 let server;
 async function privateFile(path, limit = 65_536) {
@@ -18,16 +19,17 @@ try {
       (typeof config.publicHostname !== 'string' || !/^[a-z0-9-]+\.[a-z0-9.-]+\.ts\.net$/.test(config.publicHostname))) throw new Error();
   const gatewayKey = (await privateFile(config.gatewayKeyFile)).trim();
   const sessionKey = (await privateFile(config.sessionKeyFile)).trim();
+  const accountApi = config.wechatAccountsFile === undefined ? null : await loadWeChatAccounts(config.wechatAccountsFile);
   const getClients = async () => {
     const data = JSON.parse(await privateFile(config.clientsFile));
     if (data.version !== 1) throw new Error();
-    return validateExternalClients(data.clients);
+    return validateExternalClients([...validateExternalClients(data.clients), ...(await accountApi?.getClients() ?? [])]);
   };
   await getClients();
   const allowedHosts = ['127.0.0.1:43158', 'localhost:43158',
     ...validateExternalAuthorities(config.additionalPublicAuthorities)];
   if (config.publicHostname) allowedHosts.push(config.publicHostname, `${config.publicHostname}:443`);
-  server = createExternalClaudeGateway({ gatewayKey, sessionKey, getClients, allowedHosts });
+  server = createExternalClaudeGateway({ gatewayKey, sessionKey, getClients, allowedHosts, accountApi });
   await new Promise((yes, no) => { server.once('error', no); server.listen(43158, '127.0.0.1', yes); });
   const close = () => { server.close(); server.closeAllConnections(); };
   process.once('SIGINT', close); process.once('SIGTERM', close);

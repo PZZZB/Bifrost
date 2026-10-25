@@ -63,6 +63,7 @@ test('authentication, hosts, browser origins, paths and methods fail before forw
     ['/v1/models', { headers: { host: 'external.invalid' } }, 403],
     ['/v1/models', { headers: { origin: 'https://external.invalid' } }, 403],
     ['/health', {}, 404], ['/api/admin', {}, 404], ['/v1/models?target=other', {}, 404],
+    ['/account/v1/login', { method: 'POST', body: '{}' }, 404], ['/account/v1/me', {}, 404],
     ['/v1/models', { method: 'POST' }, 405],
     ['/v1/messages', { method: 'POST', headers: { 'content-encoding': 'gzip' }, body: 'body' }, 415],
     ['/v1/models', { headers: { authorization: [`Bearer ${aliceKey}`, `Bearer ${aliceKey}`] } }, 400],
