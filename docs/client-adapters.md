@@ -54,6 +54,8 @@ npm run verify:desktop-codex
 
 第二条使用已安装的真实 Codex：在临时 HOME / CODEX_HOME 中启动实际 app-server，确认 `model/list` 同时包含两边的 ID；再分别通过实际 Codex CLI 完成一次真实本地只读工具往返，验证公司与远端隐藏状态、用量及路由。上游为模拟响应，不读取日常登录，也不消耗模型额度。2026-10-25 本机 `codex-cli 0.163.0-alpha.11.2` 已通过，包含命令式取 Key 的实际验证。
 
+2026-10-28 已用本机更新后的 `codex-cli 0.164.0-alpha.11.1` 重新运行同一检查：合并列表仍有两种来源，两边均完成一次本地工具往返并正确接续隐藏状态；同时通过 26 项客户端目录、通用协议和 Desktop 定向测试。上游仍为模拟响应，这次检查不改变真实公司授权或 Mac 模型就绪状态。
+
 真实公司 OAuth、内网接口及额度、Windows DPAPI 与桌面选择器，以及已登录 Claude 的真实工具回合仍待现场验收。源代码可支持某种协议，不代表每一个客户端产品都已完成配置和验收。
 
 官方依据：[Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)说明 `model_catalog_url`、Responses 协议、命令式认证和重试设置；具体行为另由当前安装的 Codex 程序验证。
