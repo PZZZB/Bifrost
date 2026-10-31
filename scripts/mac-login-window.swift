@@ -13,6 +13,7 @@ func attr(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
     return result
 }
 _ = AXUIElementSetAttributeValue(app,"AXEnhancedUserInterface" as CFString,kCFBooleanTrue)
+_ = AXUIElementSetAttributeValue(app,"AXManualAccessibility" as CFString,kCFBooleanTrue)
 Thread.sleep(forTimeInterval:0.4)
 let windows = attr(app,kAXWindowsAttribute) as? [AXUIElement] ?? []
 var ipMatches = false, proxyError = false, loginVisible = false, challengeVisible = false

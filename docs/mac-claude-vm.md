@@ -109,6 +109,8 @@ python3 scripts/open-mac-claude-login-manual.py
 
 这个入口不启用 CDP、远程调试、设备模拟或网页脚本注入。独立代理临时监听 `127.0.0.1:17894`，其余 VPS、DNS、IPv6 和禁止直连的参数保持同一约束。通过 macOS 辅助功能读取公网探针页面的非表单文本，实际验证出口、停止代理后公网 IP 请求失败、恢复同一出口，再由 VM CLI 生成授权链接；探针检查完成后才开始本人登录。辅助功能检测仅返回布尔结果，不输出网页正文、账号或输入值。
 
+窗口按进程 PID 的索引引用置前，避免多个 Chrome 实例时选到日常浏览器。为可靠读取探针，临时 Chrome 启用原生无障碍树，公网出口探针使用纯文本而非 Chrome 的 JSON 查看器；这不会启用浏览器调试或改变网络出口。每轮开始先清除旧网络检查结果，失败只记录固定格式错误类别。
+
 本人使用 Google、Apple 或邮箱登录，并亲自完成网站要求的安全验证。这个流程不能保证网站放行，也不自动解决真人验证；安全验证循环的排查依据见 [Cloudflare 官方说明](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)。403 只说明请求被拒绝，不能单独据此认定账号或 IP 被封。
 
 在另一个终端运行同一脚本的 `status` 动作查看安全状态。官网显示授权码后，执行 `python3 scripts/open-mac-claude-login-manual.py code`，本人把码粘到本机隐藏输入框，代码经私有 stdin 交给原 VM CLI。授权码不放命令参数或聊天。若 CLI 会话过期，保留同一浏览器网页会话，执行 `authorize` 动作重新衔接；它不等于已登录。`close` 动作关闭这一组临时进程。浏览器最长保留两小时；本人关闭窗口、退出、失败或确认 VM 登录成功后清理临时浏览器配置和代理。该流程不改变宿主日常浏览器设置，也不读取现有浏览器的 Cookie。

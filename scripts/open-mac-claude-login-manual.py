@@ -10,6 +10,7 @@ import sys
 import time
 from urllib.parse import parse_qs, urlsplit
 import uuid
+import re
 from datetime import datetime, timezone
 
 ROOT = Path.home() / 'Library/Application Support/ClaudeVPS'
@@ -70,6 +71,7 @@ def stop(child):
 
 def args(url):
     return [CHROME,'--user-data-dir='+str(profile),'--incognito','--new-window','--no-first-run','--no-default-browser-check',
+            '--force-renderer-accessibility',
             '--disable-sync','--disable-background-networking','--disable-component-update','--disable-default-apps','--disable-quic',
             '--proxy-server=socks5://127.0.0.1:17894','--proxy-bypass-list=<-loopback>',
             '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
@@ -78,6 +80,32 @@ def args(url):
 
 def open_url(url):
     subprocess.run(args(url),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=ENV,timeout=10,check=True)
+
+
+def focus_browser():
+    # Resolve an indexed process reference; a name-based reference can select
+    # the owner's everyday Chrome when several isolated profiles are running.
+    script='''on run argv
+tell application "System Events"
+set wantedPid to (item 1 of argv) as integer
+set ids to unix id of application processes
+repeat with i from 1 to count of ids
+if item i of ids is wantedPid then
+set processRef to a reference to application process i
+if (count of windows of processRef) is 0 then return "waiting"
+set frontmost of processRef to true
+perform action "AXRaise" of window 1 of processRef
+return "ready"
+end if
+end repeat
+return "waiting"
+end tell
+end run'''
+    for _ in range(20):
+        r=subprocess.run(['/usr/bin/osascript','-e',script,str(browser.pid)],capture_output=True,text=True,timeout=5,env=ENV)
+        if r.returncode==0 and r.stdout.strip()=='ready': return
+        time.sleep(.25)
+    raise RuntimeError('dedicated_browser_could_not_be_shown')
 
 
 def validate_authorization_url(value):
@@ -116,7 +144,7 @@ def network_preflight():
     require_probe('proxyError')
     audit('close-ip-probes')
     proxy_start()
-    open_url('https://api.ipify.org?format=json&probe='+uuid.uuid4().hex)
+    open_url('https://api.ipify.org?format=text&probe='+uuid.uuid4().hex)
     require_probe('ipMatches')
     save('network-precheck.json',{'checkedAt':datetime.now(timezone.utc).isoformat(),'chromePid':browser.pid,
          'actualOrdinaryChromeExitVerified':True,'proxyStoppedRequestFailed':True,'proxyRestoredSameExit':True,'cdpEnabled':False})
@@ -132,6 +160,7 @@ def begin_authorization():
         if result.get('url'):
             state['oauthState'] = validate_authorization_url(result['url'])
             open_url(result['url'])
+            focus_browser()
             publish('waiting_for_owner_login',cliAuthenticated=False); return
         time.sleep(.5)
     raise RuntimeError('vm_authorization_not_ready')
@@ -163,6 +192,7 @@ def main():
     with os.fdopen(fd,'w') as f: f.write(json.dumps({'pid':os.getpid()}))
     owns_lock=True
     (BASE/'control.json').unlink(missing_ok=True)
+    (BASE/'network-precheck.json').unlink(missing_ok=True)
     cfg=json.loads((ROOT/'config/host-mihomo.json').read_text())
     cfg.update({'mixed-port':17894,'bind-address':'127.0.0.1','allow-lan':False,'lan-allowed-ips':['127.0.0.1/32'],
                 'lan-disallowed-ips':[],'authentication':[],'skip-auth-prefixes':[],'ipv6':False,'tun':{'enable':False},'log-level':'silent'})
@@ -175,8 +205,9 @@ def main():
     save_preferences=profile/'Default/Preferences'
     fd=os.open(save_preferences,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w') as f: f.write(json.dumps({'credentials_enable_service':False,'profile':{'password_manager_enabled':False}}))
-    browser=subprocess.Popen(args('https://api.ipify.org?format=json&probe='+uuid.uuid4().hex),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=ENV)
+    browser=subprocess.Popen(args('https://api.ipify.org?format=text&probe='+uuid.uuid4().hex),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=ENV)
     publish('network_preflight',chromePid=browser.pid,proxyPid=proxy.pid)
+    focus_browser()
     network_preflight()
     begin_authorization()
     deadline=time.monotonic()+7200;last_control=None;last_probe=0;last_window_probe=0
@@ -226,7 +257,8 @@ if __name__=='__main__':
     except KeyboardInterrupt:
         if owns_lock: publish('closed_by_owner')
     except Exception as error:
-        if owns_lock: publish('failed',error='manual_login_preparation_failed',errorType=type(error).__name__)
+        reason=str(error) if re.fullmatch('[a-z_]+',str(error)) else 'manual_login_preparation_failed'
+        if owns_lock: publish('failed',error=reason,errorType=type(error).__name__)
         raise SystemExit(1)
     finally:
         import shutil
