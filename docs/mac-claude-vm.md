@@ -117,6 +117,10 @@ python3 scripts/open-mac-claude-login-manual.py
 
 2026-10-31 已在实际 Chrome 和 VM 中复核同一 VPS 出口，浏览器代理停止与恢复检查通过；当时 CLI 正等待本人授权。这些网络结果和离线测试都不能代替登录成功或真实模型调用验收。
 
+2026-11-01 本人已完成官方网页授权，原 VM CLI 确认登录成功。授权回填前核对官方 `/oauth/code/callback` 页面及原登录状态；一次性授权码只经进程私有管道和串口 stdin 送回 VM，没有写入聊天、日志或文件。CLI 凭据由 guest 普通用户持有，配置目录为 0700、凭据文件为 0600。临时 Mac 浏览器、独立代理和临时配置已清理，VM 的强制 VPS 网络和宿主日常浏览器保持原设置。
+
+本次在实际部署的 Mac → host-only VM relay 上完成了有界真实推理：`claude-sonnet` 文本请求、OpenAI Chat SSE 完整终止、客户端工具请求与同一会话的工具结果续接，以及 `claude-opus` 文本请求均通过。单次 Sonnet 文本约 2.3 秒、Opus 约 4.1 秒；这是当次短请求测量，不是延迟保证。工具验收使用无文件、Shell 或网络能力的标记回显，没有执行 guest 原生工具。监测状态为 `healthy`，列出两个模型，VM HTTPS 出口复核通过。这一结果覆盖 Mac 与 VM 后端；公司 Windows 登录、内网额度及客户端完整链路仍须现场验证。
+
 ```sh
 node --test tests/claude-login-session.test.mjs tests/mac-vm-console.test.mjs
 ```

@@ -2,6 +2,8 @@
 
 状态：Windows Desktop 的基础运行入口、合并目录、模型路由和两种 Provider 已实现，并已增加独立客户端适配及通用 Responses 转换，使用方式见 [Desktop 使用说明](desktop-gateway.md)。已通过模拟上游的离线验收，以及实际 Codex 引擎的合并目录和双来源工具往返；真实公司员工登录、目录、额度及完整远端 Claude 调用仍需在公司电脑验收。现有 Mac 服务、账号库及虚拟机网络保持当前部署。
 
+2026-11-01，Mac 的隔离 VM 已完成 Claude 登录，Mac → VM relay 的 Sonnet／Opus 文本、Chat 流式输出和客户端工具回合均已通过真实请求验收。公司 Windows 到这套后端的完整链路仍待现场验证，详情见 [VM 运行记录](mac-claude-vm.md#登录与验证)。
+
 ## 使用方式
 
 同一个 Bifrost 内核，提供两个部署入口：
