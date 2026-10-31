@@ -87,7 +87,30 @@ async function body(sessionId){return (await send('Runtime.evaluate',{expression
 async function navigate(sessionId,url,{interactive=false}={}){
  const result=await send('Page.navigate',{url},sessionId);if(result.errorText)return result;
  for(let i=0;i<150;i++){await sleep(200);const ready=(await send('Runtime.evaluate',{expression:'document.readyState',returnByValue:true},sessionId)).result.value;if(ready==='complete'||interactive&&ready==='interactive')return result;}
+ if(interactive)return {...result,documentStillLoading:true};
  throw new Error('browser_page_not_ready');
+}
+async function authorizationPageMetadata(sessionId){
+ return (await send('Runtime.evaluate',{expression:`(()=>{
+   const visible=e=>e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0;
+   const inputs=[...document.querySelectorAll('input')].filter(visible);
+   const controls=[...document.querySelectorAll('button,a,[role=button]')].filter(visible);
+   return {host:location.hostname,title:document.title,bodyCharacters:(document.body?.innerText||'').trim().length,scriptCount:document.scripts.length,
+    hasEmailInput:inputs.some(e=>e.type==='email'||e.autocomplete==='email'||e.name==='email'||/email|邮箱/i.test(e.placeholder||'')),
+    hasSignInControl:controls.some(e=>/continue with|sign in|log in|authorize|google|apple|使用.*继续|授权|登录/i.test(e.textContent||''))};
+  })()`,returnByValue:true},sessionId)).result.value;
+}
+async function showAuthorizationPage(sessionId){
+ let shown;
+ for(let i=0;i<80;i++){
+  shown=await authorizationPageMetadata(sessionId);
+  if(shown.hasEmailInput||shown.hasSignInControl)break;
+  await sleep(250);
+ }
+ const script=`ObjC.import('AppKit'); var app=$.NSRunningApplication.runningApplicationWithProcessIdentifier(${chrome.pid}); app.activateWithOptions(2); delay(0.3); String($.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier===${chrome.pid});`;
+ const focused=await exec('/usr/bin/osascript',['-l','JavaScript','-e',script],{timeout:5000,maxBuffer:1024}).catch(()=>null);
+ await send('Page.bringToFront',{},sessionId);
+ return {...shown,windowFrontmost:focused?.stdout.trim()==='true'};
 }
 try{
  await mkdir(base,{recursive:true,mode:0o700});
@@ -122,9 +145,29 @@ try{
  else{
   await save('browser-state.json',{phase:'network_verified_waiting_for_vm_login',pid:process.pid,chromePid:chrome.pid,proxyPid:proxy.pid,checkedAt:new Date().toISOString()});
   await vm('start');
-  let authorization=null,submitted=false,handling=false,prompted=false;
+  let authorization=null,submitted=false,handling=false,prompted=false,formReady=false,lastUiProbe=0;
   const sessions=new Map([[page.targetId,sessionId]]);
   const stateBase=()=>({pid:process.pid,chromePid:chrome.pid,proxyPid:proxy?.pid,checkedAt:new Date().toISOString()});
+  const saveAuthorizationPage=async shown=>{
+   formReady=shown.hasEmailInput||shown.hasSignInControl;
+   await save('browser-state.json',{...stateBase(),phase:formReady?'awaiting_owner_authorization':'authorization_page_needs_attention',authorizationHost:shown.host,authorizationPageTitle:shown.title,hasEmailInput:shown.hasEmailInput,hasSignInControl:shown.hasSignInControl,windowFrontmost:shown.windowFrontmost,bodyCharacters:shown.bodyCharacters,scriptCount:shown.scriptCount,credentialsRemainInVm:true});
+  };
+  const requests=new Map(),pageFailures=[];
+  const locationOnly=raw=>{try{const u=new URL(raw);return {host:u.hostname,.../\.(?:js|css)$/.test(u.pathname)?{assetPath:u.pathname}:{}};}catch{return {};}};
+  const recordFailure=entry=>{
+   pageFailures.push(entry);if(pageFailures.length>20)pageFailures.shift();
+   void save('authorization-diagnostics.json',{checkedAt:new Date().toISOString(),failures:pageFailures}).catch(()=>{});
+  };
+  listeners.add(event=>{
+   const p=event.params;
+   if(event.method==='Network.requestWillBeSent')requests.set(p.requestId,locationOnly(p.request.url));
+   if(event.method==='Network.loadingFailed'&&!p.canceled)recordFailure({...requests.get(p.requestId),type:p.type,error:p.errorText});
+   if(event.method==='Network.responseReceived'&&p.response.status>=400)recordFailure({...locationOnly(p.response.url),type:p.type,status:p.response.status});
+   if(event.method==='Runtime.exceptionThrown')recordFailure({type:'javascript_exception',className:p.exceptionDetails.exception?.className||'Error',...locationOnly(p.exceptionDetails.url||'')});
+   if(event.method==='Network.loadingFinished'||event.method==='Network.loadingFailed')requests.delete(p.requestId);
+  });
+  await save('authorization-diagnostics.json',{checkedAt:new Date().toISOString(),failures:[]});
+  await send('Runtime.enable',{},sessionId);
   async function handleCallback(raw,targetSession){
    if(!authorization||submitted||handling)return;
    let u;try{u=new URL(raw);}catch{return;}
@@ -139,7 +182,7 @@ try{
      await sendToVm({action:'callback',state:authorization.state,value:u.href});submitted=true;
     }else if(targetSession){
      // Read only the official callback page's displayed authorization code;
-     // never inspect a sign-in form, passwords, cookies or browser storage.
+     // never read sign-in field values, passwords, cookies or browser storage.
      const result=await send('Runtime.evaluate',{expression:`(()=>{if(location.origin!==${JSON.stringify(redirect.origin)}||location.pathname!==${JSON.stringify(redirect.pathname)}||document.readyState!=='complete')return null;return [...document.querySelectorAll('input[readonly],textarea[readonly],code,pre')].filter(e=>e.getBoundingClientRect().width>0).map(e=>(e.value||e.textContent||'').trim());})()`,returnByValue:true},targetSession);
      const values=result.result.value;
      if(!Array.isArray(values))return;
@@ -178,11 +221,15 @@ try{
      if(!(redirect.protocol==='https:'&&['platform.claude.com','console.anthropic.com','claude.ai','claude.com'].includes(redirect.hostname)||redirect.protocol==='http:'&&['127.0.0.1','localhost','[::1]'].includes(redirect.hostname)))throw new Error('invalid_cli_redirect');
      authorization={state:u.searchParams.get('state'),redirect};
      const opened=await navigate(sessionId,state.url,{interactive:true});if(opened.errorText)throw new Error('authorization_page_unreachable');
-     const shown=(await send('Runtime.evaluate',{expression:'({host:location.hostname,title:document.title,hasEmailInput:!!document.querySelector("input[type=email]")})',returnByValue:true},sessionId)).result.value;
-     await save('browser-state.json',{...stateBase(),phase:'awaiting_owner_authorization',authorizationHost:shown.host,authorizationPageTitle:shown.title,hasEmailInput:shown.hasEmailInput,credentialsRemainInVm:true});
+     const shown=await showAuthorizationPage(sessionId);
+     await saveAuthorizationPage(shown);
     }
    }
    if(authorization&&!handling&&!submitted){
+    if(!formReady&&Date.now()-lastUiProbe>5000){
+     lastUiProbe=Date.now();const shown=await authorizationPageMetadata(sessionId);
+     if(shown.hasEmailInput||shown.hasSignInControl)await saveAuthorizationPage(await showAuthorizationPage(sessionId));
+    }
     const pages=(await send('Target.getTargets')).targetInfos.filter(p=>p.type==='page');
     for(const target of pages){
      let session=sessions.get(target.targetId);
@@ -198,6 +245,7 @@ try{
 }catch(e){
  const reason=/^[a-z][a-z0-9_]+$/.test(e.message)?e.message:'login_browser_failed';
  await save('browser-error.json',{phase:'failed',reason,checkedAt:new Date().toISOString()}).catch(()=>{});
+ if(runLock)await save('browser-state.json',{phase:'failed',reason,checkedAt:new Date().toISOString()}).catch(()=>{});
  console.log(JSON.stringify({ok:false,reason,browserReportedError:/ERROR|FATAL|sandbox|denied|failed/i.test(diagnostics)}));
  await close();process.exitCode=1;
 }
