@@ -32,6 +32,15 @@ test('a private cancellation can stop a session before an authorization URL exis
  assert.deepEqual((await check('message',{url:'',message:{action:'cancel'}})).result,['cancel',null]);
 });
 
+test('ordinary-browser fallback accepts only official PKCE authorization and official code-return origins',unix,async()=>{
+ const manualPath=fileURLToPath(new URL('../scripts/open-mac-claude-login-manual.py',import.meta.url));
+ const valid='https://claude.com/oauth/authorize?state=fixture-state&code_challenge=fixture-pkce&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback';
+ const program="import importlib.util,json,sys\ns=importlib.util.spec_from_file_location('manual',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\ntry:\n print(json.dumps({'accepted':True,'state':m.validate_authorization_url(sys.argv[2])}))\nexcept ValueError: print(json.dumps({'accepted':False}))";
+ const run=async value=>JSON.parse((await exec('python3',['-c',program,manualPath,value],{timeout:5000})).stdout);
+ assert.deepEqual(await run(valid),{accepted:true,state:'fixture-state'});
+ for(const value of [valid.replace('claude.com/oauth','untrusted.invalid/oauth'),valid.replace('https://claude.com','https://user@claude.com'),valid+'&state=',valid+'&state=other',valid.replace('platform.claude.com','untrusted.invalid'),valid.replace('%2Fcallback','%2Fother'),valid.replace('state=fixture-state','state=')])assert.equal((await run(value)).accepted,false);
+});
+
 test('private authorization transport delivers stdin to the FIFO without evaluating it as shell input',unix,async()=>{
  const bridge=fileURLToPath(new URL('../scripts/claude-vm-login-bridge.py',import.meta.url));
  const fixture=String.raw`
