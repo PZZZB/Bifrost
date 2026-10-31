@@ -47,7 +47,7 @@ Mac 当前部署采用普通用户 LaunchAgent，登录时执行一次，并每�
 
 需要在既有普通用户本地串口执行检查时，使用 `python3 scripts/mac-vm-console.py DEVICE --command COMMAND`。`DEVICE` 取后台助手当前的私有 `vm-runtime.json`，不能沿用旧设备名。该脚本与健康检查使用同一 advisory lock；串口忙时返回 75，不向其他检查的输入流写入内容。命令以换行分隔收尾，支持带末尾换行的 heredoc 和注释，按实际客机退出码返回，并在结束或超时后恢复宿主 TTY 参数。
 
-该工具不启用 SSH、网络端口或管理员权限；登录继续使用本人交互终端，不用它收集 OAuth 授权码、密钥或凭据文件。超时只表示没有确认命令结束，不能据此自动重放有副作用的操作。`tests/mac-vm-console.test.mjs` 用真实 PTY 和 Bash 验证多行命令、错误退出码、串口互斥和超时恢复；Windows 不运行此 macOS 运维检查。
+该工具不启用 SSH、网络端口或管理员权限，不用它收集 OAuth 授权码、密钥或凭据文件。登录使用本人交互终端或[专用登录流程](mac-claude-vm.md#登录与验证)；后者通过独立的私有 stdin 回传一次性授权，不把授权码放进命令文本。超时只表示没有确认命令结束，不能据此自动重放有副作用的操作。`tests/mac-vm-console.test.mjs` 用真实 PTY 和 Bash 验证多行命令、错误退出码、串口互斥和超时恢复；Windows 不运行此 macOS 运维检查。
 
 安装时记录 `kern.bootsessionuuid`。只有后来检测到**不同的整机 boot UUID** 且全部基础检查通过，才写 `passed_after_new_boot` 验收记录；进程重启、VM 重启或当前会话中的检查均不能冒充整机重启通过。验收不自动登录 Claude，也不代替真实推理。
 

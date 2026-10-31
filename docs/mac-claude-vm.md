@@ -85,6 +85,26 @@ claude auth login --claudeai
 
 按官方 CLI 提示完成订阅登录，手动授权码填回同一 VM 终端。不要把授权码或 OAuth 文件交给客户端或上传仓库。若授权网页由 Mac 浏览器打开，那一段浏览器访问使用 Mac 的网络环境，需要另行保证符合所需出口；VM 的网络限制不会自动接管 Mac 浏览器。
 
+当前 Mac 可使用专用登录工具，一次完成浏览器出口检查和 VM 内 CLI 授权准备：
+
+```sh
+node scripts/open-mac-claude-login.mjs
+```
+
+它读取既有私有维护配置，在 `127.0.0.1:17892` 临时启动独立代理，并打开使用独立临时配置的 Chrome 无痕窗口。浏览器固定使用 SOCKS5，没有 DIRECT 回退，禁用本地 DNS 解析、QUIC 和不经过代理的 WebRTC UDP；宿主日常 Chrome、全局代理及 VM 的网络策略不变。每次打开授权页前，先在这个浏览器里核对真实公网出口，再停止该临时代理、验证公网 IP 请求失败，恢复代理并复核同一出口。这里验证的是该专用浏览器的请求路径；没有给浏览器额外套 macOS 系统网络沙箱，Chrome 自带沙箱保持启用。
+
+VM 中的登录助手以普通 `claude` 用户启动官方 `claude auth login --claudeai`，生成带 PKCE 的授权链接。浏览器原样打开这条官方链接，由本人完成登录与同意授权。授权回传绑定同一登录状态；只有 CLI 要求的精确 guest loopback 地址才可转发，官方授权码则经本机串口的私有 stdin 送回原 CLI。没有给客机增加 SSH、图形环境或网络监听端口；Chrome 调试只使用私有管道。官方支持浏览器登录及把授权码粘回终端的流程，见[认证说明](https://code.claude.com/docs/en/authentication)。
+
+CLI 的持久凭据写入 VM 的既定配置目录。Mac 浏览器在登录期间仍会持有自己的网页会话，因此宿主是本次授权流程的可信部分；这与浏览器本身也必须放在 VM 内是不同的隔离要求。工具在完成、超时、退出或失败后关闭专用浏览器和代理，清理临时浏览器配置。密码、验证码、一次性授权码和 token 不写日志、Git 或命令参数；官方页面若不能自动回传，使用本机隐藏输入框粘贴一次性授权码。
+
+仅检查网络、暂不发起登录时可运行 `node scripts/open-mac-claude-login.mjs --headless-preflight`。登录期间另一个终端可用 `python3 scripts/claude-vm-login-bridge.py status` 查看不含链接或凭据的状态；`get-url` 是浏览器控制器的私有 IPC，不作为人工诊断输出。会话有互斥锁，重复启动不会另开登录。普通元数据串口工具不用于收集授权码。
+
+2026-10-31 已在实际 Chrome 和 VM 中复核同一 VPS 出口，浏览器代理停止与恢复检查通过；当时 CLI 正等待本人授权。这些网络结果和离线测试都不能代替登录成功或真实模型调用验收。
+
+```sh
+node --test tests/claude-login-session.test.mjs tests/mac-vm-console.test.mjs
+```
+
 后台在几秒内重读登录状态。`/health` 和 `/v1/models` 仅用于元数据检查；未登录时健康响应是 200/`ok:false`，模型列表为空。VM 关机时，Mac 入口返回 503。只有实际文本、流式、工具权限和多轮调用通过后，才能认定模型接入验收完成。
 
 ## 协议范围和检查
