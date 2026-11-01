@@ -1,5 +1,7 @@
 # 已有 Server 网关添加远端来源
 
+这是当前已实现的接入方式。后续账号池重构的边界与兼容要求见 [统一架构 Review](architecture.md)；迁移前仍使用本文流程。
+
 已经用 Bifrost 快捷方式或 `Start-Bridge.ps1` 启动公司网关时，直接给这个 Server 增加来源。Codex 的本地地址、网关 Key、公司登录和已有模型配置继续沿用。同一模型列表追加 `remote/bifrost/Claude-sonnet`、`remote/bifrost/Claude-opus`，具体条目以远端账号的权限和在线目录为准。
 
 ```mermaid

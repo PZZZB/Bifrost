@@ -1,21 +1,23 @@
 # 本地与远端混合网关架构
 
-状态：Windows Desktop 的基础运行入口、合并目录、模型路由和两种 Provider 已实现，并已增加独立客户端适配及通用 Responses 转换，使用方式见 [Desktop 使用说明](desktop-gateway.md)。已通过模拟上游的离线验收，以及实际 Codex 引擎的合并目录和双来源工具往返；真实公司员工登录、目录、额度及完整远端 Claude 调用仍需在公司电脑验收。现有 Mac 服务、账号库及虚拟机网络保持当前部署。
+本文说明公司本地与 Mac 公网的混合使用场景。全项目的账号池、节点能力、身份边界、当前耦合及迁移顺序以 [架构 Review 与账号池设计](architecture.md) 为准；该文中的目标账号池尚未部署。
+
+已实现两种本地接入方式：独立 [Desktop](desktop-gateway.md)，或向已有快捷方式启动的 [Server 添加远端来源](server-remote-sources.md)。两者复用来源路由和通用 Responses 转换。已有公司 Server 的用户继续沿用原入口。已用真实 Codex、实际注册用户 Key 和 Mac 隔离 Claude 验证 Server 合并目录及 Opus 工具往返；公司员工登录、真实网络及 Windows 安全存储仍需现场验收。
 
 2026-11-01，Mac 的隔离 VM 已完成 Claude 登录，Mac → VM relay 的 Sonnet／Opus 文本、Chat 流式输出和客户端工具回合均已通过真实请求验收。公司 Windows 到这套后端的完整链路仍待现场验证，详情见 [VM 运行记录](mac-claude-vm.md#登录与验证)。
 
 ## 使用方式
 
-同一个 Bifrost 内核，提供两个部署入口：
+同一个 Bifrost 项目现有两个运行入口；运行入口与部署用途分别定义：
 
 - **Desktop**：运行在本人公司电脑上，仅监听回环地址。直接连接本人获准使用的公司 CodeBuddy；可选连接远端 Bifrost。
-- **Server**：运行在现有 Mac 上，服务公网注册用户，继续管理账号、模型权限、限额和计费，并连接现有隔离 Claude。
+- **Server**：既用于当前 Mac 公网服务，也用于既有公司网关。Mac 服务下游注册用户，连接隔离 Claude 并管理权限与账本；公司已有 Server 可以在原模型目录追加远端 Bifröst 用户来源。
 
-公司电脑的客户端只填写一个本地地址和本地 Key，`GET /v1/models` 同时列出公司及远端的可用模型。用户直接选模型，不切换内外网模式、来源页或客户端地址；同名模型标明来源和额度归属。选择模型后，路由自动确定唯一 Provider。其他用户继续填写 Mac 的公网地址和各自的 Bifrost Key，无需安装 Desktop。
+公司电脑的客户端只填写一个本地地址和本地 Key，在原模型列表选择公司或远端模型，不切换内外网模式或客户端地址。Desktop 提供通用 `/v1/models` 与各客户端目录；已有 Server 保留其原生 Codex 目录。选择模型后绑定唯一来源。其他用户继续填写 Mac 的公网地址和各自的 Bifrost Key，无需安装 Desktop。
 
 ```mermaid
 flowchart LR
-    IDE[公司电脑上的客户端] --> Desktop["本机 Bifrost Desktop<br/>回环 API 与模型路由"]
+    IDE[公司电脑上的客户端] --> Desktop["本机 Bifrost<br/>已有 Server 或独立 Desktop"]
     Desktop -->|选择本地模型| Company["公司 CodeBuddy 接口<br/>本人公司授权与额度"]
     Desktop -->|明确选择远端模型| Server["Mac Bifrost Server<br/>用户鉴权、权限、限额、计费"]
     Customer[其他用户的客户端] --> Server
@@ -26,11 +28,14 @@ flowchart LR
 | --- | --- | --- | --- |
 | Desktop 本地模式 | 公司 CodeBuddy | 本机入口、本地 Key | 公司上游额度，本机统计用量 |
 | Desktop 混合模式 | 公司 CodeBuddy、远端 Bifrost | 同一个本地入口；分别配置上游授权 | 按所选来源分别归属 |
-| Server | 当前 Mac 的模型来源 | 公网入口、每位用户独立账号和 Key | Mac 的权限及账本 |
+| 已有公司 Server | 既有账号来源、可选远端 Bifröst | 原有本地入口与 Codex 集成 | 公司来源各自归属，远端由 Mac 结算 |
+| Mac Server | 当前隔离 Claude | 公网入口、每位用户独立账号和 Key | Mac 的权限及账本 |
 
 本地模式不创建远端连接器，也不读取 Mac Key、请求 Mac 模型目录、联系 Mac 鉴权或要求在 Mac 注册。混合模式下，远端目录刷新在后台独立进行，超时或断线不阻塞本地目录和本地调用。
 
-## 共用的内核
+## 共用内核的目标边界
+
+目前 `ModelRouter` 已用于 Desktop 和 Server 远端来源，Server 的历史 A/B、CodeBuddy、Cursor 仍有专用分支。下面描述重构后的职责，不能当作历史分支已经完成统一的证明。
 
 ```text
 客户端协议与本机/服务端鉴权
@@ -136,7 +141,7 @@ BifrostRemote 尽量保持同一协议直通，只映射模型身份及必要会
 
 纯本地配置只保留第一个来源；无需填写无效的服务器地址或远端 Key。来源编号映射独立的 DPAPI 私有文件，不接受配置内明文 Key、任意凭据路径或监听 Host。Desktop 本地 Key 与状态密钥、本人远端用户 Key、CodeBuddy 授权分别保存。当前安全存储使用 Windows 当前用户 DPAPI，其他操作系统明确拒绝启动，不降级为明文。
 
-Server 保留现有注册页、ClientAccess、ClientBilling、隧道及隔离 Claude 配置。它不会因为 Desktop 支持公司来源就自动发布公司模型或获得连接公司内网的能力。
+Mac Server 保留现有注册页、ClientAccess、ClientBilling、隧道及隔离 Claude 配置。公司本地入口不因连接 Mac 就向其发布公司模型或提供访问公司内网的能力。下一轮按节点能力装配的改造将让页面与运行时都仅加载实际配置的账号，具体迁移与验收见 [统一架构](architecture.md#迁移顺序与验收)。
 
 ## 当前代码与后续改造位置
 

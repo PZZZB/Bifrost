@@ -2,6 +2,8 @@
 
 Bifröst 是面向 Codex 与 Claude 的多渠道模型网关。Codex 支持账号 A/B 订阅分流、CodeBuddy 与 Cursor；Claude 支持第三方网关接入，按模型路由到独立 Claude CLI 订阅或 CodeBuddy。
 
+整体结构与下一轮重构见 [架构 Review 与账号池设计](docs/architecture.md)：按节点能力管理上游账号实例，区分接入用户、管理员和计费；明确公司本地网关与 Mac 公网节点的不同装配。该文逐项列出当前实现、目标设计及迁移验收，目标账号池尚未部署。
+
 CodeBuddy、WorkBuddy 等客户端也可使用独立的 Bifröst 用户账号和 API Key 接入。管理员分配模型与 Key 授权期限，用户通过网页版用户中心注册、登录和管理自己的 Key。
 
 Mac 上的 CodeBuddy IDE 已通过本机回环入口调用 VM 中的 Claude Opus，真实聊天、客户端文件工具和继续对话均已验收。自定义显示名使用 `Claude Opus 5.5`、`Claude Sonnet 5.5`；配置与验证边界见 [Mac Claude VM](docs/mac-claude-vm.md#codebuddy-客户端)。独立用户经公网 Key 接入的客户端验收另外记录。
