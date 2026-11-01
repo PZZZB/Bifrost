@@ -8,6 +8,7 @@
     <title>Bifröst · The Rainbow Bridge</title>
     <link rel="stylesheet" href="/style.css">
     <script src="/app.js" defer></script>
+  <script src="/account-pool.js" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -28,12 +29,14 @@
 
       <div class="console-tabs" role="tablist" aria-label="管理页面">
         <button id="tab-console" role="tab" type="button" aria-controls="panel-console" aria-selected="true" tabindex="0">连接总览</button>
-        <button id="tab-accounts" role="tab" type="button" aria-controls="panel-accounts" aria-selected="false" tabindex="-1">账号管理</button>
+        <button id="tab-accounts" role="tab" type="button" aria-controls="panel-accounts" aria-selected="false" tabindex="-1">账号池</button>
+        <button id="tab-connections" role="tab" type="button" aria-controls="panel-connections" aria-selected="false" tabindex="-1">客户端接入</button>
         <button id="tab-clients" role="tab" type="button" aria-controls="panel-clients" aria-selected="false" tabindex="-1">接入用户</button>
       </div>
 
       <section class="workspace-panel" id="panel-console" role="tabpanel" aria-labelledby="tab-console" tabindex="0">
-        <section class="world-tree" aria-labelledby="world-tree-title">
+        <section class="panel pool-overview" id="pool-overview" aria-label="当前网关概览"><p class="panel-copy">正在读取当前网关的账号与模型…</p></section>
+        <section class="world-tree" aria-labelledby="world-tree-title" data-legacy-overview hidden>
           <div class="world-tree-heading"><div><span class="eyebrow">YGGDRASIL / THE WORLD TREE</span><h2 id="world-tree-title">万千枝叶，一座彩虹桥。</h2></div><span class="world-map-label"><span class="map-spark" aria-hidden="true"></span>渠道配置视图</span></div>
           <div class="world-tree-layout">
             <div class="world-map">
@@ -132,7 +135,7 @@
             <div class="gateway-error" id="model-settings-error" role="status" hidden></div>
           </section>
         </div>
-        <section class="panel gateway-panel" aria-labelledby="gateway-title">
+        <section data-client-integration-only data-legacy-overview hidden class="panel gateway-panel" aria-labelledby="gateway-title">
           <div class="panel-heading"><div><div class="eyebrow">GATEWAY</div><h2 id="gateway-title">运行状态</h2></div><span class="pill" id="gateway-state">等待连接</span></div>
           <div class="endpoint"><span>网关地址</span><code id="gateway-url">读取中</code></div>
           <div class="metrics"><div><strong id="metric-requests">0</strong><span>收到请求</span></div><div><strong id="metric-completed">0</strong><span>完成</span></div><div><strong id="metric-failed">0</strong><span>失败</span></div></div>
@@ -159,7 +162,7 @@
           <div class="gateway-error" id="gateway-error" hidden></div>
           <p class="footnote">页面每 3 秒更新。原有模型使用 A；仅 B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用已确认的账号 B。</p>
         </section>
-        <section class="panel quota-panel" aria-labelledby="quota-title">
+        <section data-client-integration-only data-legacy-overview hidden class="panel quota-panel" aria-labelledby="quota-title">
           <div class="panel-heading"><div><div class="eyebrow">ACCOUNT QUOTAS</div><h2 id="quota-title">账号剩余额度</h2></div><button class="button secondary small" id="quota-refresh-button" type="button">刷新额度</button></div>
           <p class="panel-copy">按渠道查看已绑定账号与官方套餐额度。未提供的剩余额度显示未知，不按 0% 或 100% 计算，也不从本网关 Token 统计推算。</p>
           <div class="quota-accounts">
@@ -206,7 +209,7 @@
           </div>
           <p class="footnote">打开页面、账号授权变化或点击“刷新额度”时查询，不定时轮询。重置时间与更新时间使用洛杉矶时间（America/Los_Angeles）。个人限额不代表团队总余额；各渠道费用以其官方用量页为准。</p>
         </section>
-        <section class="panel token-panel" aria-labelledby="token-title">
+        <section data-client-integration-only data-legacy-overview hidden class="panel token-panel" aria-labelledby="token-title">
           <div class="panel-heading"><div><div class="eyebrow">TOKEN USAGE</div><h2 id="token-title">Token 用量</h2></div><span class="pill" id="token-state">读取中</span></div>
           <p class="panel-copy">仅统计网关启用记录后的服务端用量；不换算订阅剩余额度。</p>
           <div class="token-totals">
@@ -268,23 +271,17 @@
       </section>
 
       <section class="workspace-panel" id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts" tabindex="0" hidden>
-        <p class="accounts-intro">集中管理登录与授权。在控制台选择开放模型、查看运行状态与额度。</p>
-        <div class="accounts-grid">
-          <section class="panel account-provider-card" aria-labelledby="account-a-title">
-            <div class="panel-heading"><div><div class="eyebrow">ACCOUNT A</div><h2 id="account-a-title">账号 A</h2></div></div>
-            <dl class="account-summary">
-              <div><dt>登录状态</dt><dd><span class="pill pending" id="account-a-state">读取中</span></dd></div>
-              <div><dt>登录账号</dt><dd id="account-a-identity">账号信息未返回</dd></div>
-              <div><dt>套餐</dt><dd id="account-a-plan">套餐未返回</dd></div>
-              <div><dt>授权方式</dt><dd id="account-a-method">读取中</dd></div>
-              <div><dt>账号模型目录</dt><dd id="account-a-catalog">尚未读取</dd></div>
-              <div><dt>已开放模型</dt><dd id="account-a-enabled">尚未读取</dd></div>
-            </dl>
-            <p class="footnote">沿用当前 Codex 的登录，由 Codex 管理登录与退出。</p>
-            <p class="footnote">状态来自最近一次额度查询；切换 Codex 账号后，请在控制台刷新额度。</p>
-          </section>
-
-          <section class="panel account-provider-card setup-panel" aria-labelledby="account-b-title">
+        <div class="pool-heading"><div><h2>账号池</h2><p class="panel-copy">当前网关已接入的上游账号。授权、模型和额度按账号独立管理。</p></div><div class="button-row"><button class="button secondary" id="pool-refresh" type="button">刷新</button><button class="button primary" id="pool-add" type="button" disabled>添加账号</button></div></div>
+        <p class="gateway-error" id="pool-error" role="status" hidden></p><p class="inline-status" id="pool-message" role="status" aria-live="polite"></p>
+        <form class="panel pool-create" id="pool-create" hidden>
+          <h3>添加账号</h3><div class="pool-fields"><label>账号类型<select id="pool-kind" required></select></label><label>账号名称<input id="pool-name" maxlength="80" autocomplete="off" required></label></div>
+          <p class="footnote" id="pool-kind-note"></p><div id="pool-remote-fields" hidden><div class="pool-fields"><label>用户 API 地址<input id="pool-remote-url" type="url" placeholder="https://gateway.example.com/v1" autocomplete="off"></label><label>个人用户 Key<input id="pool-remote-key" type="password" autocomplete="off" spellcheck="false"></label></div></div>
+          <div class="button-row"><button class="button primary" id="pool-create-submit" type="submit">保存账号</button><button class="button quiet" id="pool-create-cancel" type="button">取消</button></div>
+        </form>
+        <div id="pool-list" class="pool-list" aria-label="当前网关的账号池"><p class="panel-copy">正在读取当前网关…</p></div>
+        <section class="panel pool-detail" id="pool-detail" hidden></section>
+        <div class="accounts-grid" id="pool-legacy-forms" hidden>
+          <section class="panel account-provider-card setup-panel" id="pool-codex-form" aria-labelledby="account-b-title">
             <div class="panel-heading"><div><div class="eyebrow">ACCOUNT B</div><h2 id="account-b-title">账号 B</h2></div></div>
             <dl class="account-summary">
               <div><dt>登录状态</dt><dd><span class="pill pending" id="account-b-state">读取中</span></dd></div>
@@ -335,7 +332,7 @@
             </details>
           </section>
 
-          <section class="panel account-provider-card codebuddy-panel" aria-labelledby="codebuddy-title">
+          <section class="panel account-provider-card codebuddy-panel" id="pool-codebuddy-form" aria-labelledby="codebuddy-title">
             <div class="panel-heading"><div><div class="eyebrow">CODEBUDDY</div><h2 id="codebuddy-title">CodeBuddy</h2></div></div>
             <dl class="account-summary">
               <div><dt>登录状态</dt><dd><span class="pill pending" id="account-codebuddy-state">读取中</span></dd></div>
@@ -389,7 +386,7 @@
             </details>
           </section>
 
-          <section class="panel account-provider-card cursor-panel" aria-labelledby="cursor-title">
+          <section class="panel account-provider-card cursor-panel" id="pool-cursor-form" aria-labelledby="cursor-title">
             <div class="panel-heading"><div><div class="eyebrow">CURSOR</div><h2 id="cursor-title">Cursor</h2></div></div>
             <dl class="account-summary">
               <div><dt>登录状态</dt><dd><span class="pill pending" id="account-cursor-state">读取中</span></dd></div>
@@ -423,7 +420,19 @@
             </details>
           </section>
         </div>
-
+          <section class="panel with-panel" id="pool-with-form" hidden aria-labelledby="with-title">
+            <div class="panel-heading"><div><div class="eyebrow">WITH / VM</div><h2 id="with-title">With · Opus 5.5</h2></div><span class="pill" id="with-state">读取中</span></div>
+            <p class="panel-copy">仅接入 Opus 5.5。真实聊天和工具回合由用户验收。</p>
+            <div class="with-details">
+              <div class="endpoint"><span>VM 地址 <small id="with-vm-state"></small></span><code id="with-vm-address">读取中</code></div>
+              <div class="endpoint"><span>网关地址</span><code id="with-gateway-url">读取中</code></div>
+              <div class="endpoint"><span>提供方登录</span><code id="with-authentication">读取中</code></div>
+            </div>
+            <div class="metrics with-metrics"><div><strong id="with-requests">—</strong><span>收到请求</span></div><div><strong id="with-completed">—</strong><span>完成</span></div><div><strong id="with-failed">—</strong><span>失败</span></div><div><strong id="with-active">—</strong><span>进行中</span></div></div>
+            <div class="gateway-error" id="with-error" role="status" hidden></div>
+          </section>
+      </section>
+      <section class="workspace-panel" id="panel-connections" role="tabpanel" aria-labelledby="tab-connections" tabindex="0" hidden>
         <details class="account-foldout">
           <summary>Codex 连接模式<span>官方直连与 Bifröst 网关</span></summary>
           <section class="panel" aria-labelledby="integration-title">
@@ -444,23 +453,23 @@
           </section>
         </details>
 
-        <details class="account-foldout">
-          <summary>其他渠道<span>With</span></summary>
-          <section class="panel with-panel" aria-labelledby="with-title">
-            <div class="panel-heading"><div><div class="eyebrow">WITH / VM</div><h2 id="with-title">With · Opus 5.5</h2></div><span class="pill" id="with-state">读取中</span></div>
-            <p class="panel-copy">仅接入 Opus 5.5。真实聊天和工具回合由用户验收。</p>
-            <div class="with-details">
-              <div class="endpoint"><span>VM 地址 <small id="with-vm-state"></small></span><code id="with-vm-address">读取中</code></div>
-              <div class="endpoint"><span>网关地址</span><code id="with-gateway-url">读取中</code></div>
-              <div class="endpoint"><span>提供方登录</span><code id="with-authentication">读取中</code></div>
-            </div>
-            <div class="metrics with-metrics"><div><strong id="with-requests">—</strong><span>收到请求</span></div><div><strong id="with-completed">—</strong><span>完成</span></div><div><strong id="with-failed">—</strong><span>失败</span></div><div><strong id="with-active">—</strong><span>进行中</span></div></div>
-            <div class="gateway-error" id="with-error" role="status" hidden></div>
+          <section class="panel account-provider-card" aria-labelledby="account-a-title">
+            <div class="panel-heading"><div><div class="eyebrow">ACCOUNT A</div><h2 id="account-a-title">当前 Codex 会话</h2></div></div>
+            <dl class="account-summary">
+              <div><dt>登录状态</dt><dd><span class="pill pending" id="account-a-state">读取中</span></dd></div>
+              <div><dt>登录账号</dt><dd id="account-a-identity">账号信息未返回</dd></div>
+              <div><dt>套餐</dt><dd id="account-a-plan">套餐未返回</dd></div>
+              <div><dt>授权方式</dt><dd id="account-a-method">读取中</dd></div>
+              <div><dt>账号模型目录</dt><dd id="account-a-catalog">尚未读取</dd></div>
+              <div><dt>已开放模型</dt><dd id="account-a-enabled">尚未读取</dd></div>
+            </dl>
+            <p class="footnote">沿用当前 Codex 的登录，由 Codex 管理登录与退出。</p>
+            <p class="footnote">状态来自最近一次额度查询；切换 Codex 账号后，请在控制台刷新额度。</p>
           </section>
-        </details>
+
       </section>
       <section class="workspace-panel" id="panel-clients" role="tabpanel" aria-labelledby="tab-clients" tabindex="0" hidden>
-        <div class="client-admin-intro"><div><h2>接入用户</h2><p class="panel-copy">管理下游用户、模型权限与独立 API Key。上游渠道登录仍在“账号管理”中维护。</p></div><button class="button secondary" id="client-admin-refresh" type="button">刷新用户</button></div>
+        <div class="client-admin-intro"><div><h2>接入用户</h2><p class="panel-copy">管理下游用户、模型权限与独立 API Key。上游账号的授权在“账号池”维护。</p></div><button class="button secondary" id="client-admin-refresh" type="button">刷新用户</button></div>
         <div class="gateway-error" id="client-admin-error" role="status" hidden></div>
         <p class="inline-status management-message" id="client-admin-message" role="status" aria-live="polite"></p>
 

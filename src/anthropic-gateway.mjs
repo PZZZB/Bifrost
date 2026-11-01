@@ -103,7 +103,7 @@ function emptyMetrics() {
 export class AnthropicGateway {
   constructor({ routes = [], gatewayKey, allowedHosts = [], allowedPeers = [],
     onUsage = async () => {}, onDiagnostic = () => {}, getAuthorizationVersion = () => null,
-    maxBodyBytes = 64 * 1024 * 1024, isDraining = () => false } = {}) {
+    maxBodyBytes = 64 * 1024 * 1024, isDraining = () => false, isAccountEnabled = () => true } = {}) {
     if (typeof gatewayKey !== 'string' || !gatewayKey) throw new TypeError('A dedicated gatewayKey is required.');
     if (!Array.isArray(routes)) throw new TypeError('Anthropic model routes must be an array.');
     if (!Array.isArray(allowedHosts) || !allowedHosts.every(host => typeof host === 'string' && host)) {
@@ -120,6 +120,7 @@ export class AnthropicGateway {
     this.onDiagnostic = onDiagnostic; this.getAuthorizationVersion = getAuthorizationVersion;
     this.maxBodyBytes = maxBodyBytes;
     this.isDraining = isDraining;
+    this.isAccountEnabled = isAccountEnabled;
     this.metrics = emptyMetrics();
     this.pendingRequests = 0;
     this.routes = new Map();
@@ -256,7 +257,9 @@ export class AnthropicGateway {
       if (url.pathname === '/v1/models') {
         const data = [];
         for (const route of this.routes.values()) {
-          if (await this.modelAvailable(route)) data.push({ id: route.model.id, type: 'model', display_name: route.model.name });
+          if (this.isAccountEnabled(route.account, route.model.id) === true && await this.modelAvailable(route)) {
+            data.push({ id: route.model.id, type: 'model', display_name: route.model.name });
+          }
         }
         json(res, 200, { data, has_more: false, first_id: data[0]?.id ?? null, last_id: data.at(-1)?.id ?? null });
         return;
@@ -292,6 +295,7 @@ export class AnthropicGateway {
       if (!data || typeof data !== 'object' || Array.isArray(data) || !(route = this.routes.get(data.model))) {
         throw this.gatewayError('unsupported_model');
       }
+      if (this.isAccountEnabled(route.account, data.model) !== true) throw new BridgeError('此上游账号已停用或尚未登记。', 503, 'upstream_account_disabled');
       if (diagnostic) {
         diagnostic.account = route.account; diagnostic.model = route.model.id; diagnostic.upstreamModel = route.model.upstream ?? null;
         diagnostic.stage = 'routing';

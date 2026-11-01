@@ -1,6 +1,6 @@
 # 已有 Server 网关添加远端来源
 
-这是当前已实现的接入方式。后续账号池重构的边界与兼容要求见 [统一架构 Review](architecture.md)；迁移前仍使用本文流程。
+这是现有 Server 增加远端来源的接入方式。新版可在本机管理页的“账号池 → 添加账号 → Bifröst 用户账号”输入用户 API 与个人 Key，再空闲重启原服务；也可继续使用下列命令行工具。界面自动读取当前节点，不需要切换公司／Mac 模式。实例容量和兼容边界见 [统一架构](architecture.md)。
 
 已经用 Bifrost 快捷方式或 `Start-Bridge.ps1` 启动公司网关时，直接给这个 Server 增加来源。Codex 的本地地址、网关 Key、公司登录和已有模型配置继续沿用。同一模型列表追加 `remote/bifrost/Claude-sonnet`、`remote/bifrost/Claude-opus`，具体条目以远端账号的权限和在线目录为准。
 
@@ -27,9 +27,9 @@ git pull --ff-only
 
 配置工具依次询问 API 地址和本人的普通用户 Key。API 地址复制账号页中的 `https://…/v1`，用户 Key 为 `bfk_…`，在隐藏输入框输入。请使用注册用户的 Key，不能使用管理或虚拟机内部密钥。工具仅查询模型目录，不发起推理。
 
-凭据使用 Windows 当前用户 DPAPI 保存。配置与后台任务必须使用同一 Windows 用户；没有 DPAPI 时停止，不降级保存明文。原有运行目录仍为 `%USERPROFILE%\.codex-account-bridge`，设置过 `BRIDGE_STATE_DIR` 时沿用该值。`remote-sources.json` 仅存固定 HTTPS 地址、来源编号、协议和加密凭据引用；密钥在独立的 `remote-credentials` 加密记录中。
+凭据使用 Windows 当前用户 DPAPI 保存。配置与后台任务必须使用同一 Windows 用户；没有 DPAPI 时停止，不降级保存明文。原有运行目录仍为 `%USERPROFILE%\.codex-account-bridge`，设置过 `BRIDGE_STATE_DIR` 时沿用该值。`upstream-accounts.json` 统一存放账号实例与固定 HTTPS 地址、来源编号、协议和加密凭据引用；旧 `remote-sources.json` 在首次导入后保留供回滚，不再双写。密钥在独立的 `remote-credentials` 加密记录中。
 
-更新时先写新的独立加密凭据，再原子替换配置引用。失败时保持原有配置和凭据；之前的加密记录保留供回滚。配置锁防止并发覆盖。若配置进程被强制终止，只能在确认没有配置进程运行后清理运行目录中的 `remote-sources.lock`，再重试。
+更新时先写新的独立加密凭据，再原子替换配置引用。失败时保持原有配置和凭据；之前的加密记录保留供回滚。配置锁防止并发覆盖。若配置进程被强制终止，只能在确认没有配置进程运行后清理运行目录中的 `remote-sources.lock` 或 `upstream-accounts.lock`，再重试。
 
 来源在 Server 启动时载入，重启后生效；使用原服务的重启操作即可。配置前会拒绝已启用 Magpie 委托的 Server，防止把来源写入未使用的进程。不要另开占用相同端口的前台网关。
 

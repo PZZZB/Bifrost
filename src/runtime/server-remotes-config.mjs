@@ -6,6 +6,7 @@ import { writeJson } from '../storage.mjs';
 import { CurrentUserCredentialStore } from '../current-user-credential-store.mjs';
 import { validateBifrostUrl } from '../providers/bifrost-remote.mjs';
 import { PROTOCOL_PATHS } from '../routing/model-router.mjs';
+import { readUpstreamAccounts, remoteSource, UpstreamAccountStore } from '../upstream-account-store.mjs';
 
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 const fields = (value, allowed) => value && typeof value === 'object' && !Array.isArray(value)
@@ -29,6 +30,8 @@ export function validateServerRemotes(value) {
 }
 
 export async function loadServerRemotesConfig(stateDir) {
+  const accounts = await readUpstreamAccounts(stateDir);
+  if (accounts) return validateServerRemotes({ version: 1, sources: accounts.accounts.filter(a => a.kind === 'bifrost' && a.enabled).map(remoteSource) });
   let text;
   try { text = await readPrivateAccountFile(join(stateDir, 'remote-sources.json'), 65_536); }
   catch (error) { if (error.code === 'ENOENT') return { version: 1, sources: [] }; throw error; }
@@ -43,19 +46,19 @@ export function serverRemoteCredentialStore(stateDir, source) {
 
 /** Publish an immutable protected credential before atomically selecting it.
  * A failed config write cannot replace an existing source's credential. */
-export async function configureServerRemote({ stateDir, id = 'bifrost', baseUrl, apiKey,
+export async function configureServerRemote({ stateDir, id = 'bifrost', baseUrl, apiKey, name,
   storeFactory = serverRemoteCredentialStore, writeConfig = writeJson } = {}) {
   if (typeof apiKey !== 'string' || !/^bfk_[A-Za-z0-9_-]{43}$/.test(apiKey)) throw new TypeError('A personal Bifrost user Key is required.');
   const lock = join(stateDir, 'remote-sources.lock');
   await mkdir(lock, { mode: 0o700 });
   try {
-    const previous = await loadServerRemotesConfig(stateDir);
+    const accounts = await UpstreamAccountStore.open({ stateDir, write: writeConfig });
     const source = { id, kind: 'bifrost-remote', baseUrl, protocols: ['chat-completions', 'messages'], credentialRef: randomUUID() };
-    const next = validateServerRemotes({ version: 1, sources: [...previous.sources.filter(item => item.id !== id), source] });
+    validateServerRemotes({ version: 1, sources: [source] });
     const store = storeFactory(stateDir, source);
     await store.save({ version: 1, apiKey });
-    try { await writeConfig(join(stateDir, 'remote-sources.json'), next); }
+    try { await accounts.setRemote(source, name); }
     catch (error) { await store.clear().catch(() => {}); throw error; }
-    return { sourceId: id, sourceCount: next.sources.length };
+    return { sourceId: id, sourceCount: accounts.snapshot().accounts.filter(a => a.kind === 'bifrost').length };
   } finally { await rm(lock, { recursive: true, force: true }); }
 }

@@ -7,6 +7,7 @@ import { backendPath, keyMatches, readBody, SseInspector } from './gateway.mjs';
 import { B_MODELS, resolveBModel } from './models.mjs';
 
 const STATIC_FILES = { '/': ['index.html', 'text/html; charset=utf-8'],
+  '/account-pool.js': ['account-pool.js', 'text/javascript; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'] };
 
@@ -16,7 +17,7 @@ function json(res, status, data) {
 }
 
 export function createBridgeServer({ backend, gateway, integration, state, publicDir, baseUrl,
-  usageLedger = null, accountQuotas = null, providerQuotas = null, requestDiagnostics = null, clientAdmin = null,
+  usageLedger = null, accountQuotas = null, providerQuotas = null, requestDiagnostics = null, clientAdmin = null, accountPool = null,
   codeBuddyService = null, serviceControl = null, modelPolicy = null, modelDiscovery = null, cursorService = null, cursorProvider = null,
   getWithStatus = async () => ({ configured: false, running: false,
     model: { id: 'claude-opus-5-5', name: 'With · Opus 5.5' },
@@ -115,7 +116,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       if (!allowedHosts.has(req.headers.host)) throw new BridgeError('Host 不允许。', 403);
       const url = new URL(req.url, base);
       if (url.origin !== base.origin) throw new BridgeError('请求目标不允许。', 403);
-      if (backendPath(url.pathname)) { await gateway.proxy(req, res, url); return; }
+      if (backendPath(url.pathname)) { if (!gateway) throw new BridgeError('当前网关未启用此协议入口。', 404); await gateway.proxy(req, res, url); return; }
       if (url.pathname === '/health' && req.method === 'GET') { json(res, 200, { ok: true, version: '0.1.0' }); return; }
       if (req.method === 'GET' && STATIC_FILES[url.pathname]) {
         const [file, type] = STATIC_FILES[url.pathname];
@@ -125,7 +126,16 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       }
       if (!url.pathname.startsWith('/api/')) throw new BridgeError('页面不存在。', 404);
       checkBrowser(req);
+      if (accountPool && !accountPool.capabilities().clientIntegration && !/^\/api\/(?:status$|node$|upstream-account-types$|upstream-accounts(?:\/|$)|client-admin(?:\/|$)|service\/|model-settings$|request-diagnostics(?:\/|$)|token-usage$)/.test(url.pathname)) {
+        throw new BridgeError('当前网关未启用此管理能力。', 404, 'node_capability_unavailable');
+      }
       if (req.method === 'GET') {
+        if (url.pathname === '/api/node') { if (!accountPool) throw new BridgeError('账号池需重启加载。', 503); json(res, 200, { capabilities: accountPool.capabilities(), csrfToken: csrf }); return; }
+        if (url.pathname === '/api/upstream-accounts' || url.pathname === '/api/upstream-account-types') {
+          if (!accountPool) throw new BridgeError('账号池需重启加载。', 503);
+          const snapshot = await accountPool.snapshot();
+          json(res, 200, url.pathname.endsWith('-types') ? { accountTypes: snapshot.accountTypes } : { ...snapshot, csrfToken: csrf }); return;
+        }
         if (url.pathname === '/api/client-admin/billing/unresolved') {
           if (!clientAdmin) throw new BridgeError('接入用户管理尚未就绪。', 503, 'client_admin_unavailable');
           json(res, 200, clientAdmin.outstanding({ limit: 50,
@@ -161,22 +171,27 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
         }
         if (url.pathname === '/api/model-settings') {
           if (!modelPolicy) throw new BridgeError('当前运行版本尚未启用模型管理。', 503);
-          json(res, 200, modelDiscovery ? await modelDiscovery.refresh() : modelPolicy.snapshot()); return;
+          json(res, 200, accountPool ? await accountPool.modelSettings() : modelDiscovery ? await modelDiscovery.refresh() : modelPolicy.snapshot()); return;
         }
         if (url.pathname === '/api/cursor') {
           if (!cursorService) throw new BridgeError('Cursor 渠道尚未配置。', 503);
           json(res, 200, await cursorService.status()); return;
         }
         if (url.pathname === '/api/status') {
+          if (accountPool && !accountPool.capabilities().clientIntegration) {
+            json(res, 200, { csrfToken: csrf, ready: accountPool.catalog().some(m => m.enabled && m.available), version: '0.1.0',
+              node: { capabilities: accountPool.capabilities() }, backend: null, integration: null, gateway: null }); return;
+          }
           let backendError = null;
-          try { await backend.readAccount(); } catch (error) { backendError = redact(error.message); }
+          try { await backend?.readAccount(); } catch (error) { backendError = redact(error.message); }
           let info;
           try { info = await integration.inspect(); }
           catch (error) { info = { installed: false, canInstall: false, reason: redact(error.message) }; }
           json(res, 200, { csrfToken: csrf, ready: !backendError, version: '0.1.0',
             gateway: { baseUrl, enabled: Boolean(state.enabled && state.pinnedAccount), ...gateway.metrics },
-            backend: { running: backend.rpc.running, account: backend.account, login: backend.login,
-              pinnedAccount: backend.publicBinding(), error: backendError }, integration: info, verification });
+            backend: { running: backend?.rpc.running === true, account: backend?.account ?? null, login: backend?.login ?? {},
+              pinnedAccount: backend?.publicBinding() ?? null, error: backendError }, integration: info, verification,
+            ...(accountPool ? { node: { capabilities: accountPool.capabilities() } } : {}) });
           return;
         }
         if (url.pathname === '/api/models') { json(res, 200, await models()); return; }
@@ -211,7 +226,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
         if (url.pathname === '/api/token-usage') {
           if (!usageLedger) throw new BridgeError('Token 统计暂不可用，请检查本机记录文件。', 503);
           const snapshot = usageLedger.snapshot();
-          json(res, 200, { ...snapshot, error: gateway.metrics.usageError ?? snapshot.error ?? null }); return;
+          json(res, 200, { ...snapshot, error: gateway?.metrics.usageError ?? snapshot.error ?? null }); return;
         }
         if (url.pathname === '/api/traffic') {
           const threadId = url.searchParams.get('threadId');
@@ -238,6 +253,15 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       adminOperation = url.pathname;
       try {
         const body = await bodyJson(req, url.pathname === '/api/model-settings' ? 1024 * 1024 : 64 * 1024);
+        if (url.pathname === '/api/upstream-accounts') {
+          if (!accountPool) throw new BridgeError('账号池需重启加载。', 503);
+          json(res, 200, await accountPool.create(body)); return;
+        }
+        const upstreamAccount = /^\/api\/upstream-accounts\/([a-z0-9-]{1,96})$/.exec(url.pathname);
+        if (upstreamAccount) {
+          if (!accountPool) throw new BridgeError('账号池需重启加载。', 503);
+          json(res, 200, await accountPool.update(upstreamAccount[1], body)); return;
+        }
         if (url.pathname.startsWith('/api/client-admin/')) {
           if (!clientAdmin) throw new BridgeError('当前后台尚未启用接入用户管理，请重启加载。', 503, 'client_admin_unavailable');
           json(res, 200, await clientAdmin.mutate(url.pathname, body)); return;
@@ -278,6 +302,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
           await codeBuddyService.logout(); json(res, 200, { ok: true }); return;
         }
         if (url.pathname === '/api/verify') {
+          if (!backend) throw new BridgeError('请先添加订阅账号并空闲重启服务。', 503);
           if (verifying) throw new BridgeError('推理验证正在执行。', 409);
           await backend.credentials();
           const model = body.model || defaultModel;
@@ -298,6 +323,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
             throw new BridgeError('当前后台尚未启用 Codex 连接切换，请重启网关加载。', 503, 'integration_mode_unavailable');
           }
           if (body.mode === 'gateway') {
+            if (!backend) throw new BridgeError('请先添加并验证独立订阅账号。', 503);
             if (verifying) throw new BridgeError('请等待当前推理验证结束。', 409);
             const token = await backend.credentials();
             if (verification.status !== 'passed' || verification.accountId !== token.accountId || verification.accountEmail !== token.email) {
@@ -318,6 +344,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
           json(res, 200, result); return;
         }
         if (verifying) throw new BridgeError('请等待当前推理验证结束。', 409);
+        if (['/api/login', '/api/logout', '/api/bind', '/api/integration/install'].includes(url.pathname) && !backend) throw new BridgeError('请先添加订阅账号并空闲重启服务。', 503);
         if (url.pathname === '/api/login') {
           if (body.deviceCode !== undefined && typeof body.deviceCode !== 'boolean') throw new BridgeError('deviceCode 必须是布尔值。');
           verification = { status: 'not_run' }; await saveVerification(verification);

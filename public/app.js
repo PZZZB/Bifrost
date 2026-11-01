@@ -47,7 +47,7 @@ function installDirectionalArrowLayout(prefix, groupId) {
 }
 const elements = Object.fromEntries([
   'connection-dot', 'connection-label', 'version', 'notice', 'setup-state',
-  'tab-console', 'tab-accounts', 'tab-clients', 'panel-console', 'panel-accounts', 'panel-clients',
+  'tab-console', 'tab-accounts', 'tab-connections', 'tab-clients', 'panel-console', 'panel-accounts', 'panel-connections', 'panel-clients',
   'client-admin-refresh', 'client-admin-error', 'client-admin-message', 'client-admin-state',
   'client-api-base', 'client-portal-link', 'client-access-note', 'client-users-count', 'client-user-list',
   'client-user-create-form', 'client-create-username', 'client-create-password', 'client-user-create',
@@ -220,8 +220,10 @@ function pill(id, label, kind = '') {
 }
 
 function selectManagementTab(name, { focus = false, updateLocation = true } = {}) {
-  const selected = ['accounts', 'clients'].includes(name) ? name : 'console';
-  for (const tab of ['console', 'accounts', 'clients']) {
+  const requested = ['accounts', 'connections', 'clients'].includes(name) ? name : 'console';
+  const caps = status?.node?.capabilities;
+  const selected = requested === 'clients' && caps?.userManagement === false || requested === 'connections' && caps?.clientIntegration === false ? 'console' : requested;
+  for (const tab of ['console', 'accounts', 'connections', 'clients']) {
     const active = selected === tab;
     elements[`tab-${tab}`].setAttribute('aria-selected', String(active));
     elements[`tab-${tab}`].tabIndex = active ? 0 : -1;
@@ -1520,6 +1522,20 @@ function renderIntegrationMode({ integration, idle, bound, passed, verifying }) 
 
 function render() {
   if (!status) return;
+  const caps = status.node?.capabilities;
+  if (caps) {
+    elements['tab-connections'].hidden = !caps.clientIntegration;
+    elements['tab-clients'].hidden = !caps.userManagement;
+    for (const panel of document.querySelectorAll('[data-client-integration-only]')) panel.hidden = !caps.clientIntegration || panel.hasAttribute('data-legacy-overview');
+    if (!caps.userManagement && elements['tab-clients'].getAttribute('aria-selected') === 'true'
+      || !caps.clientIntegration && elements['tab-connections'].getAttribute('aria-selected') === 'true') selectManagementTab('console');
+    if (!caps.clientIntegration) {
+      elements['connection-dot'].className = 'status-dot connected';
+      text('connection-label', '当前网关已连接'); text('version', status.version ? `v${status.version}` : '');
+      renderServiceControl(); renderModelSettingsControls(); renderClientAdminControls();
+      return;
+    }
+  }
   const backend = status.backend || {};
   const gateway = status.gateway || {};
   const integration = status.integration || {};
@@ -1662,13 +1678,16 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
       managementStatusError = false;
       render();
       if (!restartInProgress) {
+        const caps = status.node?.capabilities;
+        const active = kind => !caps || caps.activeKinds?.includes(kind);
         if (status.backend?.account && !modelsLoaded) void loadModels();
         if (!status.backend?.account) modelsLoaded = false;
-        void refreshTokenUsage();
+        if (!caps) void refreshTokenUsage();
         void refreshRequestDiagnostics();
-        void refreshWith();
-        void refreshCodeBuddy();
-        void refreshCursor();
+        if (active('with') || !caps) void refreshWith();
+        if (active('codebuddy')) void refreshCodeBuddy();
+        if (active('cursor')) void refreshCursor();
+        if (!caps && !accountQuotaStatus && !accountQuotasRequest) void refreshAccountQuotas();
         void refreshServiceStatus();
         if (!modelSettingsLoaded) void refreshModelSettings();
         if (!clientAdminLoaded && (elements['tab-clients'].getAttribute('aria-selected') === 'true'
@@ -2309,13 +2328,14 @@ elements['copy-button'].addEventListener('click', () => {
 
 elements['quota-refresh-button'].addEventListener('click', () => { void refreshAccountQuotas(); });
 
-const managementTabs = ['console', 'accounts', 'clients'];
+const managementTabs = ['console', 'accounts', 'connections', 'clients'];
 for (const [index, name] of managementTabs.entries()) {
   elements[`tab-${name}`].addEventListener('click', () => selectManagementTab(name));
   elements[`tab-${name}`].addEventListener('keydown', event => {
-    const next = event.key === 'Home' ? 'console' : event.key === 'End' ? 'clients'
-      : event.key === 'ArrowLeft' ? managementTabs[(index + managementTabs.length - 1) % managementTabs.length]
-        : event.key === 'ArrowRight' ? managementTabs[(index + 1) % managementTabs.length] : null;
+    const visible = managementTabs.filter(tab => !elements[`tab-${tab}`].hidden), at = visible.indexOf(name);
+    const next = event.key === 'Home' ? visible[0] : event.key === 'End' ? visible.at(-1)
+      : event.key === 'ArrowLeft' ? visible[(at + visible.length - 1) % visible.length]
+        : event.key === 'ArrowRight' ? visible[(at + 1) % visible.length] : null;
     if (next) { event.preventDefault(); selectManagementTab(next, { focus: true }); }
   });
 }
@@ -2470,7 +2490,9 @@ elements['service-cancel-button'].addEventListener('click', () => {
 elements['model-settings-save-button'].addEventListener('click', () => {
   void action('model-settings-save', async () => {
     if (!modelSettings || !modelSettingsDirty()) return;
-    const disabledModels = modelSettings.models.filter(model => !modelDraft.get(model.id)).map(model => model.id);
+    const visibleModels = new Set(modelSettings.models.map(model => model.id));
+    const disabledModels = [...(modelSettings.disabledModels ?? []).filter(id => !visibleModels.has(id)),
+      ...modelSettings.models.filter(model => !modelDraft.get(model.id)).map(model => model.id)];
     try { await post('/api/model-settings', { revision: modelSettings.revision, disabledModels }); }
     catch (error) {
       if (error.status !== 409) throw error;
@@ -2525,7 +2547,6 @@ renderWorldTree();
 paintOfficialBrandIcons();
 installDirectionalArrowLayout('world-', 'world-routes');
 
-void refreshAccountQuotas();
 void refreshStatus().catch(() => {});
 setInterval(() => { void refreshStatus().catch(() => {}); }, 3000);
 document.addEventListener('visibilitychange', () => {

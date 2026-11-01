@@ -11,7 +11,7 @@ export class WithGateway extends AnthropicGateway {
   constructor({ provider, gatewayKey, allowedHosts = ['192.168.168.1:43157'],
     allowedPeers = ['192.168.168.10'], onUsage = async () => {}, onDiagnostic = () => {}, getAuthorizationVersion = () => null,
     maxBodyBytes = 64 * 1024 * 1024,
-    additionalRoutes = [], withEnabled = true, isDraining = () => false } = {}) {
+    additionalRoutes = [], withEnabled = true, isDraining = () => false, isAccountEnabled = () => true } = {}) {
     if (typeof withEnabled !== 'boolean') throw new TypeError('With enabled must be a boolean.');
     if (withEnabled && (typeof provider?.request !== 'function' || typeof provider?.status !== 'function')) {
       throw new TypeError('With provider request() and status() are required.');
@@ -26,7 +26,7 @@ export class WithGateway extends AnthropicGateway {
       modelIds.add(route.model.id);
       routes.push(route);
     }
-    super({ routes, gatewayKey, allowedHosts, allowedPeers, onUsage, onDiagnostic, getAuthorizationVersion, maxBodyBytes, isDraining });
+    super({ routes, gatewayKey, allowedHosts, allowedPeers, onUsage, onDiagnostic, getAuthorizationVersion, maxBodyBytes, isDraining, isAccountEnabled });
     this.provider = withEnabled ? provider : null;
   }
 

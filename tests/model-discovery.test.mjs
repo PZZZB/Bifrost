@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ModelPolicy } from '../src/model-policy.mjs';
 import { ModelDiscovery } from '../src/model-discovery.mjs';
+import { gatedAccountService } from '../src/upstream-accounts.mjs';
 
 const legacyCB = 'claude-codebuddy-opus-5-5', legacyCU = 'Cursor-gemini-4-argon';
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -23,6 +24,21 @@ async function fixture(t, options = {}) {
   t.after(async () => { await discovery.close(); await rm(directory, { recursive: true, force: true }); });
   return { policy, discovery, cb, cu, calls, directory, path };
 }
+
+test('account gating preserves live authorization epochs and rejects a catalog from the previous login', async t => {
+  let epoch = 1, enabled = true, resolveRead, calls = 0;
+  const reading = new Promise(resolve => { resolveRead = resolve; });
+  const service = { enabled: true, get authorizationVersion() { return epoch; },
+    getModels: async () => { calls++; return reading; } };
+  const gated = gatedAccountService(service, () => enabled);
+  const { policy, discovery } = await fixture(t, { codeBuddyService: gated, cursorService: null });
+  const pending = discovery.refresh(); await tick(); epoch++;
+  resolveRead(cbModels()); await pending;
+  assert.equal(policy.snapshot().models.find(m => m.id === legacyCB).available, false);
+  assert.equal(discovery.snapshot().discovery.CodeBuddy.state, 'error');
+  assert.equal(gated.authorizationVersion, 2);
+  enabled = false; await discovery.refresh(); assert.equal(calls, 1);
+});
 
 test('management discovery includes full source catalogs while preserving legacy selections and defaulting new models off', async t => {
   const { policy, discovery, calls, path } = await fixture(t);

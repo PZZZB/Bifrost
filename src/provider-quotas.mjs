@@ -46,7 +46,7 @@ export class ProviderQuotas {
   async #read(account) {
     const service = this.#service(account), version = service?.authorizationVersion;
     if (this.#closed) return unavailable(account, null, '账号用量查询服务已停止。');
-    if (typeof service?.status !== 'function') return card(account, null, { authenticated: false,
+    if (typeof service?.status !== 'function' || service.enabled === false) return card(account, null, { authenticated: false,
       notice: `当前未配置 ${account} 账号，请先在账号管理完成官方授权。` });
     let entry = this.#entries.get(account);
     if (!entry || entry.version !== version) {

@@ -89,6 +89,27 @@ test('shared Messages listener respects service draining without calling a provi
   assert.equal(unauthorized.status, 401);
 });
 
+test('pausing one upstream removes its models and rejects inference without touching its provider or another account', async t => {
+  let paused = false, statusReads = 0;
+  const first = providerFixture({ status: async () => { statusReads++; return { ready: true, authenticated: true }; } });
+  const second = providerFixture();
+  const { send } = await gatewayFixture(t, [
+    { account: 'First', model: firstModel, provider: first },
+    { account: 'Second', model: secondModel, provider: second },
+  ], { isAccountEnabled: account => account !== 'First' || !paused });
+  paused = true;
+  const catalog = await send('/v1/models', undefined, { method: 'GET' });
+  assert.deepEqual((await catalog.json()).data.map(m => m.id), [secondModel.id]);
+  assert.equal(statusReads, 0);
+  assert.equal((await send('/v1/messages', { model: firstModel.id, messages: [] })).status, 503);
+  assert.equal((await send('/v1/messages/count_tokens', { model: firstModel.id, messages: [] })).status, 503);
+  assert.equal(first.calls.length, 0); assert.equal(second.calls.length, 0); assert.equal(statusReads, 0);
+  assert.equal((await send('/v1/messages', { model: secondModel.id, messages: [] })).status, 200);
+  paused = false;
+  assert.equal((await send('/v1/messages', { model: firstModel.id, messages: [] })).status, 200);
+  assert.equal(first.calls.length, 1); assert.equal(second.calls.length, 1);
+});
+
 test('provider receives original JSON bytes and only allowlisted business headers', async t => {
   const provider = providerFixture();
   const { send } = await gatewayFixture(t, [{ account: 'Native', model: firstModel, provider }]);

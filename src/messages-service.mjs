@@ -166,14 +166,14 @@ export async function startMessagesService({ stateDir, codeBuddyProvider = null,
   codeBuddyEnabled = false, onUsage, onDiagnostic, getAuthorizationVersion, listenImpl = listen, readConfigImpl = readJson,
   startLegacyImpl = startWithService, createServerImpl = createAnthropicGatewayServer,
   createHttpProvider = options => new AnthropicHttpProvider(options), startTcpForwarderImpl = startTcpForwarder,
-  reservedPorts = [], isDraining = () => false, ...legacyOptions } = {}) {
+  reservedPorts = [], isDraining = () => false, isAccountEnabled = () => true, ...legacyOptions } = {}) {
   const missing = Symbol('missing messages configuration');
   let config, setupError = null;
   try { config = await readConfigImpl(join(stateDir, 'messages-gateway.json'), missing); }
   catch { setupError = 'Messages 网关配置无法读取，请检查 messages-gateway.json。'; }
   if (config === missing) {
     return startLegacyImpl({ stateDir, codeBuddyProvider, codeBuddyModel, codeBuddyEnabled,
-      onUsage, onDiagnostic, getAuthorizationVersion, listenImpl, isDraining, ...legacyOptions });
+      onUsage, onDiagnostic, getAuthorizationVersion, listenImpl, isDraining, isAccountEnabled, ...legacyOptions });
   }
 
   let server = null, tcpForwarder = null, running = false, baseUrl = null, closeOperation = null;
@@ -196,6 +196,7 @@ export async function startMessagesService({ stateDir, codeBuddyProvider = null,
 
   if (!setupError) {
     try {
+      if (Array.isArray(config?.routes)) config = { ...config, routes: config.routes.filter(route => isAccountEnabled(route.account, route.model?.id) === true) };
       validateConfig(config, { codeBuddyProvider, codeBuddyModel, codeBuddyEnabled, reservedPorts });
       baseUrl = listenerUrl(config.listener);
       const loadClaudeKey = !config.routes.some(route => route.provider === 'claude-cli') ||
@@ -217,7 +218,7 @@ export async function startMessagesService({ stateDir, codeBuddyProvider = null,
         }
         return { account: route.account, model, provider };
       });
-      server = createServerImpl({ routes, gatewayKey: config.gatewayKey, isDraining,
+      server = createServerImpl({ routes, gatewayKey: config.gatewayKey, isDraining, isAccountEnabled,
         allowedHosts: [...config.listener.allowedHosts], allowedPeers: [...config.listener.allowedPeers], onUsage, onDiagnostic, getAuthorizationVersion });
       await listenImpl(server, config.listener.port, config.listener.address);
       running = true;

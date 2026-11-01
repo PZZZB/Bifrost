@@ -20,7 +20,7 @@
     "verify:web-accounts": "node scripts/verify-web-accounts-offline.mjs",
     "verify:codex": "node scripts/verify-codex.mjs",
     "verify:desktop-codex": "node scripts/verify-desktop-codex-offline.mjs",
-    "check": "node --check src/main.mjs && node --check public/app.js && node --check public/accounts/app.js"
+    "check": "node --check src/main.mjs && node --check src/upstream-accounts.mjs && node --check src/upstream-account-store.mjs && node --check public/app.js && node --check public/account-pool.js && node --check public/accounts/app.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.304",

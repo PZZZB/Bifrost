@@ -55,7 +55,7 @@ test('protected credential and config publication preserve the prior source on f
   await configureServerRemote({ stateDir, baseUrl, apiKey, storeFactory });
   const original = await loadServerRemotesConfig(stateDir), previousRef = original.sources[0].credentialRef;
   assert.equal(records.get(previousRef).apiKey, apiKey);
-  assert.doesNotMatch(await readFile(join(stateDir, 'remote-sources.json'), 'utf8'), /bfk_/);
+  assert.doesNotMatch(await readFile(join(stateDir, 'upstream-accounts.json'), 'utf8'), /bfk_/);
   for (const fault of ['save', 'config']) {
     failSave = fault === 'save'; failWrite = fault === 'config';
     await assert.rejects(configureServerRemote({ stateDir, baseUrl: 'https://new.test/v1', apiKey, storeFactory,

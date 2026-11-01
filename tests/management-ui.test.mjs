@@ -81,7 +81,7 @@ function harness(overrides = {}) {
   for (const element of [...elements.values(), document.body]) element.ownerDocument = document;
   const snapshot = () => ({ csrfToken: token, ready: true, gateway: { requests: 12, completed: 11, failed: 1,
     accounts: { A: { requests: 7, completed: 7, failed: 0 }, B: { requests: 5, completed: 4, failed: 1 } } },
-    backend, integration, verification });
+    backend, integration, verification, ...(overrides.node ? { node: overrides.node } : {}) });
   const fetch = async (path, options = {}) => {
     const call = { path, method: options.method ?? 'GET', headers: options.headers, body: options.body ? JSON.parse(options.body) : null };
     calls.push(call);
@@ -142,6 +142,40 @@ function integrationFixture(mode = 'gateway', overrides = {}) {
 }
 
 const boundBackend = () => ({ running: true, account: { email: 'bound@example.test' }, pinnedAccount: { email: 'bound@example.test' } });
+
+test('a managed node hides client configuration and never polls unrelated account adapters', async () => {
+  const page = harness({ node: { capabilities: { clientIntegration: false, userManagement: true, activeKinds: ['claude'] } },
+    location: 'http://127.0.0.1:43155/#connections' });
+  await settle();
+  assert.equal(page.elements.get('tab-connections').hidden, true);
+  assert.equal(page.elements.get('tab-clients').hidden, false);
+  assert.equal(page.elements.get('tab-console').getAttribute('aria-selected'), 'true');
+  const foreign = ['/api/codebuddy', '/api/cursor', '/api/with', '/api/account-quotas', '/api/token-usage'];
+  assert.equal(page.calls.some(call => foreign.includes(call.path)), false);
+  page.run("selectManagementTab('connections')");
+  assert.equal(page.elements.get('panel-connections').hidden, true);
+  assert.equal(page.elements.get('connection-label').textContent, '当前网关已连接');
+});
+
+test('an ordinary local node hides downstream user management and polls only configured account types', async () => {
+  const page = harness({ node: { capabilities: { clientIntegration: true, userManagement: false, activeKinds: ['codebuddy'] } },
+    location: 'http://127.0.0.1:43155/#clients' });
+  await settle();
+  assert.equal(page.elements.get('tab-clients').hidden, true);
+  assert.equal(page.elements.get('tab-connections').hidden, false);
+  assert.equal(page.elements.get('panel-clients').hidden, true);
+  assert.equal(page.calls.some(call => ['/api/client-admin', '/api/cursor', '/api/with'].includes(call.path)), false);
+  assert.equal(page.calls.some(call => call.path === '/api/codebuddy'), true);
+});
+
+test('saving visible model choices preserves disabled models owned by inactive accounts', async () => {
+  const page = harness({ models: { ...originalModels(), disabledModels: ['old-unloaded-model'] } }); await settle();
+  const checkbox = page.elements.get('model-settings-list').querySelectorAll('input')[0];
+  checkbox.checked = false; checkbox.trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const saved = page.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.deepEqual(saved.body.disabledModels, ['old-unloaded-model', 'gpt-6.1-sol']);
+});
 
 test('Codex official configuration stays distinct from retained gateway fields and never advertises gateway ingress', async () => {
   const page = harness({ integration: integrationFixture('official'), backend: boundBackend(), verification: { status: 'passed' } });
@@ -721,7 +755,7 @@ test('provider quota identities refresh only on manual action or authorization c
 });
 
 function assertSelectedTab(page, selected) {
-  for (const name of ['console', 'accounts', 'clients']) {
+  for (const name of ['console', 'accounts', 'connections', 'clients']) {
     const tab = page.elements.get(`tab-${name}`), panel = page.elements.get(`panel-${name}`);
     assert.ok(tab && panel, `Missing management tab or panel: ${name}`);
     assert.equal(tab.getAttribute('role'), 'tab');
@@ -755,7 +789,7 @@ test('management tabs support keyboard wrapping, Home and End with focus and rov
   const beforeCalls = page.calls.length;
   for (const [from, key, to] of [['console', 'ArrowLeft', 'clients'], ['clients', 'ArrowRight', 'console'],
     ['console', 'ArrowRight', 'accounts'], ['accounts', 'ArrowLeft', 'console'],
-    ['accounts', 'ArrowRight', 'clients'], ['clients', 'ArrowLeft', 'accounts'],
+    ['accounts', 'ArrowRight', 'connections'], ['connections', 'ArrowRight', 'clients'], ['clients', 'ArrowLeft', 'connections'],
     ['console', 'End', 'clients'], ['accounts', 'Home', 'console']]) {
     const event = page.elements.get(`tab-${from}`).trigger('keydown', { key });
     assert.equal(event.defaultPrevented, true); assertSelectedTab(page, to);

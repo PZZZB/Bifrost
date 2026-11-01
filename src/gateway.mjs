@@ -146,7 +146,7 @@ export class Gateway {
     isDraining = () => false, cursorProvider = null, cursorEnabled = () => cursorProvider !== null,
     getCursorModels = async () => [], getCodeBuddyModels = null,
     getCursorAuthorizationVersion = () => null, getCodeBuddyAuthorizationVersion = () => null,
-    onDiagnostic = () => {}, getAuthorizationVersion = null, remoteSources = null }) {
+    onDiagnostic = () => {}, getAuthorizationVersion = null, remoteSources = null, sourceEnabled = () => true }) {
     if (typeof getAProvider !== 'function') throw new TypeError('getAProvider is required for account routing.');
     if (codeBuddyProvider !== null && (typeof codeBuddyProvider.status !== 'function' || typeof codeBuddyProvider.request !== 'function') ||
         typeof codeBuddyEnabled !== 'function' || getCodeBuddyModels !== null && typeof getCodeBuddyModels !== 'function') throw new TypeError('Invalid CodeBuddy Responses provider.');
@@ -157,7 +157,7 @@ export class Gateway {
     if (remoteSources !== null && ['models', 'model', 'request', 'status'].some(name => typeof remoteSources[name] !== 'function')) throw new TypeError('Invalid remote sources.');
     Object.assign(this, { backend, gatewayKey, getAProvider, fetchImpl, upstream, catalogWaitMs, onUsage,
       codeBuddyProvider, codeBuddyEnabled, modelPolicy, isDraining, cursorProvider, cursorEnabled, getCursorModels, getCodeBuddyModels,
-      getCursorAuthorizationVersion, getCodeBuddyAuthorizationVersion, onDiagnostic, remoteSources });
+      getCursorAuthorizationVersion, getCodeBuddyAuthorizationVersion, onDiagnostic, remoteSources, sourceEnabled });
     this.getAuthorizationVersion = getAuthorizationVersion ?? (account => account === 'Cursor' ? getCursorAuthorizationVersion()
       : account === 'CodeBuddy' ? getCodeBuddyAuthorizationVersion() : account === 'Bifrost' ? remoteSources?.generation : null);
     this.pendingRequests = 0;
@@ -214,6 +214,7 @@ export class Gateway {
   }
 
   async readBCatalog(path = '/models', { signal } = {}) {
+    if (this.sourceEnabled('B') !== true) throw new BridgeError('订阅账号已停用或尚未登记。', 503, 'upstream_account_disabled');
     // Check the binding even when model metadata is cached. No A credential is used here.
     const credential = await this.backend.credentials();
     if (this.bCatalog?.accountId === credential.accountId && this.bCatalog.expiresAt > Date.now()) return this.bCatalog.data;
@@ -321,7 +322,9 @@ export class Gateway {
     // await separates this filter from the committed catalog response.
     data.models = data.models.filter(model => (codeBuddyCurrent() || !resolveCodeBuddyModel(model?.slug ?? model?.id))
       && (cursorCurrent() || !resolveCursorModel(model?.slug ?? model?.id))
-      && (!/^remote\//i.test(model?.slug ?? model?.id) || this.remoteSources?.model(model.slug ?? model.id)));
+      && (!/^remote\//i.test(model?.slug ?? model?.id) || this.remoteSources?.model(model.slug ?? model.id))
+      && this.sourceEnabled(this.remoteSources?.model(model.slug ?? model.id) ? 'Bifrost' : resolveCursorModel(model.slug ?? model.id)
+        ? 'Cursor' : resolveCodeBuddyModel(model.slug ?? model.id) ? 'CodeBuddy' : resolveBModel(model.slug ?? model.id) ? 'B' : 'A', model.slug ?? model.id));
     res.writeHead(200, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
   }
@@ -416,6 +419,7 @@ export class Gateway {
         }
         this.modelPolicy?.assertEnabled(data.model);
         const account = remote ? 'Bifrost' : cursor ? 'Cursor' : codeBuddy ? 'CodeBuddy' : alias ? 'B' : 'A';
+        if (this.sourceEnabled(account, data.model) !== true) throw new BridgeError('此上游账号已停用或尚未登记。', 503, 'upstream_account_disabled');
         route = { account, model: data.model, upstreamModel: remote?.upstreamModel ?? cursor?.upstream ?? alias?.upstream ?? data.model };
         accountMetrics = this.metrics.accounts[account];
         if (inference) {

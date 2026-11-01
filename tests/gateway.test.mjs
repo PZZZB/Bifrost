@@ -27,6 +27,17 @@ async function fixture(t, fetchImpl) {
   return { gateway, backend, url: `http://127.0.0.1:${server.address().port}` };
 }
 
+test('a disabled subscription source blocks catalog and inference before reading credentials or dispatching a fallback', async t => {
+  let calls = 0;
+  const { gateway, backend, url } = await fixture(t, async () => { calls++; throw new Error('Must not dispatch'); });
+  gateway.sourceEnabled = account => account !== 'B';
+  await assert.rejects(gateway.readBCatalog(), error => error.code === 'upstream_account_disabled');
+  const response = await fetch(url + '/backend-api/codex/responses', { method: 'POST', headers: {
+    authorization: `Bearer ${key}`, 'content-type': 'application/json',
+  }, body: JSON.stringify({ model: 'B-gpt-6.1-sol', input: 'isolated fixture' }) });
+  assert.equal(response.status, 503); assert.equal(backend.calls.length, 0); assert.equal(calls, 0);
+});
+
 test('gateway replaces A auth and preserves request tools and SSE bytes exactly', async (t) => {
   const events = [
     { type: 'response.output_item.added', item: { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"echo 测试"}', call_id: 'call-one' } },

@@ -36,6 +36,8 @@ import { UnifiedWebAccounts } from './unified-web-accounts.mjs';
 import { createWebAccounts } from './web-accounts.mjs';
 import { loadPaymentRuntime } from './payments/runtime.mjs';
 import { startServerRemotes } from './runtime/server-remotes.mjs';
+import { UpstreamAccountStore } from './upstream-account-store.mjs';
+import { UpstreamAccounts, gatedAccountService } from './upstream-accounts.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serviceVersion = await createServiceVersion({ projectDir });
@@ -45,6 +47,8 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('BRI
 const stateDir = resolve(process.env.BRIDGE_STATE_DIR || join(homedir(), '.codex-account-bridge'));
 // Read the migration latch before constructing any old Codex credential owner.
 const delegation = await loadMagpieDelegation(join(stateDir, 'magpie-delegation.json'));
+const macClaude = await loadMacClaudeClient(process.env.BRIDGE_MAC_CLAUDE_CONFIG);
+const nativeIntegration = !macClaude && !delegation;
 const aHome = resolve(process.env.BRIDGE_CLIENT_CODEX_HOME || process.env.CODEX_HOME || join(homedir(), '.codex'));
 const bHome = join(stateDir, 'accounts', 'account-b');
 if (aHome.toLowerCase() === bHome.toLowerCase()) throw new Error('A、B 不能使用同一个 CODEX_HOME。');
@@ -64,12 +68,29 @@ try { usageLedger = await UsageLedger.open({ path: join(stateDir, 'usage.jsonl')
 catch (error) { console.error(`Token statistics unavailable: ${redact(error.message)}`); }
 let backendRpc, configRpc, backend, integration, gateway, clientVersion, accountQuotas, serviceControl;
 let withService, cursorProvider, requestDiagnostics, clientAccess = null, clientService = null, clientAdmin = null, clientBilling = null;
-let paymentRuntime = null, paymentsFault = false, serverRemotes = null;
+let paymentRuntime = null, paymentsFault = false, serverRemotes = null, accountPool = null;
+const seeds = [];
+const configured = async name => await readJson(join(stateDir, name), null);
+const userEntryConfiguration = await configured('client-gateway.json');
+const legacyUserAccounts = userEntryConfiguration === null ? await configured('client-access.json') : null;
+const userManagementRequested = Boolean(macClaude || userEntryConfiguration?.enabled === true || userEntryConfiguration === null
+  && ((legacyUserAccounts?.accounts?.length ?? 0) > 0 || (legacyUserAccounts?.invites?.length ?? 0) > 0));
+if (macClaude) seeds.push({ kind: 'claude', name: '隔离 Claude' });
+else if (!delegation) {
+  if (state.pinnedAccount || state.enabled || await configured('verification.json')) seeds.push({ kind: 'codex', name: 'Codex 订阅' });
+  if (await configured('codebuddy.json')) seeds.push({ kind: 'codebuddy', name: 'CodeBuddy 员工账号' });
+  if (await configured('cursor.json')) seeds.push({ kind: 'cursor', name: 'Cursor 账号' });
+  if ((await configured('with.json'))?.enabled) seeds.push({ kind: 'with', name: 'With 兼容来源' });
+  if ((await configured('messages-gateway.json'))?.routes?.some(r => r.account === 'Claude')) seeds.push({ kind: 'claude', name: '受管 Claude 来源' });
+}
+const accountStore = delegation ? null : await UpstreamAccountStore.open({ stateDir, seeds });
+const hasSlot = slot => accountStore?.snapshot().accounts.some(a => a.enabled && a.binding.slot === slot) === true;
+const sourceAllowed = (channel, model) => accountPool ? accountPool.allows(channel, model) : channel === 'A' || hasSlot(channel);
 const modelPolicy = await ModelPolicy.open({ path: join(stateDir, 'model-policy.json') });
 try { requestDiagnostics = await RequestDiagnostics.open({ path: join(stateDir, 'request-diagnostics.jsonl') }); }
 catch { console.error('Request diagnostics unavailable; model forwarding remains enabled.'); }
 function authorizationVersion(account) {
-  return account === 'CodeBuddy' ? codeBuddyService.authorizationVersion : account === 'Cursor' ? cursorService.authorizationVersion
+  return account === 'CodeBuddy' ? codeBuddyService?.authorizationVersion : account === 'Cursor' ? cursorService?.authorizationVersion
     : account === 'Bifrost' ? serverRemotes?.generation ?? null : null;
 }
 async function recordDiagnostic(record) {
@@ -86,16 +107,16 @@ async function recordDiagnostic(record) {
   }
   await requestDiagnostics?.record(record);
 }
-if (modelPolicy.snapshot().available) {
+if (nativeIntegration && modelPolicy.snapshot().available) {
   try {
     const cachedCatalog = await readJson(join(aHome, 'models_cache.json'), null);
     if (Array.isArray(cachedCatalog?.models)) await modelPolicy.observe(cachedCatalog);
     await modelPolicy.observe({ models: [...B_MODELS, CODEBUDDY_CODEX_MODEL, ...CURSOR_MODELS] });
   } catch (error) { console.error(`Model settings: ${redact(error.message)}`); }
 }
-const cursorService = await startCursorService({ stateDir, getGatewayStatus: () => gateway?.cursorStatus() });
-cursorProvider = new CursorResponsesProvider({ cursorService, stateDir, promptMode: cursorService.promptMode ?? 'project-rules' });
-const codeBuddyService = await startCodeBuddyService({ stateDir,
+const cursorService = nativeIntegration && hasSlot('Cursor') ? await startCursorService({ stateDir, getGatewayStatus: () => gateway?.cursorStatus() }) : null;
+cursorProvider = cursorService ? new CursorResponsesProvider({ cursorService, stateDir, promptMode: cursorService.promptMode ?? 'project-rules' }) : null;
+const codeBuddyService = nativeIntegration && hasSlot('CodeBuddy') ? await startCodeBuddyService({ stateDir,
   getGatewayStatus: () => {
     const messages = withService?.channelStatus('CodeBuddy');
     const codex = gateway?.codeBuddyStatus();
@@ -106,14 +127,16 @@ const codeBuddyService = await startCodeBuddyService({ stateDir,
       ...Object.fromEntries(['requests', 'completed', 'failed', 'active'].map(name => [name,
         channels.reduce((total, channel) => total + (channel[name] || 0), 0)])),
       lastError: channels.map(channel => channel.lastError).find(Boolean) ?? null };
-  } });
-const modelDiscovery = new ModelDiscovery({ modelPolicy, codeBuddyService, cursorService });
-const providerQuotas = new ProviderQuotas({ codeBuddyService, cursorService });
-const macClaude = await loadMacClaudeClient(process.env.BRIDGE_MAC_CLAUDE_CONFIG);
-const clientModels = () => macClaude ? macClaude.models() : modelPolicy.snapshot().models.filter(model => ['B', 'CodeBuddy', 'Cursor'].includes(model.channel))
-  .map(model => ({ id: model.id, name: model.name, channel: model.channel, enabled: model.enabled, available: model.available,
-    protocols: ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])] }));
-try {
+  } }) : null;
+const gatedCodeBuddy = gatedAccountService(codeBuddyService, () => sourceAllowed('CodeBuddy'));
+const gatedCursor = gatedAccountService(cursorService, () => sourceAllowed('Cursor'));
+const modelDiscovery = new ModelDiscovery({ modelPolicy, codeBuddyService: gatedCodeBuddy, cursorService: gatedCursor });
+const providerQuotas = nativeIntegration ? new ProviderQuotas({ codeBuddyService: gatedCodeBuddy, cursorService: gatedCursor }) : null;
+const clientModels = () => (macClaude ? macClaude.models() : modelPolicy.snapshot().models.filter(model => ['B', 'CodeBuddy', 'Cursor'].includes(model.channel)))
+  .map(model => ({ id: model.id, name: model.name, channel: model.channel,
+    enabled: model.enabled !== false && sourceAllowed(model.channel, model.id) && !modelPolicy.snapshot().disabledModels.includes(model.id), available: model.available,
+    protocols: model.protocols ?? ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])] }));
+if (userManagementRequested) try {
   clientAccess = await ClientAccess.open({ path: join(stateDir, 'client-access.json'), allowedModelIds: () => clientModels().map(model => model.id),
     ...(macClaude ? { maxAccounts: macClaude.web.maxAccounts } : {}) });
   try { clientBilling = await ClientBilling.open({ path: join(stateDir, 'client-billing.json') }); }
@@ -125,8 +148,8 @@ try {
       message: clientBilling ? '用户入口尚未启动。' : '用户计费账本未就绪，入口已停止接入。' } });
 } catch { console.error('Client access unavailable; existing model routing remains enabled.'); }
 // Load optional account catalogs without delaying the gateway or starting inference.
-void modelDiscovery.refresh().catch(error => console.error(`Model discovery: ${redact(error.message)}`));
-if (!delegation) {
+if (nativeIntegration) void modelDiscovery.refresh().catch(error => console.error(`Model discovery: ${redact(error.message)}`));
+if (nativeIntegration) {
   try { serverRemotes = await startServerRemotes({ stateDir, secret: state.gatewayKey }); }
   catch { console.error('Remote sources unavailable; existing local sources remain enabled. Check the protected remote configuration.'); }
   modelPolicy.setAuthorizationVersionGetter('Bifrost', () => serverRemotes?.generation ?? null);
@@ -136,21 +159,22 @@ if (!delegation) {
   });
   clientVersion = versionOutput.match(/codex-cli\s+(\S+)/)?.[1];
   if (!clientVersion) throw new Error('无法识别官方 Codex CLI 的版本。');
-  backendRpc = new CodexRpc({ binary, home: bHome, cwd: bHome, isolated: true });
+  backendRpc = hasSlot('B') ? new CodexRpc({ binary, home: bHome, cwd: bHome, isolated: true }) : null;
   configRpc = new CodexRpc({ binary, home: aHome, cwd: homedir() });
-  backend = new SubscriptionBackend({ rpc: backendRpc, state, saveState });
-  accountQuotas = new AccountQuotas({ accountARpc: configRpc, accountBRpc: backendRpc, state });
+  backend = backendRpc ? new SubscriptionBackend({ rpc: backendRpc, state, saveState }) : null;
+  accountQuotas = backendRpc ? new AccountQuotas({ accountARpc: configRpc, accountBRpc: backendRpc, state }) : null;
   integration = new Integration({ rpc: configRpc, configPath: join(aHome, 'config.toml'),
     statePath: join(stateDir, 'integration.json'), baseUrl, gatewayKey: state.gatewayKey });
   gateway = new Gateway({ backend, gatewayKey: state.gatewayKey,
     getAProvider: () => integration.originalProvider(),
-    codeBuddyProvider: new CodeBuddyResponsesProvider({ provider: codeBuddyService.provider }),
-    codeBuddyEnabled: () => codeBuddyService.enabled,
-    getCodeBuddyModels: () => codeBuddyService.getModels(),
-    getCodeBuddyAuthorizationVersion: () => codeBuddyService.authorizationVersion,
+    codeBuddyProvider: codeBuddyService ? new CodeBuddyResponsesProvider({ provider: codeBuddyService.provider }) : null,
+    codeBuddyEnabled: () => codeBuddyService?.enabled === true && sourceAllowed('CodeBuddy'),
+    getCodeBuddyModels: () => codeBuddyService?.getModels() ?? [],
+    getCodeBuddyAuthorizationVersion: () => codeBuddyService?.authorizationVersion,
     modelPolicy, remoteSources: serverRemotes,
-    cursorProvider, cursorEnabled: () => cursorService.enabled, getCursorModels: () => cursorService.getModels(),
-    getCursorAuthorizationVersion: () => cursorService.authorizationVersion,
+    cursorProvider, cursorEnabled: () => cursorService?.enabled === true && sourceAllowed('Cursor'), getCursorModels: () => cursorService?.getModels() ?? [],
+    getCursorAuthorizationVersion: () => cursorService?.authorizationVersion,
+    sourceEnabled: sourceAllowed,
     isDraining: () => serviceControl?.draining === true,
     onDiagnostic: recordDiagnostic, getAuthorizationVersion: authorizationVersion,
     onUsage: record => {
@@ -161,13 +185,32 @@ if (!delegation) {
   void gateway.readBCatalog(`/models?client_version=${encodeURIComponent(clientVersion)}`).catch(() => {});
 }
 const verificationPath = join(stateDir, 'verification.json');
-withService = await startMessagesService({ stateDir, reservedPorts: [port],
+withService = nativeIntegration && ['With', 'CodeBuddy', 'Claude'].some(hasSlot) ? await startMessagesService({ stateDir, reservedPorts: [port],
   isDraining: () => serviceControl?.draining === true,
+  isAccountEnabled: sourceAllowed,
   onDiagnostic: recordDiagnostic, getAuthorizationVersion: authorizationVersion,
-  codeBuddyProvider: codeBuddyService.provider, codeBuddyModel: codeBuddyService.model, codeBuddyEnabled: codeBuddyService.enabled, onUsage: record => {
+  codeBuddyProvider: codeBuddyService?.provider, codeBuddyModel: codeBuddyService?.model, codeBuddyEnabled: codeBuddyService?.enabled === true, onUsage: record => {
   if (!usageLedger) throw new Error('Token 记录文件暂不可用。');
   return usageLedger.record(record);
-} });
+} }) : null;
+if (accountStore) {
+  if (macClaude) await modelPolicy.observe({ models: macClaude.models() }, 'Claude', { complete: true });
+  accountPool = new UpstreamAccounts({ store: accountStore,
+    types: macClaude ? ['claude'] : ['codex', ...(process.platform === 'win32' ? ['codebuddy', 'cursor', 'bifrost'] : []), ...seeds.filter(s => ['with', 'claude', 'codebuddy', 'cursor'].includes(s.kind)).map(s => s.kind)],
+    readers: {
+      claude: () => macClaude ? { configured: true, ready: macClaude.status().available, authenticated: null } : withService?.status(),
+      codex: () => ({ configured: Boolean(backend), authenticated: Boolean(backend?.account), bound: Boolean(state.enabled && state.pinnedAccount && backend?.account) }),
+      codebuddy: () => codeBuddyService?.status(), cursor: () => cursorService?.status(), with: () => withService?.status() },
+    getRemotes: () => serverRemotes, modelPolicy,
+    getModels: () => macClaude ? macClaude.models().map(m => ({ ...m, enabled: !modelPolicy.snapshot().disabledModels.includes(m.id) })) : modelPolicy.snapshot().models,
+    refreshModels: async () => {
+      if (macClaude) await modelPolicy.observe({ models: macClaude.models() }, 'Claude', { complete: true });
+      else { await modelDiscovery.refresh(); await gateway?.observeRemotes(); }
+    },
+    capabilities: () => ({ accountPool: true, clientIntegration: Boolean(integration), userManagement: clientService?.status().enabled === true,
+      billing: Boolean(clientBilling), diagnostics: Boolean(requestDiagnostics), activeKinds: accountPool?.rows().filter(a => a.enabled).map(a => a.kind) ?? [] }),
+  });
+}
 serviceControl = createServiceControl({ stateDir, projectDir, version: serviceVersion,
   getActiveRequests: () => (gateway?.pendingRequests ?? 0) + (withService?.activeRequests ?? 0) +
     Math.max(0, (cursorProvider?.activeRuns ?? 0) - (gateway?.metrics.accounts.Cursor.active ?? 0)) +
@@ -175,8 +218,8 @@ serviceControl = createServiceControl({ stateDir, projectDir, version: serviceVe
   onRestart: () => shutdown(0) });
 const server = delegation ? createMagpieDelegationServer({ gatewayKey: state.gatewayKey, baseUrl }) :
   createBridgeServer({ backend, gateway, integration, state, baseUrl,
-  usageLedger, accountQuotas, providerQuotas, requestDiagnostics, serviceControl, modelPolicy, modelDiscovery, cursorService, cursorProvider, clientAdmin,
-  getWithStatus: () => withService.status(),
+  usageLedger, accountQuotas, providerQuotas, requestDiagnostics, serviceControl, modelPolicy, modelDiscovery, cursorService, cursorProvider, clientAdmin, accountPool,
+  getWithStatus: () => withService?.status(),
   codeBuddyService,
   publicDir: join(projectDir, 'public'),
   defaultModel: process.env.BRIDGE_DEFAULT_MODEL || 'B-gpt-6.1-sol',
@@ -193,7 +236,7 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`Bifrost: http://127.0.0.1:${port}`);
   console.log(`Source: ${projectDir}`);
   if (delegation) console.log('Codex delegation: Magpie');
-  else console.log(`Account B storage: ${bHome}`);
+  else if (backend) console.log(`Account B storage: ${bHome}`);
 });
 if (clientAccess && clientBilling && !delegation) {
   const codec = new ClientStateCodec({ secret: state.gatewayKey });
@@ -245,8 +288,8 @@ async function shutdown(code = 0) {
   await paymentRuntime?.close();
   await macClaude?.close();
   await serverRemotes?.close();
-  await Promise.allSettled([modelDiscovery.close(), providerQuotas.close()]);
-  await Promise.allSettled([backendRpc?.close(), configRpc?.close(), withService.close(), codeBuddyService.close(), cursorProvider.close(), cursorService.close()]);
+  await Promise.allSettled([modelDiscovery.close(), providerQuotas?.close()]);
+  await Promise.allSettled([backendRpc?.close(), configRpc?.close(), withService?.close(), codeBuddyService?.close(), cursorProvider?.close(), cursorService?.close()]);
   // Account for response-finally work triggered by closing sockets before flushing.
   const deadline = Date.now() + 5000;
   while ((gateway?.pendingRequests ?? 0) + (withService?.activeRequests ?? 0) > 0 && Date.now() < deadline) {

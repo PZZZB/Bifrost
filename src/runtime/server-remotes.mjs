@@ -35,6 +35,7 @@ export async function startServerRemotes({ stateDir, secret, config: suppliedCon
     void refresh();
     timer = setInterval(() => { void refresh(); }, refreshIntervalMs); timer.unref();
     return { generation, models, model, refresh, status: () => router.status(),
+      async stopSource(id) { await router.provider(id).close(); },
       async request({ path, body, scope, session = '', signal }) {
         if (path !== '/responses') throw new BridgeError('远端来源不支持该接口；请使用普通 Responses 请求。', 501, 'remote_protocol_unsupported');
         const context = router.resolve('responses', { body, owner: scope || 'server-owner', session });

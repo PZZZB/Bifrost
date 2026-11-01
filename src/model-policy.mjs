@@ -5,7 +5,7 @@ import { resolveBModel, resolveCodeBuddyModel } from './models.mjs';
 import { CURSOR_MODELS } from './cursor-service.mjs';
 import { capabilitiesFromCatalog, hasCatalogCapabilityData, unverifiedModel, verificationFromRecord } from './model-capabilities.mjs';
 
-export const MODEL_POLICY_CHANNELS = Object.freeze(['A', 'B', 'CodeBuddy', 'Cursor', 'Bifrost']);
+export const MODEL_POLICY_CHANNELS = Object.freeze(['A', 'B', 'CodeBuddy', 'Cursor', 'Bifrost', 'Claude']);
 const MAX_DISABLED = 2048;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const LEGACY_EXTERNAL_DEFAULTS = new Set(['claude-codebuddy-opus-5-5', ...CURSOR_MODELS.map(model => model.id)]);
@@ -187,7 +187,7 @@ export class ModelPolicy {
       // Client catalogs contain bridge-generated limits. Only the provider's
       // own directory may populate external capabilities.
       const details = ['A', 'B'].includes(channel) && hasCatalogCapabilityData(model, { channel })
-        || channelHint === channel && ['CodeBuddy', 'Cursor', 'Bifrost'].includes(channel)
+        || channelHint === channel && ['CodeBuddy', 'Cursor', 'Bifrost', 'Claude'].includes(channel)
           && (hasCatalogCapabilityData(model, { channel }) || promptMode !== undefined || !previousDetails || previousDetails.authorizationVersion !== version)
         ? { authorizationVersion: version,
           value: capabilitiesFromCatalog(model, { channel, promptMode: promptMode

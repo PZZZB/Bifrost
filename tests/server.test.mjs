@@ -47,6 +47,31 @@ test('client account administration stays behind the local administrator cookie 
   assert.deepEqual(calls,[{path:'/api/client-admin/accounts',body:{username:'sample'}}]);
 });
 
+test('node account administration uses the existing browser session, CSRF and origin boundary', async t => {
+  const mutations = [];
+  const accountPool = { capabilities: () => ({ clientIntegration: false, userManagement: false }),
+    catalog: () => [], snapshot: async () => ({ accounts: [], accountTypes: [] }),
+    create: async body => { mutations.push(body); return { accounts: [] }; },
+    update: async (id, body) => { mutations.push({ id, body }); return { accounts: [] }; } };
+  const { url, cookie, status } = await fixture(t, { backend: null, gateway: null, integration: null, accountPool });
+  for (const path of ['/api/node', '/api/upstream-accounts', '/api/upstream-account-types']) {
+    assert.equal((await fetch(url + path)).status, 401);
+    assert.equal((await fetch(url + path, { headers: { cookie } })).status, 200);
+  }
+  const path = url + '/api/upstream-accounts';
+  const headers = { cookie, 'X-Bridge-CSRF': status.csrfToken, 'content-type': 'application/json' };
+  assert.equal((await fetch(path, { method: 'POST', headers: { cookie }, body: '{}' })).status, 403);
+  assert.equal((await fetch(path, { method: 'POST', headers: { ...headers, Origin: 'https://foreign.example' }, body: '{}' })).status, 403);
+  assert.deepEqual(mutations, []);
+  assert.equal((await fetch(path, { method: 'POST', headers, body: '{"kind":"codex","name":"fixture"}' })).status, 200);
+  assert.equal((await fetch(path + '/fixture-account', { method: 'POST', headers, body: '{"revision":0,"enabled":false}' })).status, 200);
+  assert.equal((await fetch(path + '/invalid%2Fpath', { method: 'POST', headers, body: '{}' })).status, 404);
+  assert.equal(mutations.length, 2);
+  for (const legacy of ['/api/codebuddy', '/api/cursor', '/api/integration', '/api/login/start']) {
+    assert.equal((await fetch(url + legacy, { headers: { cookie } })).status, 404);
+  }
+});
+
 test('diagnostic history, detail and download require the local session and validate identifiers', async t => {
   const id = 'e053b2e4-d1a6-4b0e-b3ef-5df7c434aa34';
   const record = { requestId: id, account: 'CodeBuddy', model: 'safe-model', upstreamModel: 'actual-model',
