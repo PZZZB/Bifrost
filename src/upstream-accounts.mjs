@@ -75,8 +75,13 @@ export class UpstreamAccounts {
         ...(row.kind === 'bifrost' ? { endpoint: row.binding.baseUrl } : {}) };
     }));
     return { version: 1, revision: this.store.snapshot().revision, capabilities: this.capabilities(),
-      accountTypes: this.kinds.map(kind => ({ kind, ...TYPES[kind], count: accounts.filter(a => a.kind === kind).length,
-        canAdd: TYPES[kind].managed !== true && accounts.filter(a => a.kind === kind).length < TYPES[kind].maxAccounts })),
+      accountTypes: this.kinds.map(kind => {
+        const type = TYPES[kind], count = accounts.filter(a => a.kind === kind).length;
+        const canAdd = type.managed !== true && count < type.maxAccounts;
+        return { kind, ...type, count, canAdd,
+          addBlockedReason: canAdd ? null : type.managed ? '此类型由受管环境接入。当前仅连接一套登录环境；第二个账号需要独立凭据、进程和会话，网页创建流程尚未实现。'
+            : `当前适配器最多支持 ${type.maxAccounts} 个实例，请管理已有账号。` };
+      }),
       accounts, models };
   }
   async ensureLegacy(kind) {
@@ -94,7 +99,9 @@ export class UpstreamAccounts {
       await this.store.addLegacy(body.kind, name);
     } else {
       const id = `bifrost-${randomUUID().slice(0, 8)}`;
-      const probe = new BifrostRemote({ id, baseUrl: body.baseUrl, apiKey: body.apiKey, fetchImpl: this.remoteFetch });
+      let probe;
+      try { probe = new BifrostRemote({ id, baseUrl: body.baseUrl, apiKey: body.apiKey, fetchImpl: this.remoteFetch }); }
+      catch { throw new BridgeError('请提供有效的固定 HTTPS 用户 API 地址和个人 Key。', 400, 'upstream_remote_invalid'); }
       let available = false;
       try { await probe.refreshCatalog(); available = probe.catalogSnapshot().length > 0; } finally { await probe.close(); }
       if (!available) throw new BridgeError('未取得远端用户的可用模型，请核对地址、Key 与权限。', 400, 'upstream_remote_unavailable');

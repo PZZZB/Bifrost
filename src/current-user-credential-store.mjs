@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
+import { MacKeychainCrypto } from './mac-keychain-crypto.mjs';
 
 const MAX_BYTES = 256 * 1024;
 
@@ -33,6 +34,7 @@ export class CurrentUserCredentialStore {
   #platform;
   #execFile;
   #shell;
+  #mac;
   #queue = Promise.resolve();
 
   constructor({ path, namespace, platform = process.platform, execFileImpl = execFile,
@@ -41,11 +43,12 @@ export class CurrentUserCredentialStore {
     if (typeof namespace !== 'string' || !/^[A-Za-z0-9.:-]{1,128}$/.test(namespace)) throw new TypeError('A fixed credential namespace is required.');
     this.#entropy = Buffer.from(namespace).toString('base64');
     this.#path = resolve(path); this.#platform = platform; this.#execFile = execFileImpl; this.#shell = powershellPath;
+    if (platform === 'darwin') this.#mac = new MacKeychainCrypto({ path: this.#path, namespace, execFileImpl });
   }
 
   #serial(action) {
     const next = this.#queue.then(async () => {
-      if (this.#platform !== 'win32') throw new CredentialStoreError('unsupported_platform');
+      if (!['win32', 'darwin'].includes(this.#platform)) throw new CredentialStoreError('unsupported_platform');
       return action();
     });
     this.#queue = next.catch(() => {});
@@ -53,6 +56,7 @@ export class CurrentUserCredentialStore {
   }
 
   #crypt(operation, bytes) {
+    if (this.#mac) return this.#mac.transform(operation, bytes).catch(() => { throw new CredentialStoreError('keychain_failed'); });
     return new Promise((resolveValue, reject) => {
       let child, settled = false;
       const finish = (error, stdout) => {
@@ -85,7 +89,7 @@ export class CurrentUserCredentialStore {
       try {
         if (content.length > MAX_BYTES * 2) throw new Error();
         envelope = JSON.parse(content.toString('utf8'));
-        if (envelope?.version !== 1 || envelope.protection !== 'dpapi-current-user' ||
+        if (envelope?.version !== 1 || envelope.protection !== (this.#mac ? 'macos-keychain-aes-gcm' : 'dpapi-current-user') ||
             typeof envelope.ciphertext !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(envelope.ciphertext) ||
             envelope.ciphertext.length % 4) throw new Error();
       } catch { throw new CredentialStoreError('invalid_envelope'); }
@@ -112,7 +116,7 @@ export class CurrentUserCredentialStore {
       let cipher;
       try { cipher = await this.#crypt('Protect', plain); }
       finally { plain.fill(0); }
-      const content = `${JSON.stringify({ version: 1, protection: 'dpapi-current-user', ciphertext: cipher.toString('base64') })}\n`;
+      const content = `${JSON.stringify({ version: 1, protection: this.#mac ? 'macos-keychain-aes-gcm' : 'dpapi-current-user', ciphertext: cipher.toString('base64') })}\n`;
       const temporary = `${this.#path}.${randomBytes(12).toString('hex')}.tmp`;
       try {
         await mkdir(dirname(this.#path), { recursive: true, mode: 0o700 });

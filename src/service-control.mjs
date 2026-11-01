@@ -7,6 +7,7 @@ import { BridgeError, readJson, writeJson, redact } from './storage.mjs';
 export function createServiceControl({ stateDir, projectDir, getActiveRequests, onRestart,
   processId = process.pid, parentProcessId = process.ppid, platform = process.platform, now = Date.now,
   read = readJson, write = writeJson, remove = unlink, version = null,
+  supervisorOwner = null,
   idleCheckMs = 1_000, schedule = setTimeout, unschedule = clearTimeout } = {}) {
   if (!Number.isFinite(idleCheckMs) || idleCheckMs < 1) throw new TypeError('idleCheckMs must be positive.');
   const directory = join(stateDir, 'service');
@@ -22,6 +23,10 @@ export function createServiceControl({ stateDir, projectDir, getActiveRequests, 
     return count;
   }
   async function owner() {
+    if (platform === 'darwin' && typeof supervisorOwner === 'function') {
+      const identity = await supervisorOwner();
+      return /^[A-F0-9]{64}$/.test(identity?.OwnerId ?? '') ? identity : null;
+    }
     if (platform !== 'win32') return null;
     const config = await read(join(directory, 'service.json'), null);
     const identity = await read(join(directory, 'process.json'), null);

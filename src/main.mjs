@@ -10,7 +10,7 @@ import { SubscriptionBackend } from './backend.mjs';
 import { Gateway } from './gateway.mjs';
 import { Integration } from './integration.mjs';
 import { createBridgeServer } from './server.mjs';
-import { readJson, writeJson, redact } from './storage.mjs';
+import { readJson, writeJson, redact, BridgeError } from './storage.mjs';
 import { UsageLedger } from './usage-ledger.mjs';
 import { AccountQuotas } from './account-quotas.mjs';
 import { startMessagesService } from './messages-service.mjs';
@@ -38,6 +38,7 @@ import { loadPaymentRuntime } from './payments/runtime.mjs';
 import { startServerRemotes } from './runtime/server-remotes.mjs';
 import { UpstreamAccountStore } from './upstream-account-store.mjs';
 import { UpstreamAccounts, gatedAccountService } from './upstream-accounts.mjs';
+import { readLaunchdOwner } from './launchd-owner.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serviceVersion = await createServiceVersion({ projectDir });
@@ -47,7 +48,11 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('BRI
 const stateDir = resolve(process.env.BRIDGE_STATE_DIR || join(homedir(), '.codex-account-bridge'));
 // Read the migration latch before constructing any old Codex credential owner.
 const delegation = await loadMagpieDelegation(join(stateDir, 'magpie-delegation.json'));
-const macClaude = await loadMacClaudeClient(process.env.BRIDGE_MAC_CLAUDE_CONFIG);
+const modelPolicy = await ModelPolicy.open({ path: join(stateDir, 'model-policy.json') });
+const macClaude = await loadMacClaudeClient(process.env.BRIDGE_MAC_CLAUDE_CONFIG, { onCatalog: async models => {
+  await modelPolicy.observe({ models: models.filter(m => ['Claude-opus', 'Claude-sonnet'].includes(m.id)) }, 'Claude');
+  await modelPolicy.observe({ models }, 'Claude', { complete: true, defaultEnabled: false });
+} });
 const nativeIntegration = !macClaude && !delegation;
 const aHome = resolve(process.env.BRIDGE_CLIENT_CODEX_HOME || process.env.CODEX_HOME || join(homedir(), '.codex'));
 const bHome = join(stateDir, 'accounts', 'account-b');
@@ -86,7 +91,6 @@ else if (!delegation) {
 const accountStore = delegation ? null : await UpstreamAccountStore.open({ stateDir, seeds });
 const hasSlot = slot => accountStore?.snapshot().accounts.some(a => a.enabled && a.binding.slot === slot) === true;
 const sourceAllowed = (channel, model) => accountPool ? accountPool.allows(channel, model) : channel === 'A' || hasSlot(channel);
-const modelPolicy = await ModelPolicy.open({ path: join(stateDir, 'model-policy.json') });
 try { requestDiagnostics = await RequestDiagnostics.open({ path: join(stateDir, 'request-diagnostics.jsonl') }); }
 catch { console.error('Request diagnostics unavailable; model forwarding remains enabled.'); }
 function authorizationVersion(account) {
@@ -114,9 +118,9 @@ if (nativeIntegration && modelPolicy.snapshot().available) {
     await modelPolicy.observe({ models: [...B_MODELS, CODEBUDDY_CODEX_MODEL, ...CURSOR_MODELS] });
   } catch (error) { console.error(`Model settings: ${redact(error.message)}`); }
 }
-const cursorService = nativeIntegration && hasSlot('Cursor') ? await startCursorService({ stateDir, getGatewayStatus: () => gateway?.cursorStatus() }) : null;
+const cursorService = !delegation && hasSlot('Cursor') ? await startCursorService({ stateDir, getGatewayStatus: () => gateway?.cursorStatus() }) : null;
 cursorProvider = cursorService ? new CursorResponsesProvider({ cursorService, stateDir, promptMode: cursorService.promptMode ?? 'project-rules' }) : null;
-const codeBuddyService = nativeIntegration && hasSlot('CodeBuddy') ? await startCodeBuddyService({ stateDir,
+const codeBuddyService = !delegation && hasSlot('CodeBuddy') ? await startCodeBuddyService({ stateDir,
   getGatewayStatus: () => {
     const messages = withService?.channelStatus('CodeBuddy');
     const codex = gateway?.codeBuddyStatus();
@@ -132,10 +136,11 @@ const gatedCodeBuddy = gatedAccountService(codeBuddyService, () => sourceAllowed
 const gatedCursor = gatedAccountService(cursorService, () => sourceAllowed('Cursor'));
 const modelDiscovery = new ModelDiscovery({ modelPolicy, codeBuddyService: gatedCodeBuddy, cursorService: gatedCursor });
 const providerQuotas = nativeIntegration ? new ProviderQuotas({ codeBuddyService: gatedCodeBuddy, cursorService: gatedCursor }) : null;
-const clientModels = () => (macClaude ? macClaude.models() : modelPolicy.snapshot().models.filter(model => ['B', 'CodeBuddy', 'Cursor'].includes(model.channel)))
+const clientModels = () => modelPolicy.snapshot().models.filter(model => ['B', 'CodeBuddy', 'Cursor', 'Bifrost', ...(macClaude ? ['Claude'] : [])].includes(model.channel))
   .map(model => ({ id: model.id, name: model.name, channel: model.channel,
     enabled: model.enabled !== false && sourceAllowed(model.channel, model.id) && !modelPolicy.snapshot().disabledModels.includes(model.id), available: model.available,
-    protocols: model.protocols ?? ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])] }));
+    protocols: model.protocols ?? (model.channel === 'Claude' ? ['chat-completions', 'messages']
+      : ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])]) }));
 if (userManagementRequested) try {
   clientAccess = await ClientAccess.open({ path: join(stateDir, 'client-access.json'), allowedModelIds: () => clientModels().map(model => model.id),
     ...(macClaude ? { maxAccounts: macClaude.web.maxAccounts } : {}) });
@@ -148,25 +153,30 @@ if (userManagementRequested) try {
       message: clientBilling ? '用户入口尚未启动。' : '用户计费账本未就绪，入口已停止接入。' } });
 } catch { console.error('Client access unavailable; existing model routing remains enabled.'); }
 // Load optional account catalogs without delaying the gateway or starting inference.
-if (nativeIntegration) void modelDiscovery.refresh().catch(error => console.error(`Model discovery: ${redact(error.message)}`));
-if (nativeIntegration) {
+if (!delegation) void modelDiscovery.refresh().catch(error => console.error(`Model discovery: ${redact(error.message)}`));
+if (!delegation) {
   try { serverRemotes = await startServerRemotes({ stateDir, secret: state.gatewayKey }); }
   catch { console.error('Remote sources unavailable; existing local sources remain enabled. Check the protected remote configuration.'); }
   modelPolicy.setAuthorizationVersionGetter('Bifrost', () => serverRemotes?.generation ?? null);
-  const binary = process.env.CODEX_BINARY || 'codex';
-  const { stdout: versionOutput } = await promisify(execFile)(binary, ['--version'], {
-    windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024,
-  });
-  clientVersion = versionOutput.match(/codex-cli\s+(\S+)/)?.[1];
-  if (!clientVersion) throw new Error('无法识别官方 Codex CLI 的版本。');
-  backendRpc = hasSlot('B') ? new CodexRpc({ binary, home: bHome, cwd: bHome, isolated: true }) : null;
-  configRpc = new CodexRpc({ binary, home: aHome, cwd: homedir() });
-  backend = backendRpc ? new SubscriptionBackend({ rpc: backendRpc, state, saveState }) : null;
-  accountQuotas = backendRpc ? new AccountQuotas({ accountARpc: configRpc, accountBRpc: backendRpc, state }) : null;
-  integration = new Integration({ rpc: configRpc, configPath: join(aHome, 'config.toml'),
-    statePath: join(stateDir, 'integration.json'), baseUrl, gatewayKey: state.gatewayKey });
+  if (nativeIntegration) {
+    const binary = process.env.CODEX_BINARY || 'codex';
+    const { stdout: versionOutput } = await promisify(execFile)(binary, ['--version'], {
+      windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024,
+    });
+    clientVersion = versionOutput.match(/codex-cli\s+(\S+)/)?.[1];
+    if (!clientVersion) throw new Error('无法识别官方 Codex CLI 的版本。');
+    backendRpc = hasSlot('B') ? new CodexRpc({ binary, home: bHome, cwd: bHome, isolated: true }) : null;
+    configRpc = new CodexRpc({ binary, home: aHome, cwd: homedir() });
+    backend = backendRpc ? new SubscriptionBackend({ rpc: backendRpc, state, saveState }) : null;
+    accountQuotas = backendRpc ? new AccountQuotas({ accountARpc: configRpc, accountBRpc: backendRpc, state }) : null;
+    integration = new Integration({ rpc: configRpc, configPath: join(aHome, 'config.toml'),
+      statePath: join(stateDir, 'integration.json'), baseUrl, gatewayKey: state.gatewayKey });
+  }
   gateway = new Gateway({ backend, gatewayKey: state.gatewayKey,
-    getAProvider: () => integration.originalProvider(),
+    getAProvider: () => {
+      if (!integration) throw new BridgeError('当前网关未装配本机 Codex 官方连接。', 503, 'node_capability_unavailable');
+      return integration.originalProvider();
+    },
     codeBuddyProvider: codeBuddyService ? new CodeBuddyResponsesProvider({ provider: codeBuddyService.provider }) : null,
     codeBuddyEnabled: () => codeBuddyService?.enabled === true && sourceAllowed('CodeBuddy'),
     getCodeBuddyModels: () => codeBuddyService?.getModels() ?? [],
@@ -174,7 +184,7 @@ if (nativeIntegration) {
     modelPolicy, remoteSources: serverRemotes,
     cursorProvider, cursorEnabled: () => cursorService?.enabled === true && sourceAllowed('Cursor'), getCursorModels: () => cursorService?.getModels() ?? [],
     getCursorAuthorizationVersion: () => cursorService?.authorizationVersion,
-    sourceEnabled: sourceAllowed,
+    sourceEnabled: (channel, model) => channel === 'A' ? nativeIntegration : sourceAllowed(channel, model),
     isDraining: () => serviceControl?.draining === true,
     onDiagnostic: recordDiagnostic, getAuthorizationVersion: authorizationVersion,
     onUsage: record => {
@@ -182,7 +192,7 @@ if (nativeIntegration) {
       return usageLedger.record(record);
     } });
   // Prime B metadata without delaying A traffic or the local management page.
-  void gateway.readBCatalog(`/models?client_version=${encodeURIComponent(clientVersion)}`).catch(() => {});
+  if (nativeIntegration) void gateway.readBCatalog(`/models?client_version=${encodeURIComponent(clientVersion)}`).catch(() => {});
 }
 const verificationPath = join(stateDir, 'verification.json');
 withService = nativeIntegration && ['With', 'CodeBuddy', 'Claude'].some(hasSlot) ? await startMessagesService({ stateDir, reservedPorts: [port],
@@ -194,32 +204,34 @@ withService = nativeIntegration && ['With', 'CodeBuddy', 'Claude'].some(hasSlot)
   return usageLedger.record(record);
 } }) : null;
 if (accountStore) {
-  if (macClaude) await modelPolicy.observe({ models: macClaude.models() }, 'Claude', { complete: true });
   accountPool = new UpstreamAccounts({ store: accountStore,
-    types: macClaude ? ['claude'] : ['codex', ...(process.platform === 'win32' ? ['codebuddy', 'cursor', 'bifrost'] : []), ...seeds.filter(s => ['with', 'claude', 'codebuddy', 'cursor'].includes(s.kind)).map(s => s.kind)],
+    types: [...(macClaude ? ['claude'] : ['codex']), ...(['win32', 'darwin'].includes(process.platform) ? ['codebuddy', 'cursor', 'bifrost'] : []), ...seeds.filter(s => ['with', 'claude', 'codebuddy', 'cursor'].includes(s.kind)).map(s => s.kind)],
     readers: {
       claude: () => macClaude ? { configured: true, ready: macClaude.status().available, authenticated: null } : withService?.status(),
       codex: () => ({ configured: Boolean(backend), authenticated: Boolean(backend?.account), bound: Boolean(state.enabled && state.pinnedAccount && backend?.account) }),
       codebuddy: () => codeBuddyService?.status(), cursor: () => cursorService?.status(), with: () => withService?.status() },
     getRemotes: () => serverRemotes, modelPolicy,
-    getModels: () => {
-      const policy = modelPolicy.snapshot();
-      return macClaude ? macClaude.models().map(m => ({ ...policy.models.find(p => p.id === m.id), ...m,
-        enabled: !policy.disabledModels.includes(m.id) })) : policy.models;
-    },
+    getModels: () => modelPolicy.snapshot().models,
     refreshModels: async () => {
       if (macClaude) {
-        await modelPolicy.observe({ models: macClaude.models() }, 'Claude', { complete: true });
-        return { discovery: { Claude: { state: !sourceAllowed('Claude') ? 'disabled' : macClaude.status().available ? 'ready' : 'error',
-          count: macClaude.models().length } } };
+        await macClaude.refresh();
       }
-      const discovered = await modelDiscovery.refresh(); await gateway?.observeRemotes(); return discovered;
+      const discovered = await modelDiscovery.refresh(); await gateway?.observeRemotes();
+      return { discovery: { ...Object.fromEntries(Object.entries(discovered.discovery ?? {}).filter(([kind]) => hasSlot(kind))),
+        ...(macClaude ? { Claude: { state: !sourceAllowed('Claude') ? 'disabled' : macClaude.status().available ? 'ready' : 'error', count: macClaude.models().length } } : {}) } };
     },
     capabilities: () => ({ accountPool: true, clientIntegration: Boolean(integration), userManagement: clientService?.status().enabled === true,
-      billing: Boolean(clientBilling), diagnostics: Boolean(requestDiagnostics), activeKinds: accountPool?.rows().filter(a => a.enabled).map(a => a.kind) ?? [] }),
+      billing: Boolean(clientBilling), diagnostics: Boolean(requestDiagnostics), activeKinds: accountPool?.rows().filter(a => a.enabled
+        && (a.kind === 'claude' || a.kind === 'cursor' && cursorService || a.kind === 'codebuddy' && codeBuddyService
+          || a.kind === 'codex' && backend || a.kind === 'bifrost' && serverRemotes || a.kind === 'with' && withService)).map(a => a.kind) ?? [] }),
   });
 }
+const sourceCatalogTimer = delegation ? null : setInterval(() => {
+  void modelDiscovery.refresh().then(() => gateway?.observeRemotes()).catch(() => {});
+}, 30000);
+sourceCatalogTimer?.unref();
 serviceControl = createServiceControl({ stateDir, projectDir, version: serviceVersion,
+  supervisorOwner: () => readLaunchdOwner({ label: process.env.BRIDGE_LAUNCHD_LABEL, stateDir, projectDir }),
   getActiveRequests: () => (gateway?.pendingRequests ?? 0) + (withService?.activeRequests ?? 0) +
     Math.max(0, (cursorProvider?.activeRuns ?? 0) - (gateway?.metrics.accounts.Cursor.active ?? 0)) +
     (server?.activeAdminOperations ?? 0) + (clientService?.activeRequests ?? 0),
@@ -292,6 +304,7 @@ async function shutdown(code = 0) {
     return;
   }
   server.close(); server.closeAllConnections();
+  clearInterval(sourceCatalogTimer);
   await clientService?.close();
   await paymentRuntime?.close();
   await macClaude?.close();

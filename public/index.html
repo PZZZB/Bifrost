@@ -275,7 +275,7 @@
         <p class="gateway-error" id="pool-error" role="status" hidden></p><p class="inline-status" id="pool-message" role="status" aria-live="polite"></p>
         <form class="panel pool-create" id="pool-create" hidden>
           <h3>添加账号</h3><div class="pool-fields"><label>账号类型<select id="pool-kind" required></select></label><label>账号名称<input id="pool-name" maxlength="80" autocomplete="off" required></label></div>
-          <p class="footnote" id="pool-kind-note"></p><div id="pool-remote-fields" hidden><div class="pool-fields"><label>用户 API 地址<input id="pool-remote-url" type="url" placeholder="https://gateway.example.com/v1" autocomplete="off"></label><label>个人用户 Key<input id="pool-remote-key" type="password" autocomplete="off" spellcheck="false"></label></div></div>
+          <p class="footnote" id="pool-kind-note"></p><p class="panel-copy" id="pool-kind-blocked" role="status" hidden></p><div id="pool-remote-fields" hidden><div class="pool-fields"><label>用户 API 地址<input id="pool-remote-url" type="url" placeholder="https://gateway.example.com/v1" autocomplete="off"></label><label>个人用户 Key<input id="pool-remote-key" type="password" autocomplete="off" spellcheck="false"></label></div></div>
           <div class="button-row"><button class="button primary" id="pool-create-submit" type="submit">保存账号</button><button class="button quiet" id="pool-create-cancel" type="button">取消</button></div>
         </form>
         <div id="pool-list" class="pool-list" aria-label="当前网关的账号池"><p class="panel-copy">正在读取当前网关…</p></div>

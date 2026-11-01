@@ -30,7 +30,9 @@ test('a configured Claude node boots without Codex, discovers its own pool and p
   // Historical foreign settings must not activate unrelated services in this node.
   await save(join(state, 'codebuddy.json'), { enabled: true }); await save(join(state, 'cursor.json'), { enabled: true });
   const preload = join(dir, 'fixture-fetch.mjs');
-  await save(preload, `globalThis.fetch=async (url)=>{if(url==='http://127.0.0.1:43157/v1/models')return Response.json({data:[{id:'claude-opus',display_name:'Claude Opus'},{id:'claude-sonnet',display_name:'Claude Sonnet'}]});throw new Error('Unexpected transport in isolated runtime test');};`);
+  const catalogFile = join(dir, 'catalog.json');
+  await save(catalogFile, { data: [{ id: 'claude-opus', display_name: 'Claude Opus' }, { id: 'claude-sonnet', display_name: 'Claude Sonnet' }] });
+  await save(preload, `import{readFile}from'node:fs/promises';globalThis.fetch=async(url)=>{if(url==='http://127.0.0.1:43157/v1/models')return Response.json(JSON.parse(await readFile(${JSON.stringify(catalogFile)},'utf8')));throw new Error('Unexpected transport in isolated runtime test');};`);
   const root = `http://127.0.0.1:${adminPort}`; let child, cookie, csrf, output = '';
   const env = { PATH: process.env.PATH, BRIDGE_PORT: String(adminPort), BRIDGE_STATE_DIR: state,
     BRIDGE_CLIENT_CODEX_HOME: join(dir, 'unused-home'), BRIDGE_MAC_CLAUDE_CONFIG: join(state, 'mac.json'),
@@ -93,11 +95,24 @@ test('a configured Claude node boots without Codex, discovers its own pool and p
   assert.equal(settings.data.models[0].compatibility.mode, 'protocol-adapter');
   const selection = await read('/api/model-settings', { revision: settings.data.revision, disabledModels: ['Claude-opus'] }); assert.equal(selection.status, 200);
   assert.deepEqual((await userModels()).map(m => m.id), ['Claude-sonnet']);
+  await save(catalogFile, { data: [{ id: 'claude-opus', display_name: 'Claude Opus' }, { id: 'claude-sonnet', display_name: 'Claude Sonnet' },
+    { id: 'claude-haiku', display_name: 'Claude Haiku' }, { id: 'claude-fable-5-1-1m', display_name: 'Claude Fable' }] });
+  const expanded = await read('/api/model-settings'); assert.equal(expanded.data.models.length, 4);
+  for (const id of ['Claude-haiku', 'Claude-fable-5-1-1m']) assert.equal(expanded.data.models.find(m => m.id === id).enabled, false);
+  assert.deepEqual((await userModels()).map(m => m.id), ['Claude-sonnet'], 'Newly discovered models do not gain permission or publication automatically');
+  if (['darwin', 'win32'].includes(process.platform)) {
+    const added = await read('/api/upstream-accounts', { kind: 'cursor', name: 'Independent Cursor' }); assert.equal(added.status, 200);
+    assert.equal(added.data.accounts.find(a => a.kind === 'cursor').restartRequired, true);
+  }
   const before = (await read('/api/client-admin')).data.accounts.find(a => a.id === accountId).billing;
   assert.equal(before.balanceMicros, 0); assert.equal(before.reservedMicros, 0);
   await stop(); await start(); pool = (await read('/api/upstream-accounts')).data;
   assert.equal(pool.accounts[0].name, 'My isolated Claude'); assert.equal(pool.accounts[0].id, id);
   assert.deepEqual((await userModels()).map(m => m.id), ['Claude-sonnet']);
+  assert.equal((await read('/api/model-settings')).data.models.length, 4);
+  if (['darwin', 'win32'].includes(process.platform)) {
+    const cursor = await read('/api/cursor'); assert.equal(cursor.status, 200); assert.equal(cursor.data.configured, true); assert.equal(cursor.data.authReady, false);
+  }
   const after = (await read('/api/client-admin')).data.accounts.find(a => a.id === accountId).billing;
   assert.deepEqual(after, before);
   for (const file of ['codebuddy-auth.dpapi.json', 'cursor-auth.dpapi.json', 'accounts/account-b/auth.json']) await assert.rejects(access(join(state, file)));

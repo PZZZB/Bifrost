@@ -126,7 +126,9 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       }
       if (!url.pathname.startsWith('/api/')) throw new BridgeError('页面不存在。', 404);
       checkBrowser(req);
-      if (accountPool && !accountPool.capabilities().clientIntegration && !/^\/api\/(?:status$|node$|upstream-account-types$|upstream-accounts(?:\/|$)|client-admin(?:\/|$)|service\/|model-settings$|request-diagnostics(?:\/|$)|token-usage$)/.test(url.pathname)) {
+      const sourceManagement = accountPool?.rows?.().some(a => a.enabled && (a.kind === 'cursor' && cursorService && /^\/api\/cursor(?:\/|$)/.test(url.pathname)
+        || a.kind === 'codebuddy' && codeBuddyService && /^\/api\/codebuddy(?:\/|$)/.test(url.pathname)));
+      if (accountPool && !accountPool.capabilities().clientIntegration && !sourceManagement && !/^\/api\/(?:status$|node$|upstream-account-types$|upstream-accounts(?:\/|$)|client-admin(?:\/|$)|service\/|model-settings$|request-diagnostics(?:\/|$)|token-usage$)/.test(url.pathname)) {
         throw new BridgeError('当前网关未启用此管理能力。', 404, 'node_capability_unavailable');
       }
       if (req.method === 'GET') {

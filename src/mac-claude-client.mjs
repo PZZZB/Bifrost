@@ -3,7 +3,7 @@ import { readPrivateAccountFile } from './private-account-files.mjs';
 import { BridgeError } from './storage.mjs';
 
 /** Optional fixed upstream for the main account/billing service. No login here. */
-export async function loadMacClaudeClient(path, { fetchImpl = fetch } = {}) {
+export async function loadMacClaudeClient(path, { fetchImpl = fetch, onCatalog = async () => {} } = {}) {
   if (!path) return null;
   const config = JSON.parse(await readPrivateAccountFile(path, 8192));
   if (config.version !== 1 || config.upstreamPort !== 43157 || !config.webAccountsFile) throw new Error('Invalid Mac Claude configuration.');
@@ -27,11 +27,16 @@ export async function loadMacClaudeClient(path, { fetchImpl = fetch } = {}) {
         const data = JSON.parse(bytes);
         if (!Array.isArray(data.data) || data.data.length > 100) throw new Error();
         const entries = data.data.filter(model => /^claude-[a-z0-9][a-z0-9._-]{0,120}$/.test(model?.id));
-        models = entries.map(model => ({ id: `Claude-${model.id.slice(7)}`, upstream: model.id,
+        const discovered = entries.map(model => ({ id: `Claude-${model.id.slice(7)}`, upstream: model.id,
           name: typeof model.display_name === 'string' && model.display_name.length < 200 ? model.display_name : 'Claude',
+          ...(typeof model.supportsReasoning === 'boolean' ? { supportsReasoning: model.supportsReasoning } : {}),
+          ...(Array.isArray(model.efforts) ? { efforts: model.efforts.filter(e => ['low','medium','high','xhigh','max'].includes(e)) } : {}),
           channel: 'Claude', enabled: true, available: true, protocols: ['chat-completions', 'messages'] }));
+        if (new Set(discovered.map(m => m.id)).size !== discovered.length) throw new Error();
+        await onCatalog(discovered.map(({ upstream, ...model }) => model));
+        models = discovered;
         lastAvailable = true;
-      } catch { models = []; lastAvailable = false; }
+      } catch { models = []; lastAvailable = false; await onCatalog([]).catch(() => {}); }
       finally { refreshPending = null; }
     })();
     return refreshPending;

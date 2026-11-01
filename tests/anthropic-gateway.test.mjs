@@ -262,3 +262,18 @@ test('duplicate models and invalid route contracts fail during construction', ()
   assert.throws(() => new AnthropicGateway({ routes: [route], gatewayKey, allowedHosts: gatewayHost }), TypeError);
   assert.throws(() => new AnthropicGateway({ routes: [route], gatewayKey, allowedPeers: '127.0.0.1' }), TypeError);
 });
+
+test('discovered routes replace atomically while preserving account metrics and active provider bindings', async t => {
+  const first = providerFixture(), second = providerFixture();
+  const { gateway, send } = await gatewayFixture(t, [{ account: 'Claude', model: firstModel, provider: first }]);
+  assert.equal((await send('/v1/messages', { model: firstModel.id, messages: [] })).status, 200);
+  gateway.replaceRoutes([{ account: 'Claude', model: firstModel, provider: first }, { account: 'Claude', model: secondModel, provider: second }]);
+  assert.equal(gateway.status('Claude').completed, 1);
+  assert.equal((await send('/v1/messages', { model: secondModel.id, messages: [] })).status, 200);
+  assert.equal(gateway.status('Claude').completed, 2);
+  assert.throws(() => gateway.replaceRoutes([{ account: 'Claude', model: firstModel, provider: first }, { account: 'Claude', model: firstModel, provider: second }]));
+  assert.deepEqual([...gateway.routes.keys()], [firstModel.id, secondModel.id]);
+  gateway.replaceRoutes([{ account: 'Claude', model: secondModel, provider: second }]);
+  assert.equal((await send('/v1/messages', { model: firstModel.id, messages: [] })).status, 400);
+  assert.equal(first.calls.length, 1);
+});

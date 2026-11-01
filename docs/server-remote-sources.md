@@ -15,6 +15,10 @@ flowchart LR
 
 本功能复用 Desktop 的 `BifrostRemote`、`ModelRouter`、Messages/Responses 转换和状态封装。Server 保留自己的监听、原有 A/B、CodeBuddy、Cursor 路由及 Codex 集成。新部署且尚无 Server 的场景可选择 [独立 Desktop 网关](desktop-gateway.md)。
 
+## 网页与 Mac 配置
+
+在当前网关“账号池”点击“添加账号”，选择 Bifröst 用户账号。Mac 使用当前用户 Keychain 的密钥保护 AES-GCM 凭据文件；Windows 继续用 DPAPI。保存后通过原服务空闲重启加载，不另开第二个用户服务进程。模型是否开放以节点保存的选择为准，用户／Key 权限继续独立校验。
+
 ## Windows 配置
 
 在原有网关仓库目录执行：

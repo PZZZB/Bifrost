@@ -125,18 +125,25 @@ export class AnthropicGateway {
     this.pendingRequests = 0;
     this.routes = new Map();
     this.accountMetrics = new Map();
+    this.replaceRoutes(routes);
+  }
+
+  replaceRoutes(routes) {
+    if (!Array.isArray(routes)) throw new TypeError('Anthropic model routes must be an array.');
+    const next = new Map(), metrics = new Map(this.accountMetrics);
     for (const route of routes) {
       if (!route || typeof route.account !== 'string' || !route.account ||
           typeof route.model?.id !== 'string' || !route.model.id ||
-          typeof route.model.name !== 'string' || !route.model.name || this.routes.has(route.model.id) ||
+          typeof route.model.name !== 'string' || !route.model.name || next.has(route.model.id) ||
           (route.model.upstream !== undefined && (typeof route.model.upstream !== 'string' || !route.model.upstream)) ||
           typeof route.provider?.request !== 'function' || typeof route.provider?.status !== 'function') {
         throw new TypeError('Invalid Anthropic model route.');
       }
-      if (!this.accountMetrics.has(route.account)) this.accountMetrics.set(route.account, emptyMetrics());
-      this.routes.set(route.model.id, { account: route.account, model: { ...route.model },
-        provider: route.provider, metrics: this.accountMetrics.get(route.account) });
+      if (!metrics.has(route.account)) metrics.set(route.account, emptyMetrics());
+      next.set(route.model.id, { account: route.account, model: { ...route.model },
+        provider: route.provider, metrics: metrics.get(route.account) });
     }
+    this.routes = next; this.accountMetrics = metrics;
     this.metrics = this.routes.values().next().value?.metrics ?? this.metrics;
   }
 
@@ -258,7 +265,8 @@ export class AnthropicGateway {
         const data = [];
         for (const route of this.routes.values()) {
           if (this.isAccountEnabled(route.account, route.model.id) === true && await this.modelAvailable(route)) {
-            data.push({ id: route.model.id, type: 'model', display_name: route.model.name });
+            data.push({ id: route.model.id, type: 'model', display_name: route.model.name,
+              ...Object.fromEntries(['description', 'resolvedModel', 'supportsReasoning', 'efforts'].filter(k => route.model[k] !== undefined).map(k => [k, route.model[k]])) });
           }
         }
         json(res, 200, { data, has_more: false, first_id: data[0]?.id ?? null, last_id: data.at(-1)?.id ?? null });

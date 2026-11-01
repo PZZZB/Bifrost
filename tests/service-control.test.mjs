@@ -301,3 +301,14 @@ test('service status exposes captured version metadata and handles unavailable o
   assert.deepEqual(safe.version, { running: null, installed: null, updatePending: null, state: 'unknown' });
   assert.equal(JSON.stringify(safe).includes('secret'), false);
 });
+
+test('a verified Mac supervisor uses the same idle and acknowledgement gates and rechecks identity before exit', async () => {
+  let identity = { OwnerId: 'B'.repeat(64) };
+  const f = fixture({ platform: 'darwin', controlOptions: { supervisorOwner: async () => identity } });
+  assert.equal((await f.controller.status()).supported, true);
+  f.setActive(1); await assert.rejects(f.controller.request({ allowInterrupt: false }), e => e.code === 'gateway_busy');
+  f.setActive(0); await f.controller.request({ allowInterrupt: false }); assert.equal(f.stopped(), 0);
+  identity = null; await f.controller.activate(); assert.equal(f.stopped(), 0);
+  identity = { OwnerId: 'B'.repeat(64) };
+  await f.controller.request({ allowInterrupt: false }); await f.controller.activate(); assert.equal(f.stopped(), 1);
+});

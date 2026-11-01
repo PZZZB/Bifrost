@@ -11,6 +11,7 @@
     { "id": "claude-opus", "name": "Claude Opus", "upstream": "opus" }
   ],
   "mcpPort": 3436,
+  "modelDiscovery": { "enabled": true },
   "cli": {
     "binary": "/home/claude/.local/bin/claude",
     "configDir": "/home/claude/.claude",

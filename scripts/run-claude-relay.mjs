@@ -4,10 +4,14 @@ import { isIP } from 'node:net';
 import { createClaudeGatewayServer, ChatHistoryStore } from '../src/openai-chat-gateway.mjs';
 import { ClaudeCliHub } from '../src/claude-cli-provider.mjs';
 import { startRelayControl } from '../src/relay-control.mjs';
+import { discoverClaudeModels } from '../src/claude-model-catalog.mjs';
 
 let hub, server, control, controlStart, closing;
+let catalogTimer, catalogPending;
+const catalogAbort = new AbortController();
 function close() {
   return closing ??= (async () => {
+    clearInterval(catalogTimer); catalogAbort.abort(); await catalogPending?.catch(() => {});
     await controlStart?.then(value => value.close(), () => {});
     const results = await Promise.allSettled([
       server && new Promise(done => { server.close(done); server.closeAllConnections(); }),
@@ -46,6 +50,16 @@ try {
   server = createClaudeGatewayServer({ gatewayKey,
     allowedHosts: config.listener.allowedHosts, allowedPeers: config.listener.allowedPeers,
     routes: config.models.map(model => ({ account: 'Claude', model, provider: hub.provider(model.upstream) })) }, { history });
+  if (config.modelDiscovery?.enabled === true) {
+    const refreshCatalog = () => catalogPending ??= (async () => {
+      try {
+        const models = (await hub.status()).authenticated ? await discoverClaudeModels({ ...config.cli, signal: catalogAbort.signal }) : [];
+        if (!catalogAbort.signal.aborted) server.gateway.replaceRoutes(models.map(model => ({ account: 'Claude', model, provider: hub.provider(model.upstream) })));
+      } catch { if (!catalogAbort.signal.aborted) server.gateway.replaceRoutes([]); }
+    })().finally(() => { catalogPending = null; });
+    await refreshCatalog();
+    catalogTimer = setInterval(() => { void refreshCatalog(); }, 60000); catalogTimer.unref();
+  }
   await new Promise((yes, no) => {
     server.once('error', no); server.listen(config.listener.port, config.listener.address, () => {
       server.off('error', no); yes();
@@ -60,7 +74,7 @@ try {
   process.once('SIGINT', signalStop); process.once('SIGTERM', signalStop);
   process.stdout.write(`${JSON.stringify({ event: 'ready', transport: 'official-claude-sdk',
     listener: server.address(), controlPipe: control.address(),
-    configuredModels: config.models.map(model => model.id), realInference: false })}\n`);
+    configuredModels: [...server.gateway.routes.keys()], realInference: false })}\n`);
 } catch {
   await close().catch(() => {});
   process.stderr.write('Claude relay could not start. Check the private configuration, official CLI and listener.\n');

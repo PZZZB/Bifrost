@@ -1851,6 +1851,7 @@ async function refreshAccountQuotas() {
   return accountQuotasRequest;
 }
 async function refreshAuthorizedAccountQuotas() {
+  if (status?.node?.capabilities) return;
   if (accountQuotasRequest) await accountQuotasRequest;
   await refreshAccountQuotas();
 }

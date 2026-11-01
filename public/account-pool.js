@@ -41,8 +41,8 @@
     if (!snapshot) return;
     applyCapabilities();
     const rows = snapshot.accounts, list = byId('pool-list'); list.replaceChildren();
-    byId('pool-add').disabled = busy || !snapshot.accountTypes.some(t => t.canAdd);
-    byId('pool-add').title = snapshot.accountTypes.some(t => t.canAdd) ? '' : '当前已接入全部可用账号；受管账号需先在独立环境完成配置。';
+    byId('pool-add').disabled = busy;
+    byId('pool-add').title = '查看当前网关支持的账号类型与添加条件';
     byId('pool-refresh').disabled = busy;
     if (!rows.length) list.append(element('p', '尚未添加上游账号。请选择当前网关支持的账号类型完成接入。', 'panel-copy'));
     for (const account of rows) {
@@ -102,20 +102,27 @@
     const kind = byId('pool-kind').value, type = snapshot?.accountTypes.find(t => t.kind === kind);
     if (formKind !== kind) byId('pool-remote-key').value = '';
     formKind = kind; byId('pool-kind-note').textContent = type ? `${type.authorization} · 当前最多 ${type.maxAccounts} 个实例` : '';
+    const canAdd = type?.canAdd === true;
+    byId('pool-kind-blocked').textContent = type?.addBlockedReason || (type ? '' : '当前网关没有可用的账号适配器。');
+    byId('pool-kind-blocked').hidden = canAdd;
+    byId('pool-name').disabled = !canAdd;
+    byId('pool-create-submit').disabled = busy || !canAdd;
     byId('pool-remote-fields').hidden = kind !== 'bifrost';
     byId('pool-remote-url').required = kind === 'bifrost'; byId('pool-remote-key').required = kind === 'bifrost';
   }
   byId('pool-add').addEventListener('click', () => {
     if (!snapshot || busy) return;
     const select = byId('pool-kind'); select.replaceChildren();
-    for (const type of snapshot.accountTypes.filter(t => t.canAdd)) { const option = element('option', type.label); option.value = type.kind; select.append(option); }
+    for (const type of snapshot.accountTypes) { const option = element('option', `${type.label}${type.canAdd ? '' : '（查看接入条件）'}`); option.value = type.kind; select.append(option); }
+    select.value = snapshot.accountTypes.find(t => t.canAdd)?.kind || snapshot.accountTypes[0]?.kind || '';
     typeFields(); byId('pool-create').hidden = false; byId('pool-name').focus();
   });
   byId('pool-kind').addEventListener('change', typeFields);
-  byId('pool-refresh').addEventListener('click', () => { void load(); });
+  byId('pool-refresh').addEventListener('click', () => { void request('/api/model-settings').then(() => load()).catch(failure); });
   byId('pool-create-cancel').addEventListener('click', () => { byId('pool-create').reset(); byId('pool-create').hidden = true; });
   byId('pool-create').addEventListener('submit', event => {
     event.preventDefault(); if (busy || !snapshot) return;
+    if (!snapshot.accountTypes.some(t => t.kind === formKind && t.canAdd)) return;
     const body = { kind: formKind, name: byId('pool-name').value.trim(), ...(formKind === 'bifrost'
       ? { baseUrl: byId('pool-remote-url').value.trim(), apiKey: byId('pool-remote-key').value.trim() } : {}) };
     byId('pool-remote-key').value = ''; busy = true; byId('pool-create-submit').disabled = true;
