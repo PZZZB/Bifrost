@@ -20,7 +20,7 @@
     "verify:web-accounts": "node scripts/verify-web-accounts-offline.mjs",
     "verify:codex": "node scripts/verify-codex.mjs",
     "verify:desktop-codex": "node scripts/verify-desktop-codex-offline.mjs",
-    "check": "node --check src/main.mjs && node --check src/upstream-accounts.mjs && node --check src/upstream-account-store.mjs && node --check public/app.js && node --check public/account-pool.js && node --check public/accounts/app.js && node --check src/claude-model-catalog.mjs && node --check src/mac-keychain-crypto.mjs && node --check src/launchd-owner.mjs && node --check scripts/run-claude-relay.mjs && node --check src/claude-subscription-usage.mjs && node --check src/client-meter.mjs && node --check src/client-server.mjs"
+    "check": "node --check src/main.mjs && node --check src/upstream-accounts.mjs && node --check src/upstream-account-store.mjs && node --check public/app.js && node --check public/account-pool.js && node --check public/accounts/app.js && node --check src/claude-model-catalog.mjs && node --check src/mac-keychain-crypto.mjs && node --check src/launchd-owner.mjs && node --check scripts/run-claude-relay.mjs && node --check src/claude-subscription-usage.mjs && node --check src/client-meter.mjs && node --check src/client-server.mjs && node --check src/client-key-protector.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.304",

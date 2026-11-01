@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { ClientAccess } from '../src/client-access.mjs';
+import { ClientKeyProtector } from '../src/client-key-protector.mjs';
 import { ClientBilling } from '../src/client-billing.mjs';
 import { ClientAdmin } from '../src/client-admin.mjs';
 import { UnifiedWebAccounts } from '../src/unified-web-accounts.mjs';
@@ -17,9 +18,13 @@ import { createClientGatewayForwarder, loopbackHttpFetch } from '../src/client-g
 import { createExternalClaudeGateway } from '../src/external-claude-gateway.mjs';
 
 const HOST = 'bifrost.example.test', ORIGIN = `https://${HOST}`, MODEL = 'Claude-sonnet', PASSWORD = 'Offline-only-password-123';
-async function fixture(t, { usage = true } = {}) {
+async function fixture(t, { usage = true, revealKeys = false } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'bifrost-unified-'));
-  const access = await ClientAccess.open({ path: join(dir, 'access.json'), allowedModelIds: [MODEL], maxAccounts: 2 });
+  let wrappedMaster = null;
+  const keyProtector = revealKeys ? new ClientKeyProtector({ store: {
+    load: async () => structuredClone(wrappedMaster), save: async value => { wrappedMaster = structuredClone(value); },
+  } }) : null;
+  const access = await ClientAccess.open({ path: join(dir, 'access.json'), allowedModelIds: [MODEL], maxAccounts: 2, keyProtector });
   const billing = await ClientBilling.open({ path: join(dir, 'billing.json') });
   await access.configureRegistration({ mode: 'invite' });
   const store = new UnifiedWebAccounts({ access, billing, checkEmailDomain: async () => 'mx' });
@@ -126,6 +131,40 @@ test('missing Claude usage remains unresolved instead of being silently billed a
   const response = await f.send('/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${user.apiKey}` }, body: { model: MODEL, messages: [] } });
   assert.equal(response.status, 200); assert.equal(f.billing.account(user.account.id).unresolvedCount, 1);
   assert.equal(f.billing.account(user.account.id).usedTokens, 0);
+});
+
+test('key reveal is an explicit CSRF-protected own-session action, never a default or cross-account response', async t => {
+  const f = await fixture(t, { revealKeys: true }), first = await f.register('first@example.com'), second = await f.register('second@example.com');
+  const session = await f.send('/account/web/v1/session', { headers: { cookie: first.writeHeaders.cookie } });
+  assert.equal(session.data.apiKey, undefined); assert.equal(session.data.account.apiKeyRecoverable, true);
+  const path = '/account/web/v1/api-key/reveal';
+  const anonymous = { ...first.writeHeaders, cookie: first.writeHeaders.cookie.split('; ')[0] };
+  assert.equal((await f.send(path, { method: 'POST', headers: anonymous, body: {} })).status, 401);
+  assert.equal((await f.send(path, { headers: first.writeHeaders })).status, 405);
+  assert.equal((await f.send(path, { method: 'POST', headers: { ...first.writeHeaders, 'x-bifrost-csrf': 'bad' }, body: {} })).status, 403);
+  assert.equal((await f.send(path, { method: 'POST', headers: first.writeHeaders, body: { accountId: second.account.id } })).status, 400);
+  assert.equal((await f.send(path, { method: 'POST', headers: { ...first.writeHeaders, authorization: 'Bearer ' + first.apiKey }, body: {} })).status, 403);
+  const revealed = await f.send(path, { method: 'POST', headers: first.writeHeaders, body: {} });
+  assert.equal(revealed.status, 200, revealed.text); assert.equal(revealed.data.apiKey, first.apiKey);
+  assert.notEqual(revealed.data.apiKey, second.apiKey); assert.match(revealed.headers['cache-control'], /no-store/);
+  await f.send('/account/web/v1/logout', { method: 'POST', headers: first.writeHeaders, body: {} });
+  assert.equal((await f.send(path, { method: 'POST', headers: first.writeHeaders, body: {} })).status, 401);
+  const rotated = await f.send('/account/web/v1/api-key', { method: 'POST', headers: second.writeHeaders, body: {} });
+  assert.equal((await f.send(path, { method: 'POST', headers: second.writeHeaders, body: {} })).data.apiKey, rotated.data.apiKey);
+  await f.send('/account/web/v1/api-key', { method: 'DELETE', headers: second.writeHeaders });
+  assert.equal((await f.send(path, { method: 'POST', headers: second.writeHeaders, body: {} })).status, 404);
+  assert.equal(f.calls.length, 0);
+});
+
+test('key reveal limits are per account, while protection failures never break existing API access', async t => {
+  const f = await fixture(t, { revealKeys: true }), first = await f.register('limited@example.com'), second = await f.register('independent@example.com');
+  const path = '/account/web/v1/api-key/reveal';
+  for (let n = 0; n < 20; n++) assert.equal((await f.send(path, { method: 'POST', headers: first.writeHeaders, body: {} })).status, 200);
+  assert.equal((await f.send(path, { method: 'POST', headers: first.writeHeaders, body: {} })).status, 429);
+  assert.equal((await f.send(path, { method: 'POST', headers: second.writeHeaders, body: {} })).status, 200);
+  f.access.rememberKey = async () => { throw new Error('Private OS protection failure'); };
+  const result = await f.send('/v1/models', { headers: { authorization: 'Bearer ' + first.apiKey } });
+  assert.equal(result.status, 200); assert.equal(result.text.includes('Private'), false); assert.equal(f.calls.length, 0);
 });
 
 test('email DNS failures leave canonical invitations usable and keep ownership unverified', async t => {

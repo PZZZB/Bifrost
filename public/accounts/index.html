@@ -34,7 +34,7 @@
         <div class="account-heading"><span class="badge">账号已开通</span><button type="button" id="logout" class="text-button">退出登录</button></div>
         <h2 id="account-name"></h2><p class="muted" id="email-status" hidden>邮箱未验证 · 未确认具体邮箱是否存在或属于本人</p><p class="muted" id="account-limits"></p>
         <div class="credentials"><label for="base-url">Base URL</label><div class="copy-row"><input id="base-url" readonly aria-label="连接地址"><button type="button" id="copy-url">复制</button></div>
-          <label for="api-key">API key</label><div id="key-reveal" hidden><div class="copy-row"><input id="api-key" type="password" readonly autocomplete="off" aria-label="新生成的 API key"><button type="button" id="copy-key">复制</button></div><p class="key-note">仅本次展示，请保存到客户端。离开页面后将不再显示。</p></div>
+          <label for="api-key">API key</label><div id="key-reveal" hidden><div class="copy-row"><input id="api-key" type="password" readonly autocomplete="off" aria-label="API key" placeholder="点击查看或复制"><button type="button" id="view-key" aria-label="显示 API key" aria-pressed="false">查看</button><button type="button" id="copy-key">复制</button></div><p id="key-note" class="key-note">默认隐藏。需要时可查看或复制，无需更换密钥。</p></div>
           <p class="muted" id="key-state"></p>
           <div class="actions"><button type="button" id="reset-key" class="primary">重置 API key</button><button type="button" id="revoke-key" class="secondary">停用密钥</button></div>
         </div>

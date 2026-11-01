@@ -27,6 +27,7 @@ import { ModelDiscovery } from './model-discovery.mjs';
 import { ProviderQuotas } from './provider-quotas.mjs';
 import { createMagpieDelegationServer, loadMagpieDelegation } from './magpie-delegation.mjs';
 import { ClientAccess } from './client-access.mjs';
+import { ClientKeyProtector } from './client-key-protector.mjs';
 import { ClientAdmin } from './client-admin.mjs';
 import { ClientStateCodec } from './client-state.mjs';
 import { startClientService } from './client-service.mjs';
@@ -149,6 +150,7 @@ const clientModels = () => knownClientModels().filter(model => accountStore?.sna
       : ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])]) }));
 if (userManagementRequested) try {
   clientAccess = await ClientAccess.open({ path: join(stateDir, 'client-access.json'), allowedModelIds: () => knownClientModels().map(model => model.id),
+    ...(['darwin', 'win32'].includes(process.platform) ? { keyProtector: new ClientKeyProtector({ path: join(stateDir, 'client-key-protection.json') }) } : {}),
     ...(macClaude ? { maxAccounts: macClaude.web.maxAccounts } : {}) });
   try { clientBilling = await ClientBilling.open({ path: join(stateDir, 'client-billing.json') }); }
   catch { console.error('Client billing unavailable; client inference remains closed until the ledger is repaired.'); }

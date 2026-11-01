@@ -222,9 +222,13 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
         throw fail('用户接口不存在。', 404, 'client_route_not_found');
       }
       if (!['/v1/models', '/v1/responses', '/v1/chat/completions', '/v1/messages'].includes(path)) throw fail('接口不存在。', 404, 'client_route_not_found');
-      const suppliedKey = secretHeader(req), principal = access.authenticateKey(suppliedKey);
+      const suppliedKey = secretHeader(req); let principal = access.authenticateKey(suppliedKey);
       if (!principal) throw fail('API Key 无效、已停用或已过期。', 401, 'client_key_invalid');
       if (req.headers.origin !== undefined) throw fail('模型入口不接受浏览器跨站调用。', 403, 'client_origin_rejected');
+      // A protection failure must not interrupt an already-valid model Key.
+      await access.rememberKey?.(suppliedKey).catch(() => {});
+      principal = access.authenticateKey(suppliedKey);
+      if (!principal) throw fail('API Key 无效、已停用或已过期。', 401, 'client_key_invalid');
       if (path === '/v1/models' && req.method === 'GET') {
         json(res, 200, { object: 'list', data: userModels(principal).map(publicClientModel) }); return;
       }

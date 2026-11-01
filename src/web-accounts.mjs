@@ -15,7 +15,7 @@ const STATIC = new Map([['/account/', ['index.html', 'text/html; charset=utf-8']
   ['/account/app.js', ['app.js', 'text/javascript; charset=utf-8']], ['/account/style.css', ['style.css', 'text/css; charset=utf-8']]]);
 const PREFIX = '/account/web/v1/';
 const ROUTES = new Map([['session', 'GET'], ['register', 'POST'], ['login', 'POST'], ['logout', 'POST'],
-  ['me', 'DELETE'], ['api-key', ['POST', 'DELETE']]]);
+  ['me', 'DELETE'], ['api-key', ['POST', 'DELETE']], ['api-key/reveal', 'POST']]);
 const SESSION_COOKIE = '__Host-bifrost_session', CSRF_COOKIE = '__Host-bifrost_csrf';
 const fail = (status, code) => { throw Object.assign(new Error(code), { status, code }); };
 const ERRORS = {
@@ -29,6 +29,9 @@ const ERRORS = {
   invalid_password: '密码需为 12–128 个字符，且不超过 256 字节。', privacy_required: '请先阅读并同意账号隐私说明。',
   registration_rejected: '邮箱或邀请码不可用，请检查后重试。', registration_full: '暂不接受新账号，请联系管理员。',
   login_rejected: '账号或密码不正确。', session_expired: '登录已过期，请重新登录。',
+  client_key_not_saved: '旧密钥尚未留存原文。请先从已配置的客户端使用一次，再刷新网页查看；也可以重置生成新密钥。',
+  client_key_not_available: '当前没有可用的 API key。', client_key_reveal_unsupported: '此部署尚未启用密钥查看，请更新服务。',
+  client_key_protection_unavailable: '密钥暂时无法读取或保存，请稍后重试。',
   rate_limited: '操作过于频繁，请稍后重试。', body_too_large: '请求内容过大。',
   account_unavailable: '账号服务暂时不可用，请稍后重试。',
 };
@@ -78,7 +81,7 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPubl
     res.end(JSON.stringify(data));
   }
   let windowEnd = 0, requests = 0, authRequests = 0, authActive = 0;
-  const attempts = new Map();
+  const attempts = new Map(), keyReveals = new Map();
   const notification = createPaymentNotifications(payments);
   return {
     publicOrigin, publicOrigins, apiBaseUrl, maxAccounts: store.maxAccounts,
@@ -115,7 +118,7 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPubl
         if (!methods) fail(404, 'not_found');
         if (!(Array.isArray(methods) ? methods : [methods]).includes(req.method)) fail(405, 'method_not_allowed');
         if (req.headers['sec-fetch-site'] === 'cross-site') fail(403, 'access_denied');
-        if (clock() >= windowEnd) { windowEnd = clock() + 60_000; requests = 0; authRequests = 0; attempts.clear(); }
+        if (clock() >= windowEnd) { windowEnd = clock() + 60_000; requests = 0; authRequests = 0; attempts.clear(); keyReveals.clear(); }
         if (++requests > 300) fail(429, 'rate_limited');
         if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') fail(400, 'invalid_request');
         if (Number(req.headers['content-length'] ?? 0) > 8192) fail(413, 'body_too_large');
@@ -170,8 +173,15 @@ export function createWebAccounts({ store, csrfKey, publicOrigin, additionalPubl
           res.setHeader('set-cookie', cookie(SESSION_COOKIE, result.sessionToken, Math.floor((result.expiresAt - clock()) / 1000)));
           delete result.sessionToken;
         } else {
+          if (action === 'api-key/reveal') {
+            // Only authenticated sessions consume a reveal allowance.
+            const identity = await store.me(session), id = identity.account.id;
+            const count = keyReveals.get(id) ?? 0;
+            if (count >= 20) fail(429, 'rate_limited');
+            keyReveals.set(id, count + 1);
+          }
           result = await store.change(session, action === 'logout' ? 'logout' : action === 'me' ? 'delete'
-            : req.method === 'POST' ? 'reset-key' : 'revoke-key');
+            : action === 'api-key/reveal' ? 'reveal-key' : req.method === 'POST' ? 'reset-key' : 'revoke-key');
           if (action === 'logout' || action === 'me') res.setHeader('set-cookie', cookie(SESSION_COOKIE, '', 0));
         }
         json(res, 200, { ...result, apiBaseUrl });

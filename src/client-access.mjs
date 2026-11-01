@@ -5,6 +5,7 @@ import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'no
 import { promisify } from 'node:util';
 import { BridgeError } from './storage.mjs';
 import { webEmail } from './email-address.mjs';
+import { isSealedClientKey } from './client-key-protector.mjs';
 
 const derive = promisify(scrypt);
 const DAY = 86_400_000;
@@ -104,11 +105,12 @@ function validateState(data) {
       || account.registration !== undefined && (!account.username.includes('@') || !validRegistration(account.registration))) throw error();
     accountIds.add(account.id); usernames.add(account.username);
     for (const key of account.keys) {
-      if (!fields(key, ['id', 'name', 'hash', 'lastFour', 'enabled', 'createdAt', 'expiresAt', 'revokedAt'],
+      if (!fields(key, ['id', 'name', 'hash', 'lastFour', 'enabled', 'createdAt', 'expiresAt', 'revokedAt', 'sealedSecret'],
         ['id', 'name', 'hash', 'lastFour', 'enabled', 'createdAt', 'expiresAt', 'revokedAt'])
         || !UUID.test(key.id) || keyIds.has(key.id) || label(key.name) !== key.name || !HEX64.test(key.hash) || keyHashes.has(key.hash)
         || typeof key.lastFour !== 'string' || !/^[A-Za-z0-9_-]{4}$/.test(key.lastFour) || typeof key.enabled !== 'boolean'
-        || !iso(key.createdAt) || !iso(key.expiresAt) || key.revokedAt !== null && !iso(key.revokedAt)) throw error();
+        || !iso(key.createdAt) || !iso(key.expiresAt) || key.revokedAt !== null && !iso(key.revokedAt)
+        || key.sealedSecret !== undefined && !isSealedClientKey(key.sealedSecret)) throw error();
       keyIds.add(key.id); keyHashes.add(key.hash);
     }
   }
@@ -140,17 +142,20 @@ export class ClientAccess {
   #now;
   #allowedModelIds;
   #maxAccounts;
+  #keyProtector;
   #state = { version: 1, revision: 0, registrationPolicy: { mode: 'open', defaultKeyDays: 30 }, accounts: [], invites: [], sessions: [] };
   #queue = Promise.resolve();
   #closed = false;
   #closing = false;
 
-  constructor({ path, now = Date.now, allowedModelIds = [], maxAccounts = MAX_ACCOUNTS } = {}) {
+  constructor({ path, now = Date.now, allowedModelIds = [], maxAccounts = MAX_ACCOUNTS, keyProtector = null } = {}) {
     if (typeof path !== 'string' || !path || path.includes('\0') || typeof now !== 'function'
       || !(typeof allowedModelIds === 'function' || Array.isArray(allowedModelIds))
-      || !Number.isInteger(maxAccounts) || maxAccounts < 1 || maxAccounts > MAX_ACCOUNTS) throw new TypeError('Invalid ClientAccess options.');
+      || !Number.isInteger(maxAccounts) || maxAccounts < 1 || maxAccounts > MAX_ACCOUNTS
+      || keyProtector !== null && (typeof keyProtector.seal !== 'function' || typeof keyProtector.reveal !== 'function')) throw new TypeError('Invalid ClientAccess options.');
     this.#path = resolve(path); this.#now = now; this.#allowedModelIds = allowedModelIds;
     this.#maxAccounts = maxAccounts;
+    this.#keyProtector = keyProtector;
   }
   static async open(options) {
     const store = new ClientAccess(options);
@@ -189,6 +194,7 @@ export class ClientAccess {
   async #commit(next) {
     if (this.#state.revision >= Number.MAX_SAFE_INTEGER) throw error('用户接入配置版本已耗尽。', 503, 'client_access_unavailable');
     next.revision = this.#state.revision + 1;
+    for (const account of next.accounts) for (const key of account.keys) if (key.revokedAt) delete key.sealedSecret;
     const bytes = `${JSON.stringify(next)}\n`;
     if (Buffer.byteLength(bytes) > MAX_FILE_BYTES) throw error('用户接入配置达到保存上限。', 503, 'client_access_limit');
     const temporary = `${this.#path}.${randomBytes(8).toString('hex')}.tmp`;
@@ -229,6 +235,7 @@ export class ClientAccess {
     const effectiveExpiresAt = limit !== null && Date.parse(limit) < Date.parse(key.expiresAt) ? limit : key.expiresAt;
     return { id: key.id, name: key.name, lastFour: key.lastFour, enabled: key.enabled, createdAt: key.createdAt,
       expiresAt: key.expiresAt, effectiveExpiresAt, revokedAt: key.revokedAt,
+      recoverable: !!this.#keyProtector && !!key.sealedSecret,
       status: key.revokedAt ? 'revoked' : !key.enabled ? 'disabled' : Date.parse(effectiveExpiresAt) <= now ? 'expired' : 'active' };
   }
   #publicAccount(account) {
@@ -258,6 +265,12 @@ export class ClientAccess {
       createdAt: new Date(now).toISOString(), expiresAt: new Date(expiresAt).toISOString(), revokedAt: null };
     account.keys.push(key); return { key, secret: value };
   }
+  async #sealKey(accountId, created) {
+    if (!this.#keyProtector) return;
+    try { created.key.sealedSecret = await this.#keyProtector.seal(created.secret, { accountId, keyId: created.key.id }); }
+    catch { throw error('密钥保护暂时不可用，请稍后重试。', 503, 'client_key_protection_unavailable'); }
+  }
+  get keyRevealSupported() { return !!this.#keyProtector; }
   snapshot() {
     return { version: 1, revision: this.#state.revision, registrationPolicy: { ...this.#state.registrationPolicy },
       accounts: this.#state.accounts.map(account => this.#publicAccount(account)), invites: this.#state.invites.map(invite => this.#publicInvite(invite)) };
@@ -335,6 +348,7 @@ export class ClientAccess {
         keyExpiresAtLimit: new Date(now + next.registrationPolicy.defaultKeyDays * DAY).toISOString(), keys: [],
         ...(registration ? { registration: structuredClone(registration) } : {}) };
       const created = this.#newKey(account);
+      await this.#sealKey(account.id, created);
       const sessionToken = secret('session'), expiresAt = new Date(now + SESSION_LIFETIME).toISOString();
       next.accounts.push(account); if (invite) invite.uses++;
       next.sessions = next.sessions.filter(session => Date.parse(session.expiresAt) > now);
@@ -411,7 +425,7 @@ export class ClientAccess {
       }
       for (const key of account.keys) key.revokedAt ??= new Date(now).toISOString();
       let created;
-      if (operation === 'reset-key') created = this.#newKey(account);
+      if (operation === 'reset-key') { created = this.#newKey(account); await this.#sealKey(account.id, created); }
       account.updatedAt = new Date(now).toISOString(); await this.#commit(next);
       return { account: this.#publicAccount(account), ...(created ? { secret: created.secret } : { ok: true }) };
     });
@@ -420,6 +434,7 @@ export class ClientAccess {
     if (!fields(options, ['name', 'expiresInDays'])) throw error();
     return this.#serialize(async () => {
       const next = structuredClone(this.#state), account = this.#account(next, accountId), created = this.#newKey(account, options);
+      await this.#sealKey(account.id, created);
       account.updatedAt = new Date(this.#time()).toISOString(); await this.#commit(next);
       return { key: this.#publicKey(created.key, this.#time(), account.keyExpiresAtLimit), secret: created.secret };
     });
@@ -470,6 +485,39 @@ export class ClientAccess {
     }
     return null;
   }
+  /** Legacy hash-only credentials gain recoverable ciphertext on their next
+   * authenticated use. The exact secret, identity and authorization stay fixed. */
+  async rememberKey(value) {
+    if (!this.#keyProtector) return false;
+    const initial = this.authenticateKey(value);
+    if (!initial || this.#key(this.#account(this.#state, initial.accountId), initial.keyId).sealedSecret) return false;
+    return this.#serialize(async () => {
+      const principal = this.authenticateKey(value);
+      if (!principal) return false;
+      const next = structuredClone(this.#state), account = this.#account(next, principal.accountId), key = this.#key(account, principal.keyId);
+      if (key.sealedSecret) return false;
+      await this.#sealKey(account.id, { key, secret: value });
+      await this.#commit(next); return true;
+    });
+  }
+  async revealSessionKey(token) {
+    return this.#serialize(async () => {
+      const principal = this.authenticateSession(token);
+      if (!principal) throw error('登录已过期，请重新登录。', 401, 'session_expired');
+      if (!this.#keyProtector) throw error('此部署尚未启用密钥查看。', 501, 'client_key_reveal_unsupported');
+      const account = this.#account(this.#state, principal.accountId);
+      const key = account.keys.findLast(item => this.#publicKey(item, this.#time(), account.keyExpiresAtLimit).status === 'active');
+      if (!key) throw error('当前没有可用的 API Key。', 404, 'client_key_not_available');
+      if (!key.sealedSecret) throw error('旧密钥尚未留存原文，请先从已配置的客户端使用一次后再查看。', 409, 'client_key_not_saved');
+      let value;
+      try { value = await this.#keyProtector.reveal(key.sealedSecret, { accountId: account.id, keyId: key.id }); }
+      catch { throw error('密钥暂时无法读取，请稍后重试。', 503, 'client_key_protection_unavailable'); }
+      if (digest('key', value) !== key.hash) throw error('密钥暂时无法读取，请联系管理员。', 503, 'client_key_protection_unavailable');
+      if (!this.authenticateSession(token)) throw error('登录已过期，请重新登录。', 401, 'session_expired');
+      if (!this.authenticateKey(value)) throw error('当前没有可用的 API Key。', 404, 'client_key_not_available');
+      return { account: this.#publicAccount(account), secret: value };
+    });
+  }
   async flush() { await this.#queue; }
-  async close() { this.#closing = true; await this.#queue; this.#closed = true; }
+  async close() { this.#closing = true; await this.#queue; this.#closed = true; await this.#keyProtector?.close?.(); }
 }

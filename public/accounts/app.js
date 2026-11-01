@@ -2,13 +2,19 @@
   'use strict';
   const $ = id => document.getElementById(id);
   let mode = 'register', csrf = '', busy = false, revealedKey = '', ready = false;
+  let currentAccount = null, keyEpoch = 0;
   const invitation = new URLSearchParams(location.hash.slice(1)).get('invite');
   if (invitation && /^bfi_[A-Za-z0-9_-]{43}$/.test(invitation)) {
     $('invite').value = invitation;
     history.replaceState(null, '', location.pathname + location.search);
   }
   const showError = message => { $('error').textContent = message; $('error').hidden = !message; };
-  function clearKey() { revealedKey = ''; $('api-key').value = ''; $('key-reveal').hidden = true; }
+  function clearKey() {
+    keyEpoch++; revealedKey = ''; $('api-key').value = ''; $('api-key').type = 'password';
+    $('view-key').textContent = '查看'; $('view-key').setAttribute('aria-pressed', 'false');
+    $('view-key').setAttribute('aria-label', '显示 API key');
+    $('key-reveal').hidden = !currentAccount?.apiKeyConfigured || !currentAccount?.apiKeyRevealSupported;
+  }
   function authMode(next) {
     if (busy) return;
     mode = next; showError(''); $('status').textContent = '';
@@ -28,18 +34,31 @@
     $('submit').textContent = mode === 'register' ? '注册并获取连接信息' : '登录';
   }
   function render(data) {
-    if (!data.apiKey) clearKey();
-    const account = data.account;
+    const account = data.account; currentAccount = account ?? null; clearKey();
     $('loading').hidden = true; $('auth-view').hidden = !!account; $('account-view').hidden = !account;
     if (!account) { clearKey(); return; }
     $('account-name').textContent = account.username;
     $('email-status').hidden = !account.email;
     $('account-limits').textContent = `最多 ${account.limits.maxConcurrent} 个并发请求 · 每分钟 ${account.limits.requestsPerMinute} 次请求`;
     $('base-url').value = data.apiBaseUrl;
-    $('key-state').textContent = account.apiKeyConfigured ? '密钥已设置，完整内容不会再次显示。' : '当前没有启用的 API key。';
+    $('key-state').textContent = !account.apiKeyConfigured ? '当前没有启用的 API key。'
+      : account.apiKeyRecoverable ? '密钥已设置，可随时查看或复制。'
+      : account.apiKeyRevealSupported ? '旧密钥尚未留存原文；从已配置的客户端使用一次后，即可在这里查看。'
+      : '密钥已设置；此部署尚未启用再次查看。';
+    $('key-note').textContent = account.apiKeyRevealSupported ? '默认隐藏。需要时可查看或复制，无需更换密钥。'
+      : '请保存到客户端；此部署尚未启用再次查看。';
     $('reset-key').textContent = account.apiKeyConfigured ? '重置 API key' : '生成 API key';
     $('revoke-key').hidden = !account.apiKeyConfigured;
-    if (data.apiKey) { revealedKey = data.apiKey; $('api-key').value = revealedKey; $('api-key').type = 'password'; $('key-reveal').hidden = false; }
+    if (data.apiKey && !document.hidden) { revealedKey = data.apiKey; $('api-key').value = revealedKey; $('key-reveal').hidden = false; }
+  }
+  async function ensureKey() {
+    if (revealedKey) return revealedKey;
+    if (!currentAccount?.apiKeyRevealSupported) throw new Error('此部署尚未启用密钥查看，请更新服务。');
+    const epoch = keyEpoch, accountId = currentAccount.id;
+    const data = await request('api-key/reveal');
+    if (epoch !== keyEpoch || document.hidden || currentAccount?.id !== accountId) return '';
+    if (data.account?.id !== accountId || !/^bfk_[A-Za-z0-9_-]{43}$/.test(data.apiKey || '')) throw new Error('密钥响应异常，请稍后重试。');
+    render(data); return revealedKey;
   }
   async function request(action, body, method = 'POST') {
     let response, data;
@@ -122,12 +141,24 @@
       if (!navigator.clipboard?.writeText) throw new Error();
       await navigator.clipboard.writeText(value); $('status').textContent = '已复制。';
     } catch {
-      const input = $(id); input.type = 'text'; input.focus(); input.select(); input.setSelectionRange(0, input.value.length);
-      $('status').textContent = document.execCommand('copy') ? '已复制。' : '请长按输入框中的内容手动复制。';
+      const input = $(id), previousType = input.type; input.type = 'text'; input.focus(); input.select(); input.setSelectionRange(0, input.value.length);
+      const copied = document.execCommand('copy');
+      if (copied) input.type = previousType;
+      else if (id === 'api-key') { $('view-key').textContent = '隐藏'; $('view-key').setAttribute('aria-pressed', 'true'); $('view-key').setAttribute('aria-label', '隐藏 API key'); }
+      $('status').textContent = copied ? '已复制。' : '请长按输入框中的内容手动复制。';
     }
   }
   $('copy-url').addEventListener('click', () => void copy('base-url', $('base-url').value));
-  $('copy-key').addEventListener('click', () => void copy('api-key', revealedKey));
+  $('view-key').addEventListener('click', () => {
+    if (busy) return;
+    if ($('api-key').type === 'text') { clearKey(); return; }
+    void perform(async () => {
+      if (!await ensureKey()) return;
+      $('api-key').type = 'text'; $('view-key').textContent = '隐藏';
+      $('view-key').setAttribute('aria-pressed', 'true'); $('view-key').setAttribute('aria-label', '隐藏 API key');
+    });
+  });
+  $('copy-key').addEventListener('click', () => void perform(async () => { const key = await ensureKey(); if (key) await copy('api-key', key); }));
   document.addEventListener('visibilitychange', () => { if (document.hidden) clearKey(); });
   window.addEventListener('pagehide', clearKey);
   void perform(boot);

@@ -20,11 +20,13 @@ export class UnifiedWebAccounts {
     Object.assign(this, { access, billing, maxAccounts, maxConcurrent, requestsPerMinute, clock, checkEmailDomain, payments });
   }
   publicAccount(account) {
+    const key = account.keys.findLast(key => key.status === 'active');
     return { id: account.id, username: account.username, email: account.username.includes('@') ? account.username : null,
       emailVerified: false, ...(account.registration ? { emailDomainCheck: { ...account.registration.emailDomainCheck,
         checkedAt: Date.parse(account.registration.emailDomainCheck.checkedAt) } } : {}),
       status: account.enabled ? 'active' : 'disabled', createdAt: Date.parse(account.createdAt),
-      apiKeyConfigured: account.keys.some(key => key.status === 'active'),
+      apiKeyConfigured: !!key, apiKeyRecoverable: key?.recoverable === true,
+      apiKeyRevealSupported: this.access.keyRevealSupported === true,
       limits: { maxConcurrent: this.maxConcurrent, requestsPerMinute: this.requestsPerMinute } };
   }
   async register({ email, password: value, inviteCode, privacyAccepted }) {
@@ -56,6 +58,10 @@ export class UnifiedWebAccounts {
     const principal = this.access.authenticateSession(token);
     if (!principal) fail(401, 'session_expired');
     if (operation === 'logout') { await this.access.logout(token); return { ok: true }; }
+    if (operation === 'reveal-key') {
+      const result = await this.access.revealSessionKey(token);
+      return { account: this.publicAccount(result.account), apiKey: result.secret };
+    }
     if (operation === 'delete' && (this.payments?.hasPending(principal.accountId) || this.billing?.account(principal.accountId).balanceMicros)) {
       fail(409, 'payment_account_pending');
     }

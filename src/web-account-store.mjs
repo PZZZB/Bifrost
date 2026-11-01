@@ -12,7 +12,7 @@ const sessionToken = value => typeof value === 'string' && /^bws_[A-Za-z0-9_-]{4
 const invitation = value => typeof value === 'string' && /^bfi_[A-Za-z0-9_-]{43}$/.test(value);
 const mint = prefix => prefix + randomBytes(32).toString('base64url');
 const fail = (status, code) => { throw Object.assign(new Error(code), { status, code }); };
-export const WEB_PRIVACY_VERSION = '2026-10-25.1';
+export const WEB_PRIVACY_VERSION = '2026-11-01.1';
 const PASSWORD_ALGORITHM = 'scrypt-131072-8-1';
 const DUMMY = { algorithm: PASSWORD_ALGORITHM, salt: Buffer.alloc(16).toString('base64url'), hash: Buffer.alloc(64).toString('base64url') };
 let passwordWork = 0;
