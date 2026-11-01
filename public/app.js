@@ -1191,7 +1191,9 @@ function modelEvidenceDetails(model) {
     const value = capabilities?.[key];
     const efforts = key === 'reasoning' && Array.isArray(value?.efforts) ? value.efforts.filter(effort => typeof effort === 'string').join('、') : '';
     const observed = verification?.state === 'passed' && verification.observed?.[key] === true;
-    appendField(label, `${observed ? key === 'cache' ? '已观察到缓存命中' : key === 'tools' ? '已记录工具回传后的完整调用' : '已记录含图片的成功调用' : support(value)}${efforts ? `（${efforts}）` : ''}${typeof value?.note === 'string' && value.note ? ` · ${value.note}` : ''}`);
+    const note = observed ? key === 'cache' ? '真实响应用量中包含缓存读取 Token；后续请求是否命中仍以实际响应为准。'
+      : key === 'tools' ? '已收到客户端工具结果并正常结束，工具由客户端执行。' : '已记录当前账号含图片请求正常完成，识别效果取决于具体任务。' : value?.note;
+    appendField(label, `${observed ? key === 'cache' ? '已观察到缓存命中' : key === 'tools' ? '已记录工具回传后的完整调用' : '已记录含图片的成功调用' : support(value)}${efforts ? `（${efforts}）` : ''}${typeof note === 'string' && note ? ` · ${note}` : ''}`);
   }
   const context = capabilities?.contextWindow;
   appendField('上下文', `${Number.isSafeInteger(context?.tokens) && context.tokens > 0 ? `${context.tokens.toLocaleString('zh-CN')} Token${context.source === 'official-cli-runtime' ? '（官方 CLI 当前上限）' : ''}` : '未取得当前模型上限'}${context?.note ? ` · ${context.note}` : ''}`);

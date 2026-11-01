@@ -1289,8 +1289,9 @@ test('Claude evidence separates adapter support, CLI budget and observed feature
   assert.equal(fields['缓存'], '按响应计量'); assert.match(fields['上下文'], /1,000,000 Token（官方 CLI 当前上限）.*未进行满窗口压力测试/);
   target.verification = { state: 'passed', checkedAt: '2026-11-01T08:00:00Z', observed: { images: true, tools: true, cache: true } };
   const verified = catalogPage(models); await settle(); fields = detailFields(evidenceFor(verified, 'cb-opus'));
-  assert.equal(fields['图片'], '已记录含图片的成功调用'); assert.equal(fields['客户端工具'], '已记录工具回传后的完整调用');
-  assert.equal(fields['缓存'], '已观察到缓存命中'); assert.match(fields['验证时间'], /北京时间/);
+  assert.match(fields['图片'], /^已记录含图片的成功调用.*正常完成/); assert.match(fields['客户端工具'], /^已记录工具回传后的完整调用.*工具由客户端执行/);
+  assert.match(fields['缓存'], /^已观察到缓存命中.*实际响应为准/); assert.match(fields['验证时间'], /北京时间/);
+  assert.doesNotMatch(fields['图片'] + fields['客户端工具'], /待实测|仍需.*验证/);
   assert.equal(verified.calls.some(call => call.method === 'POST'), false);
 });
 
