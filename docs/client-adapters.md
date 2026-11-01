@@ -60,6 +60,8 @@ npm run verify:desktop-codex
 
 官方依据：[Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)说明 `model_catalog_url`、Responses 协议、命令式认证和重试设置；具体行为另由当前安装的 Codex 程序验证。
 
-## CodeBuddy：模型文件同步
+## 通用 Chat 客户端
 
-客户端注册表已加入 CodeBuddy 投影；配置合并、定时同步和实际热重载验收见 [CodeBuddy 自动同步](codebuddy-client-sync.md)。
+CodeBuddy、WorkBuddy 等客户端通过标准用户 API 的 `/v1/chat/completions` 接入，使用各自用户的 Bifrost Key；无需额外注册专用目录。`/v1/models` 返回该用户当前获准的模型与安全能力信息。客户端是否读取和刷新目录，由其原生能力决定；调用兼容性和目录自动更新分别验收。
+
+Bifrost 不在用户电脑上安装模型文件同步器，不定时改写客户端配置。客户端要求逐个填写模型时，使用网关发布的精确模型 ID，不能把配置文件热重载称为公网目录自动发现。

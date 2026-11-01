@@ -39,7 +39,6 @@ import { startServerRemotes } from './runtime/server-remotes.mjs';
 import { UpstreamAccountStore } from './upstream-account-store.mjs';
 import { UpstreamAccounts, gatedAccountService } from './upstream-accounts.mjs';
 import { readLaunchdOwner } from './launchd-owner.mjs';
-import { startClientCatalogSync } from './runtime/client-sync.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serviceVersion = await createServiceVersion({ projectDir });
@@ -78,7 +77,6 @@ catch (error) { console.error(`Token statistics unavailable: ${redact(error.mess
 let backendRpc, configRpc, backend, integration, gateway, clientVersion, accountQuotas, serviceControl;
 let withService, cursorProvider, requestDiagnostics, clientAccess = null, clientService = null, clientAdmin = null, clientBilling = null;
 let paymentRuntime = null, paymentsFault = false, serverRemotes = null, accountPool = null;
-let clientCatalogSync = null;
 const seeds = [];
 const configured = async name => await readJson(join(stateDir, name), null);
 const userEntryConfiguration = await configured('client-gateway.json');
@@ -310,7 +308,6 @@ if (clientAccess && clientBilling && !delegation) {
   if (clientStatus.ready) console.log(`Bifrost user portal: ${clientService.endpoint().portalUrl}`);
   else if (clientStatus.message) console.error(clientStatus.message);
 }
-if (!delegation) clientCatalogSync = await startClientCatalogSync({ stateDir });
 async function shutdown(code = 0) {
   if (closing) return; closing = true;
   try { await serviceControl?.close(); }
@@ -322,7 +319,6 @@ async function shutdown(code = 0) {
   server.close(); server.closeAllConnections();
   clearInterval(sourceCatalogTimer);
   await clientService?.close();
-  await clientCatalogSync?.close();
   await paymentRuntime?.close();
   await macClaude?.close();
   await serverRemotes?.close();
