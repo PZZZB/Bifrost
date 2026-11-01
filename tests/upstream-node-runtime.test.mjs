@@ -29,6 +29,8 @@ test('a configured Claude node boots without Codex, discovers its own pool and p
     allowedHosts: [`127.0.0.1:${userPort}`] }, publicBaseUrl: userOrigin });
   // Historical foreign settings must not activate unrelated services in this node.
   await save(join(state, 'codebuddy.json'), { enabled: true }); await save(join(state, 'cursor.json'), { enabled: true });
+  await save(join(state, 'model-policy.json'), { version: 1, revision: 1, disabledModels: [],
+    models: [{ id: 'B-gpt-6.1-sol', name: 'Old unconfigured B model', channel: 'B' }] });
   const preload = join(dir, 'fixture-fetch.mjs');
   const catalogFile = join(dir, 'catalog.json');
   await save(catalogFile, { data: [{ id: 'claude-opus', display_name: 'Claude Opus' }, { id: 'claude-sonnet', display_name: 'Claude Sonnet' }] });
@@ -62,6 +64,7 @@ test('a configured Claude node boots without Codex, discovers its own pool and p
   let pool = (await read('/api/upstream-accounts')).data;
   assert.deepEqual(pool.accounts.map(a => a.kind), ['claude']); assert.equal(pool.models.length, 2);
   assert.equal(pool.capabilities.clientIntegration, false); assert.deepEqual(pool.capabilities.activeKinds, ['claude']);
+  assert.deepEqual((await read('/api/client-admin')).data.models.map(m => m.channel), ['Claude', 'Claude']);
   assert.doesNotMatch(JSON.stringify(pool), new RegExp(gatewayKey + '|' + sessionKey));
   for (const path of ['/api/codebuddy', '/api/cursor', '/api/integration', '/api/models']) assert.equal((await read(path)).status, 404);
   assert.equal((await read('/api/upstream-accounts', { kind: 'bifrost', name: 'Foreign', apiKey: 'bfk_' + 'x'.repeat(43) })).status, 400);

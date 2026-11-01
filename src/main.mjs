@@ -136,13 +136,15 @@ const gatedCodeBuddy = gatedAccountService(codeBuddyService, () => sourceAllowed
 const gatedCursor = gatedAccountService(cursorService, () => sourceAllowed('Cursor'));
 const modelDiscovery = new ModelDiscovery({ modelPolicy, codeBuddyService: gatedCodeBuddy, cursorService: gatedCursor });
 const providerQuotas = nativeIntegration ? new ProviderQuotas({ codeBuddyService: gatedCodeBuddy, cursorService: gatedCursor }) : null;
-const clientModels = () => modelPolicy.snapshot().models.filter(model => ['B', 'CodeBuddy', 'Cursor', 'Bifrost', ...(macClaude ? ['Claude'] : [])].includes(model.channel))
+const knownClientModels = () => modelPolicy.snapshot().models.filter(model => ['B', 'CodeBuddy', 'Cursor', 'Bifrost', ...(macClaude ? ['Claude'] : [])].includes(model.channel));
+const clientModels = () => knownClientModels().filter(model => accountStore?.snapshot().accounts.some(account => model.channel === 'Bifrost'
+    ? account.kind === 'bifrost' && model.id.startsWith(`remote/${account.binding.sourceId}/`) : account.binding.slot === model.channel))
   .map(model => ({ id: model.id, name: model.name, channel: model.channel,
     enabled: model.enabled !== false && sourceAllowed(model.channel, model.id) && !modelPolicy.snapshot().disabledModels.includes(model.id), available: model.available,
     protocols: model.protocols ?? (model.channel === 'Claude' ? ['chat-completions', 'messages']
       : ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])]) }));
 if (userManagementRequested) try {
-  clientAccess = await ClientAccess.open({ path: join(stateDir, 'client-access.json'), allowedModelIds: () => clientModels().map(model => model.id),
+  clientAccess = await ClientAccess.open({ path: join(stateDir, 'client-access.json'), allowedModelIds: () => knownClientModels().map(model => model.id),
     ...(macClaude ? { maxAccounts: macClaude.web.maxAccounts } : {}) });
   try { clientBilling = await ClientBilling.open({ path: join(stateDir, 'client-billing.json') }); }
   catch { console.error('Client billing unavailable; client inference remains closed until the ledger is repaired.'); }

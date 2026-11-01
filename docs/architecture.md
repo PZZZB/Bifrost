@@ -93,7 +93,7 @@ Server 的账号元数据统一保存在私有 `upstream-accounts.json`，不再
 
 虚拟机 relay 开启 `modelDiscovery.enabled` 后，使用官方 Agent SDK 的 `supportedModels()` 读取登录环境的全部可选项。输入流保持为空，不发送推理提示、执行工具或持久化会话；目录失败时停止发布来源，管理页保留历史条目并标记不可用。[官方 SDK 参考](https://code.claude.com/docs/en/agent-sdk/typescript)。
 
-Default 与显式模型解析到同一模型时合并 Default；保留 `Claude-opus`、`Claude-sonnet` 兼容 ID。长上下文选项使用安全的公开别名，内部保留完整原始值，例如 `claude-fable-5-1[1m]`，不静默改变上下文模式。当前账号实测目录有 Opus、Sonnet、Haiku、Fable 四个不同选项；目录可见不代表新增模型已完成真实推理验收。
+Default 与显式模型解析到同一模型时合并 Default；保留 `Claude-opus`、`Claude-sonnet` 兼容 ID。长上下文选项使用安全的公开别名，内部保留完整原始值，例如 `claude-fable-5-1[1m]`，不静默改变上下文模式。实测目录包括 Opus、Sonnet、Haiku、Fable 及其他可选版本，具体数量以当前 SDK 返回为准；目录可见不代表新增模型已完成真实推理验收。
 
 原 Opus／Sonnet 开放策略保留，新发现模型默认关闭。目录先成功写入模型策略，再向调用入口暴露；自动刷新也遵守这个顺序。管理页显示全部条目，管理员可以勾选开放。下游用户和 Key 的白名单、余额及模型定价继续独立校验，不会因新增目录或来源自动扩权。
 
