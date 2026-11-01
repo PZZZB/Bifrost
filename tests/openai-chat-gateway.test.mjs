@@ -105,6 +105,53 @@ test('tool argument deltas become indexed OpenAI calls and replayable JSON', asy
   assert.deepEqual(JSON.parse(calls.map(call => call.function?.arguments ?? '').join('')), { path: 'x' });
 });
 
+test('tool-only dash placeholders restore persisted native blocks only for the exact original context and calls', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'bifrost-chat-placeholder-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'history.json'), history = new ChatHistoryStore({ path });
+  const canonical = [{ type: 'thinking', thinking: 'Read the fixture', signature: 'PRIVATE_TOOL_SIGNATURE' },
+    { type: 'tool_use', id: 'call_read', name: 'read_file', input: { path: 'check.txt' } }];
+  const f = await fixture(t, { history, request: () => response(reply(canonical, 'tool_use')) });
+  const identity = 'fixture-conversation';
+  const base = { model, messages: [{ role: 'system', content: 'Read only' }, { role: 'user', content: 'Read check.txt' }],
+    tools: [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }] };
+  const first = await (await f.send(base, { headers: { 'x-session-id': identity } })).json();
+  const assistant = first.choices[0].message;
+  assert.equal(assistant.content, null);
+  assert.ok(!JSON.stringify(first).includes('PRIVATE_TOOL_SIGNATURE'));
+  const wire = { ...base, messages: [...base.messages, { ...assistant, content: '-' },
+    { role: 'tool', tool_call_id: 'call_read', content: 'FIXTURE_CONTENT' }] };
+  const restored = new ChatHistoryStore({ path }); await restored.load();
+  const translated = translateChatRequest(wire, restored, identity);
+  assert.deepEqual(translated.body.messages[1].content, canonical);
+  assert.equal(translated.body.messages[2].content[0].tool_use_id, 'call_read');
+  assert.equal(wire.messages[2].content, '-');
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+
+  const differentText = structuredClone(wire); differentText.messages[2].content = 'Additional assistant instructions';
+  const differentArgs = structuredClone(wire); differentArgs.messages[2].tool_calls[0].function.arguments = '{"path":"other.txt"}';
+  const differentSystem = structuredClone(wire); differentSystem.messages[0].content = 'Different instructions';
+  const differentUser = structuredClone(wire); differentUser.messages[1].content = 'Read another fixture';
+  const differentTools = structuredClone(wire); differentTools.tools[0].function.description = 'A different tool contract';
+  for (const changed of [differentText, differentArgs, differentSystem, differentUser, differentTools, { ...wire, model: 'other-model' }]) {
+    assert.notDeepEqual(translateChatRequest(changed, restored, identity).body.messages[1].content, canonical);
+  }
+  assert.notDeepEqual(translateChatRequest(wire, restored, 'another-conversation').body.messages[1].content, canonical);
+});
+
+test('actual assistant text is never made equivalent to an empty tool-only reply', async t => {
+  const history = new ChatHistoryStore();
+  const canonical = [{ type: 'text', text: '-' }, { type: 'tool_use', id: 'call_text', name: 'read_file', input: {} }];
+  const f = await fixture(t, { history, request: () => response(reply(canonical, 'tool_use')) });
+  const base = { model, messages: [{ role: 'user', content: 'Read' }] };
+  const first = await (await f.send(base)).json();
+  assert.equal(first.choices[0].message.content, '-');
+  const changed = { ...base, messages: [...base.messages, { ...first.choices[0].message, content: null },
+    { role: 'tool', tool_call_id: 'call_text', content: 'result' }] };
+  assert.notDeepEqual(translateChatRequest(changed, history).body.messages[1].content, canonical);
+  assert.equal(history.records.size, 1);
+});
+
 test('bad credentials, hostile Host and unsupported options never reach a provider', async t => {
   const f = await fixture(t), base = { model, messages: [{ role: 'user', content: 'Hi' }] };
   assert.equal((await f.send(base, { headers: { authorization: 'Bearer wrong' } })).status, 401);
@@ -143,7 +190,7 @@ test('client cancellation cancels upstream reading and aborts the provider signa
   assert.equal(signal.aborted, true); assert.equal(cancelled, true);
 });
 
-test('chat adapter continues a real ClaudeCliHub tool round through its permission-controlled client MCP', async t => {
+for (const toolOnlyPlaceholder of [false, true]) test(`chat adapter continues a real ClaudeCliHub tool round through its permission-controlled client MCP${toolOnlyPlaceholder ? ' with a client dash placeholder' : ''}`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'bifrost-chat-hub-')), workers = [];
   class Worker {
     queue = []; waiters = []; sends = []; sessionId = '12345678-1234-1234-1234-123456789abc';
@@ -166,12 +213,16 @@ test('chat adapter continues a real ClaudeCliHub tool round through its permissi
   for (let i = 0; i < 100 && !workers[0]?.sends.length; i++) await new Promise(done => setTimeout(done, 5));
   assert.equal(workers.length, 1);
   const worker = workers[0];
-  for (const event of reply([{ type: 'text', text: 'Reading ' }, { type: 'tool_use', id: 'tool_native', name: 'mcp__client__read_file', input: { path: 'a' } }], 'tool_use')) worker.emit(event);
+  for (const event of reply([...(toolOnlyPlaceholder ? [] : [{ type: 'text', text: 'Reading ' }]),
+    { type: 'tool_use', id: 'tool_native', name: 'mcp__client__read_file', input: { path: 'a' } }], 'tool_use')) worker.emit(event);
   const first = await (await firstPending).json();
   assert.equal(first.choices[0].message.tool_calls[0].function.name, 'read_file');
   const mcpPending = fetch(worker.options.mcpUrl, { method: 'POST', headers: { authorization: `Bearer ${worker.options.mcpKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'read_file', arguments: { path: 'a' }, _meta: { 'claudecode/toolUseId': 'tool_native' } } }) });
-  const secondPending = f.send({ ...input, messages: [...input.messages, first.choices[0].message,
+  const assistant = first.choices[0].message;
+  if (toolOnlyPlaceholder) assert.equal(assistant.content, null);
+  const secondPending = f.send({ ...input, messages: [...input.messages,
+    toolOnlyPlaceholder ? { ...assistant, content: '-' } : assistant,
     { role: 'tool', tool_call_id: 'tool_native', content: 'Contents of a' }] });
   const mcp = await mcpPending;
   assert.equal(mcp.status, 200);

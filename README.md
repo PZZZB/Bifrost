@@ -4,6 +4,8 @@ Bifröst 是面向 Codex 与 Claude 的多渠道模型网关。Codex 支持账�
 
 CodeBuddy、WorkBuddy 等客户端也可使用独立的 Bifröst 用户账号和 API Key 接入。管理员分配模型与 Key 授权期限，用户通过网页版用户中心注册、登录和管理自己的 Key。
 
+Mac 上的 CodeBuddy IDE 已通过本机回环入口调用 VM 中的 Claude Opus，真实聊天、客户端文件工具和继续对话均已验收。自定义显示名使用 `Claude Opus 5.5`、`Claude Sonnet 5.5`；配置与验证边界见 [Mac Claude VM](docs/mac-claude-vm.md#codebuddy-客户端)。独立用户经公网 Key 接入的客户端验收另外记录。
+
 客户注册与登录页采用北欧世界树与彩虹桥主题，桌面布局左侧展示连接图，右侧提供账号表单；手机优先显示表单。应用节点明确标记“调用方”或“提供模型 / 额度”。主图只显示已适配的 Codex 客户端调用 CodeBuddy、Cursor 额度，以及 Claude 客户端调用 CodeBuddy 额度；箭头指向模型与额度来源。CodeBuddy 反向调用及 WorkBuddy 接入放在独立的“通用 API · 客户端待接入”列表，不画成双向已支持。公开页不读取管理状态或显示私有订阅身份；实际模型仍由管理员分配。`/register` 默认打开注册表单，`/login` 与 `/portal` 默认登录；关闭注册时自动回到登录。
 
 管理页同样提供世界树连接总览，并读取已适配方向的渠道实际配置。待接入客户端即使用户 API 已启动，也始终保持待接入状态，不计入“已适配方向”与“入口已配置”数量。Codex 来源在待接入列表中明确称为“Codex 账号 B”，不代表调用 Codex 应用或开放账号 A。通用路由已实现与桌面客户端配置、完整回合验收分别记录；HTTP 接口成功不当作桌面端已验收。

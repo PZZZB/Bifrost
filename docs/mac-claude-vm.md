@@ -75,6 +75,24 @@ CodeBuddy 使用 `http://127.0.0.1:43157/v1/chat/completions` 和独立客户端
 
 公网客户端可通过独立的回环入口和 Tailscale Funnel 接入这台 Mac，使用单独密钥、会话身份和并发限制；不直接发布本机内部网关。配置和验证范围见 [公网接入](mac-external-access.md)。
 
+## CodeBuddy 客户端
+
+2026-11-01 已在 Mac ARM64 的 CodeBuddy IDE 4.12.3 中完成真实 Opus 聊天、本机文件工具和同一聊天续接验收。使用本人 CodeBuddy 登录与本机回环网关密钥；Claude 的订阅凭据仍留在 VM 中。CodeBuddy 自己的账号登录与 Claude 订阅登录相互独立。
+
+用户级配置为 `~/.codebuddy/models.json`，可参考 [配置模板](../examples/mac-claude-vm/codebuddy-models.example.json)。填写真实本机网关密钥，保留完整的 `/v1/chat/completions` 路径，文件权限为 0600。配置位置、项目级覆盖及能力字段见 [CodeBuddy 官方说明](https://www.codebuddy.cn/docs/ide/Features/models)。模板中的占位符不能用于实际调用，也不能把真实密钥提交到 Git。
+
+显示名采用与其他渠道相同的“来源＋模型＋版本”规则：`Claude Sonnet 5.5`、`Claude Opus 5.5`，版本来自本次 CLI 实际模型记录。保留 `claude-sonnet`、`claude-opus` API ID，兼容现有调用端。CodeBuddy 的自定义模型选择器会显示 `name:id`，例如 `Claude Opus 5.5:claude-opus`；冒号后是客户端展示的 API ID。上游仍使用订阅默认 `sonnet`／`opus` 别名，默认版本改变后应重新核对显示名，这些名称不表示已经固定上游版本。
+
+两项 Claude 配置均启用 `supportsToolCall` 和 `supportsReasoning`，不设置 `temperature`。当前 CodeBuddy 对未指定温度的推理模型会省略其自动温度参数；这解决了客户端默认附带温度而 CLI 无法调整该参数的冲突。能力声明不代表每次都开启思考，实际思考请求仍按网关支持的 `reasoning_effort` 处理。网关对显式传入的不支持采样参数继续报错。
+
+实际工具验收发现，CodeBuddy 会将纯工具调用的空 assistant 文本补为 `-`。Chat 适配器仅在原回复没有文本且确有工具调用时，额外索引这一精确占位形式；恢复原生历史时保留私有思考块。模型、系统提示、工具定义、调用者、消息前缀、工具 ID 与参数仍须匹配，其他文本改写不作等价处理。
+
+本次测试在独立的 Mac 目录读取随机标记文件，客户端可见读取工具卡，最终标记与原文件一致；下一轮不再使用工具仍正确复述。文件内容不事先写入模型提示，没有给 VM 增加共享目录或原生文件工具。124 项相关回归测试通过。受保护的 guest 程序经正常关机、保留本机回退副本、离线更新后重新启动，普通用户权限与 VPS 出口检查通过。
+
+全库检查另有既有测试环境问题：这台 Mac 默认临时目录经过符号链接，独立认证文件与诊断日志夹具被安全检查拒绝；使用规范临时目录和固定 Node 22.23.4 后，1301 项通过、2 项跳过，Cursor 的模拟超时测试因事件循环提前退出而连带取消 18 项。对修改前主干 `226e4a3` 的同一组测试已复现这些问题；全库不记为全部通过，本次相关 124 项通过单独记录。
+
+这次客户端验收使用内部回环入口；公司 Windows、公司内网额度，以及独立用户经公网 API Key 接入的完整链路仍需分别验收。
+
 ## 登录与验证
 
 由本人打开 VM 的 `claude` 用户终端，执行：

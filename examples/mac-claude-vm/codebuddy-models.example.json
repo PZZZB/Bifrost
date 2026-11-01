@@ -1,17 +1,17 @@
 {
   "models": [
     {
-      "id": "claude-sonnet", "name": "Claude Sonnet", "vendor": "Bifrost",
+      "id": "claude-sonnet", "name": "Claude Sonnet 5.5", "vendor": "Bifrost",
       "apiKey": "REPLACE_WITH_LOCAL_GATEWAY_KEY",
       "url": "http://127.0.0.1:43157/v1/chat/completions",
-      "supportsToolCall": true, "supportsImages": true, "supportsReasoning": false,
+      "supportsToolCall": true, "supportsImages": true, "supportsReasoning": true,
       "maxInputTokens": 200000, "maxOutputTokens": 8192
     },
     {
-      "id": "claude-opus", "name": "Claude Opus", "vendor": "Bifrost",
+      "id": "claude-opus", "name": "Claude Opus 5.5", "vendor": "Bifrost",
       "apiKey": "REPLACE_WITH_LOCAL_GATEWAY_KEY",
       "url": "http://127.0.0.1:43157/v1/chat/completions",
-      "supportsToolCall": true, "supportsImages": true, "supportsReasoning": false,
+      "supportsToolCall": true, "supportsImages": true, "supportsReasoning": true,
       "maxInputTokens": 200000, "maxOutputTokens": 8192
     }
   ]

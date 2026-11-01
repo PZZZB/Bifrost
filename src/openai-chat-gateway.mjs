@@ -314,7 +314,17 @@ export class OpenAIChatGateway {
       const canonical = [...blocks].sort(([a], [b]) => a - b).map(([, block]) => block.value);
       const assistant = publicAssistant(canonical);
       const keys = this.history.keys(translated.context, [...translated.normalized, normalizeMessage(assistant)]);
-      await this.history.save(keys.at(-1), [...translated.body.messages, { role: 'assistant', content: canonical }]);
+      const nativeHistory = [...translated.body.messages, { role: 'assistant', content: canonical }];
+      await this.history.save(keys.at(-1), nativeHistory);
+      // Some Chat clients replay a tool-only assistant message with a "-" text
+      // sentinel. Index that exact spelling only when we emitted no text. All
+      // context, tool IDs and arguments still have to match, and the native
+      // blocks (including private thinking signatures) remain unchanged.
+      if (assistant.content === null && assistant.tool_calls?.length) {
+        const placeholderKeys = this.history.keys(translated.context,
+          [...translated.normalized, normalizeMessage({ ...assistant, content: '-' })]);
+        await this.history.save(placeholderKeys.at(-1), nativeHistory);
+      }
       if (source.stream === true) {
         await write(chunk({}, reason));
         if (source.stream_options?.include_usage) await write({ id, object: 'chat.completion.chunk', created, model: source.model, choices: [], usage: usage(rawUsage) });
