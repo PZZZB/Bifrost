@@ -272,7 +272,7 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
           // reveal host addresses, operating systems, or upstream credentials.
           await response.body?.cancel().catch(() => {});
           response = Response.json({ error: { message: '模型服务暂时不可用，请稍后重试或联系管理员。', code: 'client_upstream_rejected' } },
-            { status: [400, 413, 422, 429].includes(response.status) ? response.status : 503 });
+            { status: [400, 409, 413, 422, 429].includes(response.status) ? response.status : 503 });
         }
         await relay(req, res, response, abort);
       } finally {

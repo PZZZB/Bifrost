@@ -27,6 +27,16 @@ const chat = value => `data: ${JSON.stringify(value)}\n\n`;
 const chatUsage = (prompt = 20, completion = 6) => ({ prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion,
   prompt_tokens_details: { cached_tokens: 8, cache_write_tokens: 2 }, completion_tokens_details: { reasoning_tokens: 3 } });
 const choices = (finish = null, delta = {}) => ({ id: 'chat_1', choices: [{ index: 0, delta, finish_reason: finish }] });
+
+test('HTTP conflict without model output is rejected, while actual conflict usage is retained', async () => {
+  for (const actualUsage of [null, chatUsage()]) {
+    const { output, results } = wrap(Response.json({ error: { message: 'Session conflict' },
+      ...(actualUsage ? { usage: actualUsage } : {}) }, { status: 409 }), 'chat');
+    await output.text();
+    assert.deepEqual(results, [{ usage: actualUsage ? expected : null,
+      status: actualUsage ? 'completed' : 'rejected' }]);
+  }
+});
 const messageStart = (counts = {}) => ({ type: 'message_start', message: { id: 'msg_1', type: 'message', role: 'assistant', content: [],
   usage: { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: 8, cache_creation_input_tokens: 2, ...counts } } });
 const messageDelta = (output, reason = 'end_turn') => ({ type: 'message_delta', delta: { stop_reason: reason }, usage: { output_tokens: output } });

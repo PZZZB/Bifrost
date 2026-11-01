@@ -109,6 +109,21 @@ test('insufficient balance and Token reservation limit reject before any upstrea
   assert.equal(quota.status, 429, quota.text); assert.equal(f.calls.length, 0);
 });
 
+test('an explicit Claude session conflict preserves HTTP 409 and releases its reservation', async t => {
+  const f = await fixture(t, { server: {
+    getModels: () => [{ id: MODEL, channel: 'Claude' }],
+    requestChat: async () => Response.json({ error: { message: 'Private upstream session conflict' } }, { status: 409 }),
+  } });
+  const before = f.billing.account(f.user.id).balanceMicros;
+  const result = await f.send('/v1/chat/completions', { model: MODEL, messages: [{ role: 'user', content: 'test' }] });
+  assert.equal(result.status, 409);
+  assert.doesNotMatch(result.text, /Private upstream/);
+  const after = f.billing.account(f.user.id);
+  assert.equal(after.balanceMicros, before);
+  assert.equal(after.reservedMicros, 0);
+  assert.equal(after.unresolvedCount, 0);
+});
+
 test('Chat is billed at the source Responses layer even without a Chat usage chunk', async t => {
   const f = await fixture(t, { source: () => sse(completion()) });
   const result = await f.send('/v1/chat/completions', { model: MODEL, stream: true, messages: [{ role: 'user', content: 'test' }] });

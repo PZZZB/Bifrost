@@ -1,7 +1,7 @@
 const MAX_FRAME = 16 * 1024 * 1024;
 const MAX_JSON = 64 * 1024 * 1024;
 const MAX_TAIL = 32 * 1024 * 1024;
-const REJECTED = new Set([400, 401, 403, 404, 422, 429]);
+const REJECTED = new Set([400, 401, 403, 404, 409, 422, 429]);
 const METERS = new WeakMap();
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const count = value => Number.isSafeInteger(value) && value >= 0;
