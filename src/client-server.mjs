@@ -7,6 +7,7 @@ import { BridgeError } from './storage.mjs';
 import { readBody } from './gateway.mjs';
 import { ClientChatAdapter } from './client-chat.mjs';
 import { meterClientResponse, getClientMeter } from './client-meter.mjs';
+import { publicClientModel } from './client-model-catalog.mjs';
 
 const STATIC = { '/portal': ['portal.html', 'text/html; charset=utf-8'],
   '/portal/': ['portal.html', 'text/html; charset=utf-8'], '/register': ['portal.html', 'text/html; charset=utf-8'],
@@ -42,6 +43,7 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
   requestResponses, requestMessages = null, requestChat = null, prepareResponses = null, billing = null, webAccounts = null,
   isDraining = () => false, csrfSecret, now = Date.now,
   getUpstreamAuthorizationVersion = () => null, onModelResult = () => {},
+  useDirectChat = () => true,
   maxConcurrentPerAccount = 4, maxConcurrent = 32, requestsPerMinute = 120 } = {}) {
   const publicUrl = new URL(publicBaseUrl);
   if (!['http:', 'https:'].includes(publicUrl.protocol) || publicUrl.pathname !== '/' || publicUrl.search || publicUrl.hash || publicUrl.username || publicUrl.password) throw new TypeError('Public client URL must be an origin.');
@@ -224,7 +226,7 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
       if (!principal) throw fail('API Key 无效、已停用或已过期。', 401, 'client_key_invalid');
       if (req.headers.origin !== undefined) throw fail('模型入口不接受浏览器跨站调用。', 403, 'client_origin_rejected');
       if (path === '/v1/models' && req.method === 'GET') {
-        json(res, 200, { object: 'list', data: userModels(principal).map(model => ({ id: model.id, object: 'model', owned_by: 'bifrost' })) }); return;
+        json(res, 200, { object: 'list', data: userModels(principal).map(publicClientModel) }); return;
       }
       if (req.method !== 'POST' || path === '/v1/models') throw fail('请求方法不支持。', 405);
       const used = running.get(principal.accountId) ?? 0;
@@ -256,7 +258,7 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
         const request = { body, scope: principal.accountId, session, signal: abort.signal, ...(billingContext ? { requestId: billingContext.requestId } : {}) };
         let response;
         if (path === '/v1/chat/completions') response = model.channel === 'Claude' && requestChat
-          ? await dispatch(request, 'chat', requestChat) : await chat.request(request);
+          && useDirectChat(request.body.model) ? await dispatch(request, 'chat', requestChat) : await chat.request(request);
         else if (path === '/v1/responses') {
           if (model.channel === 'Claude') throw fail('此模型支持 Chat Completions 和 Messages。', 501, 'client_protocol_unsupported');
           response = await meteredResponses(request);

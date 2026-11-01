@@ -117,6 +117,15 @@ test('Chat is billed at the source Responses layer even without a Chat usage chu
   assert.equal(f.billing.account(f.user.id).balanceMicros, 880);
 });
 
+test('non-direct Chat models use their Responses source instead of being forced through the managed Claude source', async t => {
+  let directCalls = 0;
+  const f = await fixture(t, { server: { requestChat: () => { directCalls++;throw new Error('Wrong managed source'); }, useDirectChat: () => false },
+    source: () => sse(completion()) });
+  const result = await f.send('/v1/chat/completions', { model: MODEL, stream: true, messages: [{ role: 'user', content: 'test' }] });
+  assert.equal(result.status, 200);assert.equal(directCalls, 0);assert.equal(f.calls.length, 1);
+  assert.equal(f.billing.account(f.user.id).balanceMicros, 880);
+});
+
 test('Messages uses authoritative bridgeUsage instead of protocol placeholder zeroes', async t => {
   const f = await fixture(t, { source: () => {
     const response = Response.json({ id: 'msg_offline', type: 'message', role: 'assistant', model: MODEL,

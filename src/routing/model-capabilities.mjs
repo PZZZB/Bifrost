@@ -6,6 +6,6 @@ export function modelCapabilities(value = {}) {
   if (Array.isArray(value.inputModalities)) result.inputModalities = [...new Set(value.inputModalities.filter(item => ['text', 'image'].includes(item)))];
   if (Array.isArray(value.reasoningEfforts)) result.reasoningEfforts = [...new Set(value.reasoningEfforts.filter(item => EFFORTS.has(item)))];
   if (result.reasoningEfforts?.includes(value.defaultReasoningEffort)) result.defaultReasoningEffort = value.defaultReasoningEffort;
-  for (const field of ['parallelToolCalls', 'reasoningSummaries']) if (typeof value[field] === 'boolean') result[field] = value[field];
+  for (const field of ['toolCalls', 'parallelToolCalls', 'reasoningSummaries']) if (typeof value[field] === 'boolean') result[field] = value[field];
   return result;
 }

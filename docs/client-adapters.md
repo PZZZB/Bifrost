@@ -59,3 +59,7 @@ npm run verify:desktop-codex
 真实公司 OAuth、内网接口及额度、Windows DPAPI 与桌面选择器，以及已登录 Claude 的真实工具回合仍待现场验收。源代码可支持某种协议，不代表每一个客户端产品都已完成配置和验收。
 
 官方依据：[Codex 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)说明 `model_catalog_url`、Responses 协议、命令式认证和重试设置；具体行为另由当前安装的 Codex 程序验证。
+
+## CodeBuddy：模型文件同步
+
+客户端注册表已加入 CodeBuddy 投影；配置合并、定时同步和实际热重载验收见 [CodeBuddy 自动同步](codebuddy-client-sync.md)。
