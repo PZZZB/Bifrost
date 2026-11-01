@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { loadMacClaudeClient } from '../src/mac-claude-client.mjs';
+import { claudeSubscriptionUsage } from '../src/claude-subscription-usage.mjs';
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'bifrost-mac-client-')); t.after(() => rm(dir, { recursive: true, force: true }));
@@ -49,4 +50,28 @@ test('Mac Claude upstream never follows redirects or accepts a caller-selected p
     ? Response.json({ data: [{ id: 'claude-opus' }] }) : new Response(null, { status: 302, headers: { location: 'https://other.test' } }) });
   t.after(() => client.close());
   await assert.rejects(client.requestMessages({ body: { model: 'Claude-opus' }, scope: 'account' }), error => error.status === 502);
+});
+
+test('private health supplies sanitized usage and account generation; health failure does not remove models or invent zero usage', async t => {
+  const f = await fixture(t); let healthy = true; const catalogs = [], calls = [];
+  const dto = claudeSubscriptionUsage({ subscription_type: 'pro', rate_limits_available: true,
+    rate_limits: { five_hour: { utilization: 3, resets_at: new Date(Date.now() + 3600000).toISOString() } } });
+  const client = await loadMacClaudeClient(await f.save('config.json', f.config), { onCatalog: (rows, version) => { catalogs.push({ rows, version }); },
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith('/v1/models')) return Response.json({ data: [{ id: 'claude-opus', contextWindow: 1000000, contextSource: 'official-cli-runtime' },
+        { id: 'claude-sonnet', contextWindow: 999999, contextSource: 'untrusted' }] });
+      return healthy ? Response.json({ providers: { Claude: { subscriptionUsage: dto, authorizationVersion: 'a'.repeat(64), email: 'PRIVATE' } } })
+        : new Response(null, { status: 302 });
+    } });
+  t.after(() => client.close());
+  assert.equal(client.authorizationVersion, 'a'.repeat(64)); assert.equal(catalogs[0].version, 'a'.repeat(64));
+  assert.equal(client.models()[0].contextWindow, 1000000); assert.equal(client.models()[1].contextWindow, undefined);
+  assert.equal(client.status().subscriptionUsage.windows[0].usedPercent, 3);
+  assert.doesNotMatch(JSON.stringify(client.status()), /PRIVATE|email|authorizationVersion/);
+  assert.ok(calls.every(call => call.url.startsWith('http://127.0.0.1:43157/') && call.options.redirect === 'manual'
+    && call.options.headers.authorization === `Bearer ${f.key}`));
+  healthy = false; await client.refresh(); assert.equal(client.models().length, 2); assert.equal(client.status().available, true);
+  assert.equal(client.authorizationVersion, null); assert.equal(client.status().subscriptionUsage.status, 'unavailable');
+  assert.deepEqual(client.status().subscriptionUsage.windows, []);
 });

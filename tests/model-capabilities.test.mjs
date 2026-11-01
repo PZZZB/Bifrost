@@ -2,6 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { capabilitiesFromCatalog, verificationFromRecord } from '../src/model-capabilities.mjs';
 
+test('managed Claude distinguishes adapter support, runtime context and cache metering from untested model features', () => {
+  const { capabilities: caps } = capabilitiesFromCatalog({ contextWindow: 1000000, contextSource: 'official-cli-runtime',
+    supportsReasoning: true, efforts: ['low', 'high'] }, { channel: 'Claude' });
+  for (const key of ['images', 'tools']) { assert.equal(caps[key].support, null); assert.equal(caps[key].adapterSupport, true); }
+  assert.equal(caps.contextWindow.tokens, 1000000); assert.equal(caps.contextWindow.source, 'official-cli-runtime');
+  assert.equal(caps.cache.support, null); assert.equal(caps.cache.source, 'response-usage');
+  assert.equal(caps.reasoning.support, true);
+});
+
 test('native projection copies only explicit capability values and never treats cache flags as observed hits', () => {
   const source = { supports_tools: true, input_modalities: ['text', 'image'], context_window: 240000,
     supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }, { effort: 'PRIVATE_PARAMETER' }], default_reasoning_level: 'high',

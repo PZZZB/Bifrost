@@ -1241,7 +1241,8 @@ test('a rejected idle restart remains an explicit failed action and never falls 
 test('missing model capability and validation metadata never become support or a successful real test', async () => {
   const page = catalogPage(); await settle();
   const evidence = evidenceFor(page, 'cb-opus'), fields = detailFields(evidence);
-  for (const key of ['图片', '客户端工具', '思考', '缓存', '上下文']) assert.equal(fields[key], '未确认');
+  for (const key of ['图片', '客户端工具', '思考', '缓存']) assert.equal(fields[key], '目录未声明');
+  assert.equal(fields['上下文'], '未取得当前模型上限');
   assert.equal(fields['调用验证'], '尚未验证'); assert.equal(fields['指令处理'], '尚未取得接入方式');
   assert.match(listText(evidence), /未知能力不会标成支持/);
   assert.equal(inputFor(page, 'cb-opus').checked, true);
@@ -1258,7 +1259,7 @@ test('model capability detail separates explicit support, precise effort levels 
   const page = catalogPage(models); await settle();
   const evidence = evidenceFor(page, 'cb-opus'), fields = detailFields(evidence);
   assert.match(fields['图片'], /^不支持/); assert.equal(fields['客户端工具'], '支持');
-  assert.match(fields['思考'], /medium、xhigh/); assert.equal(fields['缓存'], '未确认');
+  assert.match(fields['思考'], /medium、xhigh/); assert.equal(fields['缓存'], '目录未声明');
   assert.equal(fields['上下文'], '300,000 Token'); assert.equal(fields['指令处理'], '协议适配');
   assert.equal(fields['调用验证'], '已完成真实调用'); assert.ok(fields['验证时间']);
   assert.match(listText(evidence), /一次调用完成不代表图片、工具和缓存均已验证/);
@@ -1272,10 +1273,25 @@ test('a failed network call preserves declared model capability and all evidence
   target.verification = { state: 'failed', reason: '网络错误，不代表模型不支持工具。' };
   const page = catalogPage(models); await settle();
   const evidence = evidenceFor(page, 'cb-opus'), fields = detailFields(evidence);
-  assert.match(fields['客户端工具'], /^支持.*<img/); assert.equal(fields['上下文'], '未确认');
+  assert.match(fields['客户端工具'], /^支持.*<img/); assert.equal(fields['上下文'], '未取得当前模型上限');
   assert.equal(fields['调用验证'], '最近调用失败'); assert.match(fields['验证说明'], /网络错误/);
   assert.equal(evidence.querySelectorAll('img').length + evidence.querySelectorAll('script').length, 0);
   assert.equal(fields['兼容说明'], '<script>fixture</script>');
+});
+
+test('Claude evidence separates adapter support, CLI budget and observed features instead of a repeated unknown label', async () => {
+  const models = completeModels(), target = models.models.find(model => model.id === 'cb-opus');
+  target.capabilities = { images: { support: null, adapterSupport: true }, tools: { support: null, adapterSupport: true },
+    cache: { support: null, source: 'response-usage' }, contextWindow: { tokens: 1000000, source: 'official-cli-runtime', note: '未进行满窗口压力测试。' } };
+  const page = catalogPage(models); await settle();
+  let fields = detailFields(evidenceFor(page, 'cb-opus'));
+  assert.match(fields['图片'], /适配器已支持，模型待实测/); assert.match(fields['客户端工具'], /适配器已支持，模型待实测/);
+  assert.equal(fields['缓存'], '按响应计量'); assert.match(fields['上下文'], /1,000,000 Token（官方 CLI 当前上限）.*未进行满窗口压力测试/);
+  target.verification = { state: 'passed', checkedAt: '2026-11-01T08:00:00Z', observed: { images: true, tools: true, cache: true } };
+  const verified = catalogPage(models); await settle(); fields = detailFields(evidenceFor(verified, 'cb-opus'));
+  assert.equal(fields['图片'], '已记录含图片的成功调用'); assert.equal(fields['客户端工具'], '已记录工具回传后的完整调用');
+  assert.equal(fields['缓存'], '已观察到缓存命中'); assert.match(fields['验证时间'], /北京时间/);
+  assert.equal(verified.calls.some(call => call.method === 'POST'), false);
 });
 
 test('request diagnostics poll read-only, limit visible records and export only the selected same-origin report', async () => {

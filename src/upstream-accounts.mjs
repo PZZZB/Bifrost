@@ -3,6 +3,7 @@ import { BridgeError } from './storage.mjs';
 import { LEGACY_SLOTS, upstreamName } from './upstream-account-store.mjs';
 import { BifrostRemote } from './providers/bifrost-remote.mjs';
 import { configureServerRemote } from './runtime/server-remotes-config.mjs';
+import { validatedClaudeUsage, unavailableClaudeUsage } from './claude-subscription-usage.mjs';
 
 const TYPES = Object.freeze({
   codex: { label: 'Codex 订阅', authorization: '本机独立订阅登录', maxAccounts: 1, editor: 'codex' },
@@ -70,7 +71,9 @@ export class UpstreamAccounts {
         state: !row.enabled ? 'disabled' : (row.kind === 'bifrost' ? !metadata?.state || metadata.state === 'closed' : metadata == null || metadata.configured === false) ? 'activation_required'
           : ready ? 'ready' : connected ? 'not_ready' : 'authorization_required',
         modelCount: owned.length, publishedModelCount: owned.filter(m => m.enabled && m.available).length,
-        quota: { status: 'unknown', label: row.kind === 'bifrost' ? '远端用户额度，以远端账本为准' : '上游未提供可靠余额' },
+        quota: row.kind === 'claude' ? row.enabled ? validatedClaudeUsage(metadata?.subscriptionUsage)
+          : { ...unavailableClaudeUsage('paused'), label: '账号已停用，未读取订阅用量' }
+          : { status: 'unknown', label: row.kind === 'bifrost' ? '远端用户额度，以远端账本为准' : '上游未提供可靠余额' },
         restartRequired: row.enabled && (row.kind === 'bifrost' ? !metadata?.state || metadata.state === 'closed' : metadata == null || metadata.configured === false),
         ...(row.kind === 'bifrost' ? { endpoint: row.binding.baseUrl } : {}) };
     }));

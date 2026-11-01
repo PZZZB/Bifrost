@@ -69,6 +69,37 @@ test('prepaid HTTP request reserves first, then deducts authoritative cached-tok
   assert.equal(f.billing.history(f.user.id).rows.filter(row => row.type === 'settled').length, 1);
 });
 
+test('model evidence records complete paid calls after settlement, binds pre-dispatch authorization, and carries no request content', async t => {
+  let version = 'old-account'; const records = []; let f;
+  f = await fixture(t, { source: () => { version = 'new-account'; return Response.json(completion()); },
+    server: { getUpstreamAuthorizationVersion: () => version, onModelResult: result => {
+      assert.equal(f.billing.account(f.user.id).reservedMicros, 0); records.push(result);
+    } } });
+  const result = await f.send('/v1/responses', { model: MODEL, input: [{ role: 'user', content: [
+    { type: 'input_text', text: 'PRIVATE_PROMPT' }, { type: 'input_image', image_url: 'data:image/png;base64,PRIVATE_IMAGE' }] },
+    { type: 'function_call_output', call_id: 'PRIVATE_ID', output: 'PRIVATE_RESULT' }] });
+  assert.equal(result.status, 200); assert.equal(records.length, 1);
+  assert.equal(records[0].authorizationVersion, 'old-account'); assert.equal(records[0].kind, 'tool');
+  assert.deepEqual(records[0].observed, { images: true, cache: true }); assert.doesNotMatch(JSON.stringify(records), /PRIVATE/);
+});
+
+test('pending tools, token-limited, failed and unmetered responses never verify a model', async t => {
+  const records = []; let response = completion();
+  const f = await fixture(t, { credit: 10000, source: () => Response.json(response), server: { onModelResult: result => records.push(result) } });
+  for (const value of [{ ...completion(), output: [{ type: 'function_call', name: 'run', arguments: '{}' }] },
+    { ...completion(), status: 'incomplete' }, { ...completion(), status: 'failed' }, completion(false)]) {
+    response = value; await f.send('/v1/responses', { model: MODEL, input: 'test' });
+  }
+  assert.deepEqual(records, []);
+});
+
+test('evidence callback errors cannot change successful response or duplicate billing', async t => {
+  const f = await fixture(t, { server: { onModelResult() { throw new Error('Observer failed'); } } });
+  const result = await f.send('/v1/responses', { model: MODEL, input: 'test' });
+  assert.equal(result.status, 200); assert.equal(f.billing.account(f.user.id).balanceMicros, 880);
+  assert.equal(f.billing.history(f.user.id).rows.filter(row => row.type === 'settled').length, 1);
+});
+
 test('insufficient balance and Token reservation limit reject before any upstream call', async t => {
   const f = await fixture(t, { credit: 399 });
   const denied = await f.send('/v1/responses', { model: MODEL, input: 'test' });

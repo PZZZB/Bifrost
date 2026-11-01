@@ -32,6 +32,25 @@ const messageStart = (counts = {}) => ({ type: 'message_start', message: { id: '
 const messageDelta = (output, reason = 'end_turn') => ({ type: 'message_delta', delta: { stop_reason: reason }, usage: { output_tokens: output } });
 const messageStop = { type: 'message_stop' };
 
+test('protocol observations distinguish finished text, pending tool calls and length-limited turns across JSON and SSE', async () => {
+  const cases = [
+    ['chat', Response.json({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }], usage: chatUsage() }), true, false],
+    ['chat', Response.json({ choices: [{ message: { content: 'partial' }, finish_reason: 'length' }], usage: chatUsage() }), false, false],
+    ['chat', Response.json({ choices: [{ message: { content: 'working', tool_calls: [{}] }, finish_reason: 'tool_calls' }], usage: chatUsage() }), false, true],
+    ['chat', sse([chat(choices(null, { content: 'ok' })), chat({ ...choices('stop'), usage: chatUsage() }), '[DONE]']), true, false],
+    ['messages', Response.json({ type: 'message', content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } }), true, false],
+    ['messages', sse([messageStart(), { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } }, { type: 'content_block_stop', index: 0 }, messageDelta(5), messageStop]), true, false],
+  ];
+  for (const [protocol, response, normalStop, pendingTools] of cases) {
+    let record, settled = false;
+    const output = meterClientResponse(response, { protocol, onResult: () => { settled = true; }, onProtocolResult: result => { assert.equal(settled, true); record = result; } });
+    await output.text(); assert.equal(record.status, 'completed'); assert.equal(record.answerText, true);
+    assert.equal(record.normalStop, normalStop); assert.equal(record.pendingTools, pendingTools);
+    assert.doesNotMatch(JSON.stringify(record), /working|partial/);
+  }
+});
+
 test('JSON preserves original bytes and exposes them only after durable settlement', async () => {
   let release, saving;
   const blocked = new Promise(resolve => { release = resolve; });

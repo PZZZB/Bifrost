@@ -292,3 +292,4 @@ footer { border-color: #839b9f29; margin-top: 29px; padding: 25px 0 30px; color:
   .integration-mode-actions { flex-direction: column; }
   .integration-mode-actions>.button { width: 100%; white-space: normal; }
 }
+.pool-usage{padding:18px 0 24px;border-top:1px solid var(--border)}.pool-usage h4{margin:0 0 16px}.pool-usage-window{display:grid;grid-template-columns:1fr auto;gap:8px;margin:14px 0}.pool-usage-window progress{grid-column:1/-1;width:100%;height:8px;accent-color:var(--accent)}.pool-usage-window small{grid-column:1/-1;color:var(--muted);overflow-wrap:anywhere}.pool-usage>.footnote{margin-bottom:0}@media(max-width:600px){.pool-usage-window{grid-template-columns:1fr}.pool-usage-window>span{font-size:12px}}

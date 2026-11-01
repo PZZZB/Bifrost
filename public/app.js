@@ -1184,18 +1184,21 @@ function modelEvidenceDetails(model) {
     label.textContent = name; content.textContent = value; row.append(label, content); fields.append(row);
   };
   const capabilities = model.capabilities;
-  const support = value => value?.support === true ? '支持' : value?.support === false ? '不支持' : '未确认';
+  const support = value => value?.adapterSupport === true ? '适配器已支持，模型待实测'
+    : value?.source === 'response-usage' ? '按响应计量'
+    : value?.support === true ? '支持' : value?.support === false ? '不支持' : '目录未声明';
   for (const [key, label] of [['images', '图片'], ['tools', '客户端工具'], ['reasoning', '思考'], ['cache', '缓存']]) {
     const value = capabilities?.[key];
     const efforts = key === 'reasoning' && Array.isArray(value?.efforts) ? value.efforts.filter(effort => typeof effort === 'string').join('、') : '';
-    appendField(label, `${support(value)}${efforts ? `（${efforts}）` : ''}${typeof value?.note === 'string' && value.note ? ` · ${value.note}` : ''}`);
+    const observed = verification?.state === 'passed' && verification.observed?.[key] === true;
+    appendField(label, `${observed ? key === 'cache' ? '已观察到缓存命中' : key === 'tools' ? '已记录工具回传后的完整调用' : '已记录含图片的成功调用' : support(value)}${efforts ? `（${efforts}）` : ''}${typeof value?.note === 'string' && value.note ? ` · ${value.note}` : ''}`);
   }
   const context = capabilities?.contextWindow;
-  appendField('上下文', Number.isSafeInteger(context?.tokens) && context.tokens > 0 ? `${context.tokens.toLocaleString('zh-CN')} Token` : '未确认');
+  appendField('上下文', `${Number.isSafeInteger(context?.tokens) && context.tokens > 0 ? `${context.tokens.toLocaleString('zh-CN')} Token${context.source === 'official-cli-runtime' ? '（官方 CLI 当前上限）' : ''}` : '未取得当前模型上限'}${context?.note ? ` · ${context.note}` : ''}`);
   appendField('指令处理', model.compatibility?.label || '尚未取得接入方式');
   if (typeof model.compatibility?.note === 'string') appendField('兼容说明', model.compatibility.note);
   appendField('调用验证', verificationLabel);
-  if (verification?.checkedAt) appendField('验证时间', tokenTime(verification.checkedAt, 'America/Los_Angeles'));
+  if (verification?.checkedAt) appendField('验证时间', `${tokenTime(verification.checkedAt, 'Asia/Shanghai')}（北京时间）`);
   if (typeof verification?.reason === 'string' && verification.reason) appendField('验证说明', verification.reason);
   const note = document.createElement('p'); note.className = 'footnote';
   note.textContent = capabilities ? '目录能力与实际调用验证分别展示；一次调用完成不代表图片、工具和缓存均已验证。刷新账号目录可更新调用验证状态。'

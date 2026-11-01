@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { readPrivateAccountFile } from './private-account-files.mjs';
 import { BridgeError } from './storage.mjs';
+import { validatedClaudeUsage, unavailableClaudeUsage } from './claude-subscription-usage.mjs';
 
 /** Optional fixed upstream for the main account/billing service. No login here. */
 export async function loadMacClaudeClient(path, { fetchImpl = fetch, onCatalog = async () => {} } = {}) {
@@ -17,6 +18,7 @@ export async function loadMacClaudeClient(path, { fetchImpl = fetch, onCatalog =
   const csrfKey = (await readPrivateAccountFile(`${web.directory}/csrf.key`, 128)).trim();
   const root = 'http://127.0.0.1:43157';
   let models = [], timer, refreshPending = null, lastAvailable = false;
+  let subscriptionUsage = unavailableClaudeUsage(), authorizationVersion = null;
   async function refresh() {
     if (refreshPending) return refreshPending;
     refreshPending = (async () => {
@@ -31,12 +33,23 @@ export async function loadMacClaudeClient(path, { fetchImpl = fetch, onCatalog =
           name: typeof model.display_name === 'string' && model.display_name.length < 200 ? model.display_name : 'Claude',
           ...(typeof model.supportsReasoning === 'boolean' ? { supportsReasoning: model.supportsReasoning } : {}),
           ...(Array.isArray(model.efforts) ? { efforts: model.efforts.filter(e => ['low','medium','high','xhigh','max'].includes(e)) } : {}),
+          ...(model.contextSource === 'official-cli-runtime' && Number.isSafeInteger(model.contextWindow)
+            && model.contextWindow > 0 && model.contextWindow <= 1_000_000_000
+            ? { contextWindow: model.contextWindow, contextSource: 'official-cli-runtime' } : {}),
           channel: 'Claude', enabled: true, available: true, protocols: ['chat-completions', 'messages'] }));
         if (new Set(discovered.map(m => m.id)).size !== discovered.length) throw new Error();
-        await onCatalog(discovered.map(({ upstream, ...model }) => model));
+        try {
+          const health = await fetchImpl(`${root}/health`, { headers: { authorization: `Bearer ${key}` }, redirect: 'manual', signal: AbortSignal.timeout(5000) });
+          const content = await health.text();
+          if (!health.ok || content.length > 131072) throw new Error();
+          const metadata = JSON.parse(content).providers?.Claude;
+          subscriptionUsage = validatedClaudeUsage(metadata?.subscriptionUsage);
+          authorizationVersion = typeof metadata?.authorizationVersion === 'string' && /^[a-f0-9]{64}$/.test(metadata.authorizationVersion) ? metadata.authorizationVersion : null;
+        } catch { subscriptionUsage = unavailableClaudeUsage('fetch_failed'); authorizationVersion = null; }
+        await onCatalog(discovered.map(({ upstream, ...model }) => model), authorizationVersion);
         models = discovered;
         lastAvailable = true;
-      } catch { models = []; lastAvailable = false; await onCatalog([]).catch(() => {}); }
+      } catch { models = []; lastAvailable = false; subscriptionUsage = unavailableClaudeUsage('fetch_failed'); authorizationVersion = null; await onCatalog([], null).catch(() => {}); }
       finally { refreshPending = null; }
     })();
     return refreshPending;
@@ -63,7 +76,8 @@ export async function loadMacClaudeClient(path, { fetchImpl = fetch, onCatalog =
     return response;
   }
   return { web, csrfKey, models: () => models.map(({ upstream, ...model }) => ({ ...model })), refresh,
-    status: () => ({ available: lastAvailable, modelCount: models.length }),
+    get authorizationVersion() { return authorizationVersion; },
+    status: () => ({ available: lastAvailable, modelCount: models.length, subscriptionUsage: structuredClone(subscriptionUsage) }),
     requestChat: request.bind(null, 'chat'), requestMessages: request.bind(null, 'messages'),
     async close() { clearInterval(timer); await refreshPending; } };
 }

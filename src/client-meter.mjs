@@ -122,6 +122,7 @@ class Protocol {
     this.usage = null; this.invalidUsage = false; this.started = false; this.modelSeen = false;
     this.choices = new Map(); this.messageCounts = {}; this.messageStopped = false;
     this.blocks = new Set(); this.finalOutput = false;
+    this.pendingTools = false; this.answerText = false;
   }
   candidate(value, format = this.protocol) {
     const usage = format === 'messages' ? messageUsage(value) : normalizedUsage(value, format);
@@ -163,6 +164,9 @@ class Protocol {
       const status = value.type.slice('response.'.length);
       if (!object(value.response) || value.response.status !== status) throw protocolError();
       this.modelSeen = true;
+      this.pendingTools = Array.isArray(value.response.output) && value.response.output.some(item => item?.type === 'function_call');
+      this.answerText = Array.isArray(value.response.output) && value.response.output.some(item => item?.type === 'message'
+        && Array.isArray(item.content) && item.content.some(part => part?.type === 'output_text' && typeof part.text === 'string' && part.text.trim()));
       this.finish(status, value.response, value.response.usage); return;
     }
     if (['error', 'response.error'].includes(value.type) || value.error != null) { this.error(value); return; }
@@ -180,6 +184,8 @@ class Protocol {
       if (choice.finish_reason != null && !stopReason(choice.finish_reason)) throw protocolError();
       if (finished && object(choice.delta) && Object.values(choice.delta).some(value => value != null && value !== '')) throw protocolError();
       this.choices.set(choice.index, choice.finish_reason ?? false);
+      this.pendingTools ||= ['tool_calls', 'function_call'].includes(choice.finish_reason);
+      this.answerText ||= typeof choice.delta?.content === 'string' && Boolean(choice.delta.content.trim());
     }
     const finished = this.choices.size && [...this.choices.values()].every(Boolean);
     if (finished) {
@@ -219,6 +225,7 @@ class Protocol {
       if (this.messageStopped && value.delta.stop_reason !== this.messageStopReason) throw protocolError();
       if (value.delta.stop_reason != null) {
         this.messageStopped = true; this.messageStopReason = value.delta.stop_reason; this.hold = true;
+        this.pendingTools ||= value.delta.stop_reason === 'tool_use';
       }
       this.mergeMessageUsage(value.usage, true); return;
     }
@@ -227,8 +234,11 @@ class Protocol {
       if (!Number.isSafeInteger(value.index) || value.index < 0) throw protocolError();
       if (value.type === 'content_block_start') {
         if (this.blocks.has(value.index)) throw protocolError(); this.blocks.add(value.index);
+        this.pendingTools ||= value.content_block?.type === 'tool_use';
+        this.answerText ||= value.content_block?.type === 'text' && typeof value.content_block.text === 'string' && Boolean(value.content_block.text.trim());
       } else if (!this.blocks.has(value.index)) throw protocolError();
       else if (value.type === 'content_block_stop') this.blocks.delete(value.index);
+      else this.answerText ||= value.delta?.type === 'text_delta' && typeof value.delta.text === 'string' && Boolean(value.delta.text.trim());
       return;
     }
     throw protocolError();
@@ -239,13 +249,23 @@ class Protocol {
     if (this.protocol === 'responses') {
       if (!['completed', 'incomplete', 'failed'].includes(value.status)) throw protocolError();
       this.modelSeen = true; this.finish(value.status, value, value.usage);
+      this.pendingTools = Array.isArray(value.output) && value.output.some(item => item?.type === 'function_call');
+      this.answerText = Array.isArray(value.output) && value.output.some(item => item?.type === 'message'
+        && Array.isArray(item.content) && item.content.some(part => part?.type === 'output_text' && typeof part.text === 'string' && part.text.trim()));
     } else if (this.protocol === 'chat') {
       if (!Array.isArray(value.choices) || !value.choices.length
         || value.choices.some(choice => !object(choice) || !stopReason(choice.finish_reason))) throw protocolError();
       this.modelSeen = true; this.finish('completed', null, undefined); this.candidate(value.usage, 'chat'); this.done = true;
+      this.choices = new Map(value.choices.map((choice, index) => [index, choice.finish_reason]));
+      this.pendingTools = value.choices.some(choice => ['tool_calls', 'function_call'].includes(choice.finish_reason)
+        || Array.isArray(choice.message?.tool_calls) && choice.message.tool_calls.length > 0);
+      this.answerText = value.choices.some(choice => typeof choice.message?.content === 'string' && choice.message.content.trim());
     } else {
       if (value.type !== 'message' || !stopReason(value.stop_reason)) throw protocolError();
       this.modelSeen = true; this.finish('completed', null, undefined); this.candidate(value.usage, 'messages');
+      this.messageStopReason = value.stop_reason;
+      this.pendingTools = value.stop_reason === 'tool_use' || Array.isArray(value.content) && value.content.some(block => block?.type === 'tool_use');
+      this.answerText = Array.isArray(value.content) && value.content.some(block => block?.type === 'text' && typeof block.text === 'string' && block.text.trim());
     }
   }
   complete() {
@@ -262,7 +282,7 @@ export function getClientMeter(response) { return METERS.get(response) ?? null; 
  * bridgeUsage, when present, is authoritative: null never falls back to wire
  * placeholders. A failed or interrupted stream always remains unresolved.
  */
-export function meterClientResponse(response, { protocol, onResult, signal } = {}) {
+export function meterClientResponse(response, { protocol, onResult, onProtocolResult = () => {}, signal } = {}) {
   if (!(response instanceof Response) || !['responses', 'chat', 'messages'].includes(protocol) || typeof onResult !== 'function') {
     throw new TypeError('A Response, supported protocol and onResult callback are required.');
   }
@@ -281,7 +301,13 @@ export function meterClientResponse(response, { protocol, onResult, signal } = {
   const settle = result => {
     if (settlePromise) return settlePromise;
     signal?.removeEventListener('abort', onAbort);
-    settlePromise = Promise.resolve().then(() => onResult(structuredClone(result))).then(() => {
+    settlePromise = Promise.resolve().then(() => onResult(structuredClone(result))).then(async () => {
+      // Observation follows durable settlement and never changes financial or
+      // transport results. Tool-pending/length-limited/error turns cannot pass.
+      try { await onProtocolResult({ ...structuredClone(result), terminal: parser.terminal?.kind ?? null,
+        pendingTools: parser.pendingTools, answerText: parser.answerText,
+        normalStop: protocol === 'chat' ? [...parser.choices.values()].every(reason => reason === 'stop')
+          : protocol === 'messages' ? ['end_turn', 'stop_sequence'].includes(parser.messageStopReason) : parser.terminal?.kind === 'completed' }); } catch {}
       resolveFinish(result); return result;
     }, error => { rejectFinish(error); throw error; });
     settlePromise.catch(() => {});

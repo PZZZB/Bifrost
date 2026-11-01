@@ -162,6 +162,10 @@ export class ModelPolicy {
     if (!value) return false;
     const previous = this.#verifications.get(record.model);
     if (previous?.authorizationVersion === version && previous.value.checkedAt > value.checkedAt) return false;
+    if (value.state === 'passed' && previous?.value.state === 'passed' && previous.authorizationVersion === version
+      && previous.fingerprint === JSON.stringify(stored.value) && (previous.value.observed || value.observed)) {
+      value.observed = Object.fromEntries(['images', 'tools', 'cache'].map(key => [key, previous.value.observed?.[key] === true || value.observed?.[key] === true]));
+    }
     this.#verifications.set(record.model, { authorizationVersion: version, fingerprint: JSON.stringify(stored.value), value });
     return true;
   }

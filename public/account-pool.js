@@ -5,6 +5,9 @@
   const labels = { ready: '就绪', disabled: '已停用', not_ready: '待确认', authorization_required: '待授权', activation_required: '待重启加载' };
   const element = (tag, value, className) => { const node = document.createElement(tag); if (value !== undefined) node.textContent = value; if (className) node.className = className; return node; };
   const message = value => { byId('pool-message').textContent = value || ''; };
+  const percent = value => new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(value);
+  const time = value => value && Number.isFinite(Date.parse(value)) ? new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short', hour12: false }).format(new Date(value)) : '未返回';
   function failure(error) { byId('pool-error').textContent = error.message || '账号池暂不可用。'; byId('pool-error').hidden = false; }
   async function request(path, body) {
     const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', redirect: 'error',
@@ -67,11 +70,28 @@
     if (!account) { hideEditors(); return; }
     const header = element('div', undefined, 'panel-heading'); header.append(element('h3', account.name), element('span', account.typeName, 'pill')); detail.append(header);
     const fields = element('dl', undefined, 'account-summary');
-    for (const [label, value] of [['授权位置', account.authorization], ['上游额度', account.quota.label],
+    for (const [label, value] of [['授权位置', account.authorization], [account.quota.kind === 'subscription' ? '订阅用量' : '上游额度', account.quota.label],
       ['已开放模型', `${account.publishedModelCount} / ${account.modelCount}`], ...(account.endpoint ? [['用户 API', account.endpoint]] : [])]) {
       const row = element('div'); row.append(element('dt', label), element('dd', value)); fields.append(row);
     }
     detail.append(fields);
+    if (account.quota.kind === 'subscription') {
+      const quota = account.quota, windows = element('section', undefined, 'pool-usage');
+      const plans = { pro: 'Claude Pro', max: 'Claude Max', ultra: 'Claude Ultra', team: 'Claude Team', enterprise: 'Claude Enterprise' };
+      windows.append(element('h4', plans[quota.plan] || 'Claude 订阅用量'));
+      for (const window of quota.windows || []) {
+        const row = element('div', undefined, 'pool-usage-window');
+        row.append(element('strong', window.label), element('span', typeof window.usedPercent === 'number' ? `已用 ${percent(window.usedPercent)}% · 剩余 ${percent(window.remainingPercent)}%` : '用量比例未返回'));
+        if (typeof window.usedPercent === 'number') {
+          const progress = element('progress'); progress.max = 100; progress.value = window.usedPercent;
+          progress.setAttribute('aria-label', `${window.label}已用 ${percent(window.usedPercent)}%`); row.append(progress);
+        }
+        row.append(element('small', `重置：${time(window.resetsAt)}（北京时间）`)); windows.append(row);
+      }
+      if (quota.status !== 'ok') windows.append(element('p', quota.reason === 'stale' ? '上次数据已过期，等待重新读取。' : quota.label, 'panel-copy'));
+      windows.append(element('p', `虚拟机内查询，沿用 VPS 出口，约每 5 分钟更新；上次检查：${time(quota.checkedAt)}（北京时间）。订阅用量与本站用户余额分别管理。`, 'footnote'));
+      detail.append(windows);
+    }
     const rename = element('form', undefined, 'pool-rename');
     const label = element('label', '账号名称'), input = element('input'); input.value = account.name; input.maxLength = 80; input.required = true; label.append(input);
     const save = element('button', '保存名称', 'button secondary'); save.type = 'submit'; save.disabled = busy; rename.append(label, save);

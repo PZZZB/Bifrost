@@ -344,3 +344,23 @@ test('client alias summaries and later name-only observations cannot replace aut
   assert.equal(row.capabilities.images.support, true); assert.equal(row.capabilities.contextWindow.tokens, 500000);
   assert.equal(row.compatibility.mode, 'project-rules');
 });
+
+test('Claude call observations follow the authenticated account, accumulate features and clear stale context', async t => {
+  const { policy } = await fixture(t); let version = 'claude-one';
+  policy.setAuthorizationVersionGetter('Claude', () => version);
+  const catalog = { models: [{ id: 'Claude-sonnet', name: 'Sonnet', available: true, contextWindow: 1000000, contextSource: 'official-cli-runtime' }] };
+  await policy.observe(catalog, 'Claude', { authorizationVersion: version });
+  const record = { model: 'Claude-sonnet', account: 'Claude', authorizationVersion: version,
+    time: '2026-11-01T08:00:00Z', outcome: 'passed', completed: true, pendingTools: false,
+    kind: 'tool', observed: { images: true, cache: true, privateData: 'PRIVATE' } };
+  assert.equal(policy.recordVerification({ ...record, pendingTools: true }), false);
+  assert.equal(policy.recordVerification(record), true);
+  assert.equal(policy.recordVerification({ ...record, time: '2026-11-01T08:00:01Z', kind: 'plain', observed: { images: false, cache: false } }), true);
+  let row = policy.snapshot().models.find(m => m.id === 'Claude-sonnet');
+  assert.deepEqual(row.verification.observed, { images: true, tools: true, cache: true });
+  assert.doesNotMatch(JSON.stringify(row), /PRIVATE|claude-one/);
+  version = 'claude-two'; assert.equal(policy.recordVerification(record), false);
+  assert.equal(policy.snapshot().models.find(m => m.id === 'Claude-sonnet').verification.state, 'unverified');
+  await policy.observe({ models: [{ id: 'Claude-sonnet', name: 'Sonnet', available: true }] }, 'Claude', { authorizationVersion: version });
+  row = policy.snapshot().models.find(m => m.id === 'Claude-sonnet'); assert.equal(row.capabilities.contextWindow.tokens, null);
+});

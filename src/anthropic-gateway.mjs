@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { keyMatches, readBody, SseInspector } from './gateway.mjs';
 import { BridgeError, redact } from './storage.mjs';
 import { classifyDiagnosticFailure, normalizeDiagnosticRecord } from './request-diagnostics.mjs';
+import { validatedClaudeUsage } from './claude-subscription-usage.mjs';
 
 const ROUTES = new Map([
   ['/health', 'GET'],
@@ -166,9 +167,11 @@ export class AnthropicGateway {
     return new BridgeError(message ?? messages[code], status, `anthropic_${code}`);
   }
 
-  providerMetadata(_route, metadata) {
+  providerMetadata(route, metadata) {
     return { authenticated: typeof metadata?.authenticated === 'boolean' ? metadata.authenticated : null, ready: metadata?.ready === true,
-      modelAvailable: metadata?.modelAvailable === true, error: metadata?.error ? this.safeError(metadata.error) : null };
+      modelAvailable: metadata?.modelAvailable === true, error: metadata?.error ? this.safeError(metadata.error) : null,
+      ...(route.account === 'Claude' && metadata?.subscriptionUsage ? { subscriptionUsage: validatedClaudeUsage(metadata.subscriptionUsage) } : {}),
+      ...(route.account === 'Claude' && /^[a-f0-9]{64}$/.test(metadata?.authorizationVersion ?? '') ? { authorizationVersion: metadata.authorizationVersion } : {}) };
   }
 
   async modelAvailable(route) {
@@ -266,7 +269,7 @@ export class AnthropicGateway {
         for (const route of this.routes.values()) {
           if (this.isAccountEnabled(route.account, route.model.id) === true && await this.modelAvailable(route)) {
             data.push({ id: route.model.id, type: 'model', display_name: route.model.name,
-              ...Object.fromEntries(['description', 'resolvedModel', 'supportsReasoning', 'efforts'].filter(k => route.model[k] !== undefined).map(k => [k, route.model[k]])) });
+              ...Object.fromEntries(['description', 'resolvedModel', 'supportsReasoning', 'efforts', 'contextWindow', 'contextSource'].filter(k => route.model[k] !== undefined).map(k => [k, route.model[k]])) });
           }
         }
         json(res, 200, { data, has_more: false, first_id: data[0]?.id ?? null, last_id: data.at(-1)?.id ?? null });

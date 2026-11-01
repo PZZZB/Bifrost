@@ -8,6 +8,7 @@ import { UpstreamAccountStore, readUpstreamAccounts, validateUpstreamAccounts } 
 import { UpstreamAccounts } from '../src/upstream-accounts.mjs';
 import { loadServerRemotesConfig } from '../src/runtime/server-remotes-config.mjs';
 import { ModelPolicy } from '../src/model-policy.mjs';
+import { claudeSubscriptionUsage } from '../src/claude-subscription-usage.mjs';
 
 async function directory(t) { const path = await realpath(await mkdtemp(join(tmpdir(), 'bifrost-upstreams-')));
   t.after(() => rm(path, { recursive: true, force: true })); return path; }
@@ -83,6 +84,20 @@ test('current-node capability snapshots expose one managed Claude and no foreign
   assert.doesNotMatch(JSON.stringify(data), /credentialRef|binding|192\.168|\/Users\/|CodeBuddy|Cursor/);
   await assert.rejects(f.manager.create({ kind: 'codebuddy', name: 'Foreign' }), e => e.code === 'upstream_type_unavailable');
   await assert.rejects(f.manager.create({ kind: 'claude', name: 'Duplicate environment' }));
+});
+
+test('managed Claude displays subscription percentages separately from customer money and skips disabled status reads', async t => {
+  let reads = 0;
+  const usage = claudeSubscriptionUsage({ subscription_type: 'pro', rate_limits_available: true,
+    rate_limits: { five_hour: { utilization: 3, resets_at: new Date(Date.now() + 3600000).toISOString() } } });
+  const f = await fixture(t, { readers: { claude: () => { reads++; return { configured: true, ready: true, subscriptionUsage: usage,
+    balanceMicros: 99999999, apiKey: 'PRIVATE' }; } } });
+  let snapshot = await f.manager.snapshot(); assert.equal(snapshot.accounts[0].quota.kind, 'subscription');
+  assert.equal(snapshot.accounts[0].quota.windows[0].usedPercent, 3); assert.doesNotMatch(JSON.stringify(snapshot), /balanceMicros|PRIVATE/);
+  const before = reads;
+  snapshot = await f.manager.update(snapshot.accounts[0].id, { revision: snapshot.revision, enabled: false });
+  assert.equal(reads, before); assert.equal(snapshot.accounts[0].quota.status, 'unavailable');
+  assert.deepEqual(snapshot.accounts[0].quota.windows, []); assert.match(snapshot.accounts[0].quota.label, /停用/);
 });
 
 test('disabling a source stops publication without changing its model preference or reading its credentials/status', async t => {

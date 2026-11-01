@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
 import { AnthropicGateway, createAnthropicGatewayServer } from '../src/anthropic-gateway.mjs';
+import { claudeSubscriptionUsage } from '../src/claude-subscription-usage.mjs';
 
 const gatewayKey = 'independent-anthropic-gateway-test-key';
 const gatewayHost = 'custom-gateway.example:46321';
@@ -54,6 +55,22 @@ async function gatewayFixture(t, routes, options = {}) {
       body: typeof body === 'string' ? body : JSON.stringify(body), ...extra,
     }) };
 }
+
+test('Claude private metadata projects only safe usage and context, keeping health behind gateway authentication', async t => {
+  const subscriptionUsage = claudeSubscriptionUsage({ subscription_type: 'pro', rate_limits_available: true,
+    rate_limits: { five_hour: { utilization: 3, resets_at: new Date(Date.now() + 3600000).toISOString() } } });
+  const provider = providerFixture({ status: async () => ({ authenticated: true, ready: true, modelAvailable: true,
+    subscriptionUsage: { ...subscriptionUsage, email: 'PRIVATE' }, authorizationVersion: 'a'.repeat(64), cookie: 'PRIVATE' }) });
+  const { send } = await gatewayFixture(t, [{ account: 'Claude', provider, model: { id: 'claude-opus', name: 'Opus',
+    contextWindow: 1000000, contextSource: 'official-cli-runtime' } }]);
+  const denied = await send('/health', undefined, { method: 'GET', headers: { host: gatewayHost } }); assert.equal(denied.status, 401);
+  const response = await send('/health', undefined, { method: 'GET' }); const data = await response.json();
+  assert.equal(data.providers.Claude.subscriptionUsage.windows[0].usedPercent, 3);
+  assert.equal(data.providers.Claude.authorizationVersion, 'a'.repeat(64)); assert.doesNotMatch(JSON.stringify(data), /PRIVATE|email|cookie/);
+  const catalog = await (await send('/v1/models', undefined, { method: 'GET' })).json();
+  assert.equal(catalog.data[0].contextWindow, 1000000); assert.equal(catalog.data[0].contextSource, 'official-cli-runtime');
+  assert.doesNotMatch(JSON.stringify(catalog), /subscriptionUsage|authorizationVersion/);
+});
 
 test('arbitrary provider names and multiple models share account usage with exact routes', async t => {
   const first = providerFixture(), second = providerFixture();

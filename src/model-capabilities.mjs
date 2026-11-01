@@ -64,13 +64,17 @@ export function capabilitiesFromCatalog(value, { channel, promptMode } = {}) {
       ? `现有网关适配配置声明${label}；当前账号仍需真实验证。` : `来自目录的明确${label}声明；不等同于真实调用验证。`);
   return {
     capabilities: {
-      tools: declared(tools, '工具调用', origin),
-      images: declared(images, '图片输入'),
+      tools: channel === 'Claude' && tools === null ? capability(null, 'bridge-configuration',
+        '适配器已支持客户端工具调用和结果回传；当前模型是否完成工具回合另看实测记录。', { adapterSupport: true }) : declared(tools, '工具调用', origin),
+      images: channel === 'Claude' && images === null ? capability(null, 'bridge-configuration',
+        '适配器已支持图片输入；当前模型的图片识别效果仍需真实请求验证。', { adapterSupport: true }) : declared(images, '图片输入'),
       reasoning: { ...declared(reasoning, '思考'), efforts, defaultEffort: efforts.includes(preferred) ? preferred : null },
-      contextWindow: capability(positive(tokens) ? true : null, positive(tokens) ? origin : 'unknown',
-        positive(tokens) ? '目录声明的上下文长度；客户端实际保留预算可能更小。' : '目录未明确返回可验证的上下文长度。',
+      contextWindow: capability(positive(tokens) ? true : null, positive(tokens) ? channel === 'Claude' && source.contextSource === 'official-cli-runtime' ? 'official-cli-runtime' : origin : 'unknown',
+        positive(tokens) ? channel === 'Claude' && source.contextSource === 'official-cli-runtime'
+          ? '官方 CLI 对当前所选模型返回的上下文上限；未进行满窗口压力测试，客户端实际预算可能更小。'
+          : '目录声明的上下文长度；客户端实际保留预算可能更小。' : '目录未明确返回可验证的上下文长度。',
         { tokens: positive(tokens) ? tokens : null }),
-      cache: capability(null, 'unknown', channel === 'CodeBuddy'
+      cache: capability(null, channel === 'Claude' ? 'response-usage' : 'unknown', channel === 'CodeBuddy'
         ? '缓存提示不能保证保真转换；实际缓存命中仅以服务商返回的用量为准。'
         : '目录不能证明本次缓存是否生效；仅以服务商返回的实际用量为准。'),
       promptMode: capability(mode.mode === 'unknown' ? null : true,
@@ -83,7 +87,8 @@ export function capabilitiesFromCatalog(value, { channel, promptMode } = {}) {
 /** Bare seed names and client aliases must not erase source capability metadata. */
 export function hasCatalogCapabilityData(source, { channel } = {}) {
   if (!object(source)) return false;
-  if (channel === 'CodeBuddy' || channel === 'Cursor' || channel === 'Bifrost') return ['supportsToolCall', 'supportsTools', 'supportsToolCalls',
+  if (channel === 'Claude') return true;
+  if (channel === 'CodeBuddy' || channel === 'Cursor' || channel === 'Bifrost' || channel === 'Claude') return ['supportsToolCall', 'supportsTools', 'supportsToolCalls',
     'supportsImages', 'supportsVision', 'supportsImageInput', 'supportsReasoning', 'inputModalities', 'contextWindow',
     'efforts', 'defaultEffort', 'parameters', 'variants', 'capabilities'].some(field => Object.hasOwn(source, field));
   return ['context_window', 'input_modalities', 'supported_reasoning_levels', 'supports_tools', 'supports_tool_calls',
@@ -113,5 +118,7 @@ export function verificationFromRecord(record) {
   return { state: record.outcome, checkedAt: date.toISOString(), source: 'gateway-observed-call',
     reason: record.outcome === 'passed' ? '记录到当前账号的完整成功调用；不代表所有功能均已验证。' : FAILURE_NOTES[category],
     ...(record.outcome === 'failed' ? { category } : {}),
+    ...(record.outcome === 'passed' && object(record.observed) ? { observed: {
+      images: record.observed.images === true, tools: record.kind === 'tool', cache: record.observed.cache === true } } : {}),
     ...(['plain', 'tool'].includes(record.kind) ? { kind: record.kind } : {}) };
 }

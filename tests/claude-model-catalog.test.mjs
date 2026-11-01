@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { claudeCatalogModels, discoverClaudeModels } from '../src/claude-model-catalog.mjs';
+import { claudeCatalogModels, discoverClaudeModels, discoverClaudeMetadata } from '../src/claude-model-catalog.mjs';
 const rows = [{ value: 'default', resolvedModel: 'claude-opus-v', displayName: 'Default' },
   { value: 'opus', resolvedModel: 'claude-opus-v', displayName: 'Opus', supportsEffort: true, supportedEffortLevels: ['high','invalid'] },
   { value: 'sonnet', displayName: 'Sonnet' }, { value: 'haiku', displayName: 'Haiku' },
@@ -28,4 +28,29 @@ test('cancelled metadata discovery closes a stalled query without sending infere
   await assert.rejects(discoverClaudeModels({binary:'/cli',configDir:'/profile/config',profileDir:'/profile/user',stateDir:'/profile/state',timeoutMs:10,
     queryImpl(){return{supportedModels:()=>new Promise(()=>{}),close(){closed=true;}};}}));
   assert.equal(closed,true);
+});
+
+test('metadata exposes matched runtime context and an opaque account generation without sending identity or session costs', async () => {
+  let selected, closed = false, sent = 0;
+  const read = (email = 'private@example.invalid') => discoverClaudeMetadata({ binary: '/cli', configDir: '/config', profileDir: '/profile', stateDir: '/state',
+    identitySecret: 'relay-private-identity-secret'.repeat(3), queryImpl({ prompt }) {
+      void prompt.next().then(value => { if (!value.done) sent++; });
+      return { supportedModels: async () => rows, accountInfo: async () => ({ email, organization: 'PRIVATE_ORG', apiProvider: 'firstParty' }),
+        setModel: async model => { selected = model; }, getContextUsage: async () => ({ model: selected === 'opus' ? 'claude-opus-v' : 'different', maxTokens: 1000000,
+          memoryFiles: ['PRIVATE_FILES'] }), close() { closed = true; },
+        usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => { throw new Error('PRIVATE'); } };
+    } });
+  const result = await read(); assert.equal(closed, true); assert.equal(sent, 0);
+  assert.equal(result.models[0].contextWindow, 1000000); assert.equal(result.models[0].contextSource, 'official-cli-runtime');
+  assert.equal(result.models[1].contextWindow, undefined); assert.equal(result.subscriptionUsage.status, 'unavailable');
+  assert.match(result.authorizationVersion, /^[a-f0-9]{64}$/); assert.doesNotMatch(JSON.stringify(result), /PRIVATE|private@example/);
+  assert.equal((await read()).authorizationVersion, result.authorizationVersion);
+  assert.notEqual((await read('different@example.invalid')).authorizationVersion, result.authorizationVersion);
+});
+
+test('missing or rejected optional SDK metadata does not erase supported models', async () => {
+  const result = await discoverClaudeMetadata({ binary: '/cli', configDir: '/config', profileDir: '/profile', stateDir: '/state', includeUsage: false,
+    queryImpl: () => ({ supportedModels: async () => rows, setModel: async () => { throw new Error('Unsupported'); }, getContextUsage: async () => ({}), close() {} }) });
+  assert.equal(result.models.length, 4); assert.equal(result.subscriptionUsage, null); assert.equal(result.authorizationVersion, null);
+  assert.ok(result.models.every(model => model.contextWindow === undefined));
 });

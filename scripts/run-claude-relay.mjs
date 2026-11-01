@@ -4,10 +4,12 @@ import { isIP } from 'node:net';
 import { createClaudeGatewayServer, ChatHistoryStore } from '../src/openai-chat-gateway.mjs';
 import { ClaudeCliHub } from '../src/claude-cli-provider.mjs';
 import { startRelayControl } from '../src/relay-control.mjs';
-import { discoverClaudeModels } from '../src/claude-model-catalog.mjs';
+import { discoverClaudeMetadata } from '../src/claude-model-catalog.mjs';
+import { unavailableClaudeUsage } from '../src/claude-subscription-usage.mjs';
 
 let hub, server, control, controlStart, closing;
 let catalogTimer, catalogPending;
+let subscriptionUsage = unavailableClaudeUsage(), usageAttemptAt = 0, authorizationVersion = null;
 const catalogAbort = new AbortController();
 function close() {
   return closing ??= (async () => {
@@ -45,17 +47,30 @@ try {
   hub = new ClaudeCliHub({ binary: config.cli.binary, configDir: config.cli.configDir,
     profileDir: config.cli.profileDir, stateDir: config.cli.stateDir, mcpPort });
   await hub.start();
+  const routeFor = model => {
+    const provider = hub.provider(model.upstream);
+    return { account: 'Claude', model, provider: { ...provider,
+      status: async () => ({ ...(await provider.status()), subscriptionUsage: structuredClone(subscriptionUsage), authorizationVersion }) } };
+  };
   const history = new ChatHistoryStore({ path: join(config.cli.stateDir, 'chat-history.json') });
   await history.load();
   server = createClaudeGatewayServer({ gatewayKey,
     allowedHosts: config.listener.allowedHosts, allowedPeers: config.listener.allowedPeers,
-    routes: config.models.map(model => ({ account: 'Claude', model, provider: hub.provider(model.upstream) })) }, { history });
+    routes: config.models.map(routeFor) }, { history });
   if (config.modelDiscovery?.enabled === true) {
     const refreshCatalog = () => catalogPending ??= (async () => {
       try {
-        const models = (await hub.status()).authenticated ? await discoverClaudeModels({ ...config.cli, signal: catalogAbort.signal }) : [];
-        if (!catalogAbort.signal.aborted) server.gateway.replaceRoutes(models.map(model => ({ account: 'Claude', model, provider: hub.provider(model.upstream) })));
-      } catch { if (!catalogAbort.signal.aborted) server.gateway.replaceRoutes([]); }
+        const authenticated = (await hub.status()).authenticated;
+        const includeUsage = Date.now() - usageAttemptAt >= 300000;
+        if (includeUsage) usageAttemptAt = Date.now();
+        const metadata = authenticated ? await discoverClaudeMetadata({ ...config.cli, signal: catalogAbort.signal, includeUsage, identitySecret: gatewayKey })
+          : { models: [], subscriptionUsage: unavailableClaudeUsage('not_authenticated') };
+        if (!catalogAbort.signal.aborted) {
+          if (metadata.subscriptionUsage) subscriptionUsage = metadata.subscriptionUsage;
+          authorizationVersion = metadata.authorizationVersion ?? null;
+          server.gateway.replaceRoutes(metadata.models.map(routeFor));
+        }
+      } catch { if (!catalogAbort.signal.aborted) { subscriptionUsage = unavailableClaudeUsage('fetch_failed'); authorizationVersion = null; server.gateway.replaceRoutes([]); } }
     })().finally(() => { catalogPending = null; });
     await refreshCatalog();
     catalogTimer = setInterval(() => { void refreshCatalog(); }, 60000); catalogTimer.unref();

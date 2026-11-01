@@ -49,9 +49,12 @@ const stateDir = resolve(process.env.BRIDGE_STATE_DIR || join(homedir(), '.codex
 // Read the migration latch before constructing any old Codex credential owner.
 const delegation = await loadMagpieDelegation(join(stateDir, 'magpie-delegation.json'));
 const modelPolicy = await ModelPolicy.open({ path: join(stateDir, 'model-policy.json') });
-const macClaude = await loadMacClaudeClient(process.env.BRIDGE_MAC_CLAUDE_CONFIG, { onCatalog: async models => {
-  await modelPolicy.observe({ models: models.filter(m => ['Claude-opus', 'Claude-sonnet'].includes(m.id)) }, 'Claude');
-  await modelPolicy.observe({ models }, 'Claude', { complete: true, defaultEnabled: false });
+let claudeAuthorizationVersion = null;
+if (process.env.BRIDGE_MAC_CLAUDE_CONFIG) modelPolicy.setAuthorizationVersionGetter('Claude', () => claudeAuthorizationVersion);
+const macClaude = await loadMacClaudeClient(process.env.BRIDGE_MAC_CLAUDE_CONFIG, { onCatalog: async (models, version) => {
+  claudeAuthorizationVersion = version;
+  await modelPolicy.observe({ models: models.filter(m => ['Claude-opus', 'Claude-sonnet'].includes(m.id)) }, 'Claude', { authorizationVersion: version });
+  await modelPolicy.observe({ models }, 'Claude', { complete: true, defaultEnabled: false, authorizationVersion: version });
 } });
 const nativeIntegration = !macClaude && !delegation;
 const aHome = resolve(process.env.BRIDGE_CLIENT_CODEX_HOME || process.env.CODEX_HOME || join(homedir(), '.codex'));
@@ -95,7 +98,7 @@ try { requestDiagnostics = await RequestDiagnostics.open({ path: join(stateDir, 
 catch { console.error('Request diagnostics unavailable; model forwarding remains enabled.'); }
 function authorizationVersion(account) {
   return account === 'CodeBuddy' ? codeBuddyService?.authorizationVersion : account === 'Cursor' ? cursorService?.authorizationVersion
-    : account === 'Bifrost' ? serverRemotes?.generation ?? null : null;
+    : account === 'Bifrost' ? serverRemotes?.generation ?? null : account === 'Claude' ? claudeAuthorizationVersion : null;
 }
 async function recordDiagnostic(record) {
   if (record.terminalVerified === true || ['failed', 'interrupted', 'incomplete'].includes(record.status)
@@ -209,7 +212,8 @@ if (accountStore) {
   accountPool = new UpstreamAccounts({ store: accountStore,
     types: [...(macClaude ? ['claude'] : ['codex']), ...(['win32', 'darwin'].includes(process.platform) ? ['codebuddy', 'cursor', 'bifrost'] : []), ...seeds.filter(s => ['with', 'claude', 'codebuddy', 'cursor'].includes(s.kind)).map(s => s.kind)],
     readers: {
-      claude: () => macClaude ? { configured: true, ready: macClaude.status().available, authenticated: null } : withService?.status(),
+      claude: () => macClaude ? { configured: true, ready: macClaude.status().available, authenticated: null,
+        subscriptionUsage: macClaude.status().subscriptionUsage } : withService?.status(),
       codex: () => ({ configured: Boolean(backend), authenticated: Boolean(backend?.account), bound: Boolean(state.enabled && state.pinnedAccount && backend?.account) }),
       codebuddy: () => codeBuddyService?.status(), cursor: () => cursorService?.status(), with: () => withService?.status() },
     getRemotes: () => serverRemotes, modelPolicy,
@@ -272,7 +276,12 @@ if (clientAccess && clientBilling && !delegation) {
     store: new UnifiedWebAccounts({ access: clientAccess, billing: clientBilling, ...macClaude.web, payments: paymentRuntime?.service }) }) : null;
   clientService = await startClientService({ stateDir, reservedPorts: [port, 43157], publicDir: join(projectDir, 'public'), access: clientAccess, billing: clientBilling,
     webAccounts, ...(macClaude ? { requestChat: macClaude.requestChat, maxConcurrent: 4, maxConcurrentPerAccount: macClaude.web.maxConcurrent,
-      requestsPerMinute: macClaude.web.requestsPerMinute } : {}),
+      requestsPerMinute: macClaude.web.requestsPerMinute,
+      getUpstreamAuthorizationVersion: model => model.startsWith('Claude-') ? claudeAuthorizationVersion : null,
+      onModelResult: result => {
+        if (!result.model.startsWith('Claude-')) return;
+        modelPolicy.recordVerification({ ...result, account: 'Claude', outcome: 'passed', completed: true });
+      } } : {}),
     getModels: clientModels, csrfSecret: state.gatewayKey, isDraining: () => serviceControl?.draining === true,
     prepareResponses: (body, scope) => codec.input(body, scope),
     requestResponses: async ({ body, scope, signal }) => {

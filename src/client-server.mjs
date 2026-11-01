@@ -41,6 +41,7 @@ async function bodyJson(req, limit) {
 export function createClientServer({ access, publicDir, publicBaseUrl, allowedHosts, getModels,
   requestResponses, requestMessages = null, requestChat = null, prepareResponses = null, billing = null, webAccounts = null,
   isDraining = () => false, csrfSecret, now = Date.now,
+  getUpstreamAuthorizationVersion = () => null, onModelResult = () => {},
   maxConcurrentPerAccount = 4, maxConcurrent = 32, requestsPerMinute = 120 } = {}) {
   const publicUrl = new URL(publicBaseUrl);
   if (!['http:', 'https:'].includes(publicUrl.protocol) || publicUrl.pathname !== '/' || publicUrl.search || publicUrl.hash || publicUrl.username || publicUrl.password) throw new TypeError('Public client URL must be an origin.');
@@ -63,12 +64,24 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
     context.assertCurrent();
     if (request.signal?.aborted) throw fail('请求已取消。', 499, 'client_cancelled');
     context.dispatched = true;
+    let version = null;
+    try { version = getUpstreamAuthorizationVersion(prepared.body.model); } catch { /* An observer cannot block inference. */ }
     const response = await source(prepared);
     const metered = meterClientResponse(response, { protocol, signal: request.signal,
       onResult: async ({ usage, status }) => {
         if (usage && status === 'completed') await billing.settle(request.requestId, usage);
         else if (status === 'rejected') await billing.reject(request.requestId);
         else await billing.markUnresolved(request.requestId, { reason: 'usage_missing' });
+      }, onProtocolResult: async result => {
+        if (result.status !== 'completed' || result.terminal !== 'completed' || !result.normalStop
+          || result.pendingTools || !result.answerText || !response.ok) return;
+        const messages = prepared.body.messages ?? prepared.body.input;
+        const content = Array.isArray(messages) ? messages.flatMap(message => Array.isArray(message?.content) ? message.content : []) : [];
+        await onModelResult({ model: prepared.body.model, authorizationVersion: version, time: new Date(now()).toISOString(),
+          pendingTools: false, kind: content.some(part => part?.type === 'tool_result') || Array.isArray(messages)
+            && messages.some(message => message?.role === 'tool' || message?.type === 'function_call_output') ? 'tool' : 'plain',
+          observed: { images: content.some(part => ['image', 'image_url', 'input_image'].includes(part?.type)),
+            cache: result.usage?.cachedInputTokens > 0 } });
       } });
     context.meter = getClientMeter(metered);
     if (!metered.ok) {
