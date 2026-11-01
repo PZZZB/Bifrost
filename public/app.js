@@ -826,7 +826,7 @@ function bridgeTopology({ connected, gateway, integration, models, modelError, b
     { id: 'codex', name: 'Codex', copy: '调用方。已适配 Codex 客户端使用 CodeBuddy 与 Cursor 额度。其他桌面客户端调用账号 B 的方向仍待接入与验收。' },
     { id: 'claude', name: 'Claude', copy: 'Claude 客户端通过 Messages 网关调用 CLI 订阅或 CodeBuddy。CLI 保留在它的部署机器。' },
     { id: 'codebuddy', name: 'CodeBuddy', copy: '模型来源。当前由 Codex、Claude 客户端调用；CodeBuddy 客户端反向调用其他来源，尚未完成接入和完整回合验证。' },
-    { id: 'workbuddy', name: 'WorkBuddy', copy: '待接入的调用方。通用 API 已实现，WorkBuddy 桌面端配置与完整回合仍待验收，不计为已接通。' },
+    { id: 'workbuddy', name: 'WorkBuddy', copy: '调用方。macOS WorkBuddy 5.9.3 已通过公网用户 Key 调用隔离 Claude 的聊天和客户端文件工具验收。图中账号 B、CodeBuddy 与 Cursor 来源尚未完成桌面端验收。' },
     { id: 'cursor', name: 'Cursor', copy: '目前提供账号额度与模型。尚未适配 Cursor 客户端调用本网关，因此只显示指向 Cursor 的箭头。' },
   ];
   const pending = (reason, label = '待配置') => ({ state: 'pending', label, reason });

@@ -57,8 +57,8 @@ Bifröst 将上游渠道账号与下游接入用户分开管理。管理员维�
 | 接口 | 路径 | 可用渠道 |
 | --- | --- | --- |
 | OpenAI Responses | `/v1/responses` | B、CodeBuddy、Cursor |
-| OpenAI Chat Completions | `/v1/chat/completions` | B、CodeBuddy、Cursor |
-| Anthropic Messages | `/v1/messages` | 仅 CodeBuddy |
+| OpenAI Chat Completions | `/v1/chat/completions` | B、CodeBuddy、Cursor、已配置的隔离 Claude |
+| Anthropic Messages | `/v1/messages` | CodeBuddy、已配置的隔离 Claude |
 | 已授权模型目录 | `/v1/models` | 只返回此 Key 获准且当前可用的模型 |
 
 Responses 与 Chat 通常使用 `Authorization: Bearer YOUR_BIFROST_API_KEY`；Messages 也支持 `x-api-key`。用户中心登录会话不能代替模型调用 Key。
@@ -96,7 +96,9 @@ CodeBuddy 官方说明 `url` 必须是完整 API 路径，且 IDE 自定义模�
 2. API Key：自己创建的 Bifröst Key。
 3. 模型名：门户显示的获准模型 ID。
 
-WorkBuddy 默认校验并补全 `/chat/completions`。使用完整 URL 时，可开启高级配置中的 **自定义协议**，让它直接使用填写的地址。保存后，在自定义模型分组选择该模型。参见 [WorkBuddy 官方模型配置说明](https://www.codebuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Model)。
+WorkBuddy 默认校验并补全 `/chat/completions`；标准完整 Chat 地址保持默认即可。**自定义协议**用于确有非标准路径的接口。保存后，在自定义模型分组选择该模型。参见 [WorkBuddy 官方模型配置说明](https://www.codebuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Model)。
+
+macOS 5.9.3 的公网用户 Key、Sonnet 聊天与 Opus 客户端文件工具验收见 [WorkBuddy 客户端](workbuddy-client.md)。这里验证调用兼容性；原生自定义入口仍需逐个配置模型，不会仅凭 URL 与 Key 自动订阅整个模型目录。
 
 ## 入口配置与外网部署
 
@@ -108,7 +110,7 @@ WorkBuddy 默认校验并补全 `/chat/completions`。使用完整 URL 时，可
 
 外网部署时，将自有 HTTPS 域名反向代理到本机用户入口 `127.0.0.1:43159`，并将 `publicBaseUrl` 改为该 HTTPS origin。代理传入的 Host 应匹配该 origin 或 `listener.allowedHosts`。**不要把管理端口 43155 作为公开代理目标。** 新配置在下次重启后生效。
 
-本次交付未配置公网域名、HTTPS 反向代理或对外网络访问。
+上面的回环地址是通用部署示例；现有 Mac 公网入口与隔离 Claude 的部署边界另见 [Mac Claude VM](mac-claude-vm.md)。
 
 ## 微信小程序
 

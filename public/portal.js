@@ -26,7 +26,7 @@ function portalEcosystemRelations() {
       { id: 'codex', name: 'Codex', description: '调用方。已适配 Codex 客户端使用 CodeBuddy、Cursor 的模型额度。其他桌面客户端调用 Codex 账号 B，仍待接入与验收。' },
       { id: 'claude', name: 'Claude', description: '作为 Messages 客户端，调用 CodeBuddy 模型。此用户入口当前不提供 Claude 订阅来源。' },
       { id: 'codebuddy', name: 'CodeBuddy', description: '模型来源。Codex、Claude 客户端可调用 CodeBuddy 额度；CodeBuddy 客户端反向调用其他来源，尚未完成接入与完整回合验证。' },
-      { id: 'workbuddy', name: 'WorkBuddy', description: '待接入的调用方。通用 API 已实现，WorkBuddy 桌面端的配置与完整回合仍待验证，不计为已接通。' },
+      { id: 'workbuddy', name: 'WorkBuddy', description: '调用方。macOS WorkBuddy 5.9.3 已通过公网用户 Key 调用隔离 Claude 的聊天和客户端文件工具验收。图中其他模型来源尚未完成桌面端验收。' },
       { id: 'cursor', name: 'Cursor', description: '当前作为模型来源。尚未适配 Cursor 客户端反向调用本网关。' },
     ],
     routes: [
