@@ -221,7 +221,9 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
         if (url.pathname === '/api/usage') { json(res, 200, await backend.limits()); return; }
         if (url.pathname === '/api/integration') {
           const info = await integration.inspect();
-          const providerId = info.providerId ?? 'account_b';
+          const providerId = [info.routing?.gatewayProviderId, info.providerId].find(value =>
+            typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value)
+            && !['openai', 'ollama', 'lmstudio'].includes(value)) ?? 'account_b';
           const toml = `[model_providers.${JSON.stringify(providerId)}]\nname = "Account A/B Bridge"\nbase_url = ${JSON.stringify(baseUrl)}\nmodel_catalog_url = ${JSON.stringify(`${baseUrl}/models`)}\nwire_api = "responses"\nrequires_openai_auth = true\nsupports_websockets = false\nhttp_headers = { "X-Account-Bridge-Key" = ${JSON.stringify(state.gatewayKey)} }\n`;
           json(res, 200, { toml, baseUrl, gatewayKey: state.gatewayKey }); return;
         }
@@ -285,6 +287,35 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
             verification = { status: 'failed', error: redact(error.message) };
           }).finally(() => { verifying = null; });
           json(res, 202, { status: 'running' }); return;
+        }
+        if (url.pathname === '/api/integration/mode') {
+          if (body === null || typeof body !== 'object' || Array.isArray(body)
+            || Object.keys(body).length !== 1 || !Object.hasOwn(body, 'mode')
+            || !['official', 'gateway'].includes(body.mode)) {
+            throw new BridgeError('切换连接只接受 mode：official 或 gateway。', 400);
+          }
+          if (typeof integration.switchMode !== 'function') {
+            throw new BridgeError('当前后台尚未启用 Codex 连接切换，请重启网关加载。', 503, 'integration_mode_unavailable');
+          }
+          if (body.mode === 'gateway') {
+            if (verifying) throw new BridgeError('请等待当前推理验证结束。', 409);
+            const token = await backend.credentials();
+            if (verification.status !== 'passed' || verification.accountId !== token.accountId || verification.accountEmail !== token.email) {
+              throw new BridgeError('请先完成账户 B 的真实推理验证。', 409);
+            }
+          }
+          let result;
+          try { result = await integration.switchMode(body.mode); }
+          catch (error) {
+            const conflict = error?.code === 'INTEGRATION_CONFLICT';
+            const known = ['INTEGRATION_CONFLICT', 'INTEGRATION_CONFIG_UNAVAILABLE',
+              'INTEGRATION_STATE_INVALID', 'INTEGRATION_WRITE_FAILED'].includes(error?.code);
+            throw new BridgeError(conflict
+              ? 'Codex 配置已变化，切换未覆盖其他设置。请刷新页面后重试。'
+              : 'Codex 未确认连接切换。请刷新页面检查配置后重试。',
+              conflict ? 409 : 503, known ? error.code : 'integration_switch_failed');
+          }
+          json(res, 200, result); return;
         }
         if (verifying) throw new BridgeError('请等待当前推理验证结束。', 409);
         if (url.pathname === '/api/login') {

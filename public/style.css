@@ -277,3 +277,16 @@ footer { border-color: #839b9f29; margin-top: 29px; padding: 25px 0 30px; color:
   html { scroll-behavior: auto; }
   .world-routes path { animation: none !important; transition: none; }
 }
+
+.integration-mode { margin: 0 0 21px; padding: 17px 18px; border: 1px solid var(--border); border-radius: 11px; background: #0a141d55; }
+.integration-mode-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 7px 18px; }
+.integration-mode-heading>span { color: var(--dim); font-size: 11px; }
+.integration-mode-heading>strong { font-size: 15px; color: var(--accent); overflow-wrap: anywhere; }
+.integration-mode-description { color: var(--muted); font-size: 11px; margin: 8px 0 14px; }
+.integration-mode-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.integration-mode .gateway-error { margin: 13px 0 0; }
+@media(max-width:670px) {
+  .integration-mode { padding: 14px; }
+  .integration-mode-actions { flex-direction: column; }
+  .integration-mode-actions>.button { width: 100%; white-space: normal; }
+}

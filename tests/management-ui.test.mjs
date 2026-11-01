@@ -66,6 +66,7 @@ function harness(overrides = {}) {
   let clock = 0, token = 'old-service-csrf', models = overrides.models ?? originalModels(), cursor = overrides.cursor ?? { configured: true, enabled: false,
     authReady: false, profile: null, plan: { declared: 'Teams', verified: false }, login: { state: 'not_started' }, catalog: { models: [] }, gateway: {} };
   let backend = overrides.backend ?? { running: true, login: {} }, codebuddy = overrides.codebuddy ?? { configured: false };
+  let integration = overrides.integration ?? {}, verification = overrides.verification ?? {};
   let quotas = overrides.quotas ?? { accounts: { A: { status: 'ok', windows: [] }, B: { status: 'ok', windows: [] } } };
   let diagnostics = overrides.diagnostics ?? { recent: [] };
   const control = { supported: true, platform: 'win32', pending: false, activeRequests: 0, ready: true, independentOfCodex: true,
@@ -80,7 +81,7 @@ function harness(overrides = {}) {
   for (const element of [...elements.values(), document.body]) element.ownerDocument = document;
   const snapshot = () => ({ csrfToken: token, ready: true, gateway: { requests: 12, completed: 11, failed: 1,
     accounts: { A: { requests: 7, completed: 7, failed: 0 }, B: { requests: 5, completed: 4, failed: 1 } } },
-    backend, integration: {}, verification: {} });
+    backend, integration, verification });
   const fetch = async (path, options = {}) => {
     const call = { path, method: options.method ?? 'GET', headers: options.headers, body: options.body ? JSON.parse(options.body) : null };
     calls.push(call);
@@ -111,6 +112,8 @@ function harness(overrides = {}) {
     set models(value) { models = value; }, get models() { return models; },
     set cursor(value) { cursor = value; }, get cursor() { return cursor; },
     set backend(value) { backend = value; }, get backend() { return backend; },
+    set integration(value) { integration = value; }, get integration() { return integration; },
+    set verification(value) { verification = value; }, get verification() { return verification; },
     set codebuddy(value) { codebuddy = value; }, get codebuddy() { return codebuddy; },
     set quotas(value) { quotas = value; }, get quotas() { return quotas; },
     set diagnostics(value) { diagnostics = value; }, get diagnostics() { return diagnostics; },
@@ -131,6 +134,148 @@ function harness(overrides = {}) {
   return api;
 }
 async function settle() { for (let index = 0; index < 12; index++) await new Promise(resolve => setImmediate(resolve)); }
+
+function integrationFixture(mode = 'gateway', overrides = {}) {
+  return { installed: true, providerId: mode === 'official' ? 'openai' : 'custom',
+    routing: { supported: true, mode, providerId: mode === 'official' ? 'openai' : 'custom', gatewayProviderId: 'custom',
+      canSwitchOfficial: true, canSwitchGateway: true }, ...overrides };
+}
+
+const boundBackend = () => ({ running: true, account: { email: 'bound@example.test' }, pinnedAccount: { email: 'bound@example.test' } });
+
+test('Codex official configuration stays distinct from retained gateway fields and never advertises gateway ingress', async () => {
+  const page = harness({ integration: integrationFixture('official'), backend: boundBackend(), verification: { status: 'passed' } });
+  await settle();
+  assert.equal(page.elements.get('integration-mode-value').textContent, '官方直连');
+  assert.equal(page.elements.get('integration-state').textContent, '路由配置已保存');
+  assert.equal(page.elements.get('integration-official-button').disabled, true);
+  assert.equal(page.elements.get('integration-gateway-button').disabled, false);
+  assert.match(page.elements.get('integration-description').textContent, /实际连接模式见上方/);
+  const topology = topologyFor(page, worldFixture({ integration: page.integration }));
+  assert.equal(topology.routes.filter(route => route.from === 'codex').every(route => route.state === 'pending' && route.label === '官方直连'), true);
+  assert.equal(topology.local.find(route => route.from === 'codex').state, 'pending');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('Codex mode buttons submit explicit directions with CSRF and refresh the saved configuration without restarting services', async () => {
+  const page = harness({ integration: integrationFixture(), backend: boundBackend(), verification: { status: 'passed' },
+    fetch(call, api) {
+      if (call.path === '/api/integration/mode') {
+        assert.equal(call.method, 'POST'); assert.equal(call.headers['X-Bridge-CSRF'], api.token);
+        api.integration = integrationFixture(call.body.mode);
+        return json(api.integration);
+      }
+    } });
+  await settle();
+  page.elements.get('integration-official-button').trigger('click'); await settle();
+  assert.equal(page.elements.get('integration-mode-value').textContent, '官方直连');
+  assert.equal(page.elements.get('integration-gateway-button').disabled, false);
+  assert.match(page.elements.get('notice').textContent, /完全退出并重新打开 Codex.*选择该模式可用的模型/);
+  page.elements.get('integration-gateway-button').trigger('click'); await settle();
+  assert.equal(page.elements.get('integration-mode-value').textContent, 'Bifröst 网关');
+  assert.equal(page.elements.get('integration-official-button').disabled, false);
+  assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+  assert.deepEqual(page.calls.filter(call => call.method === 'POST').map(call => [call.path, call.body]), [
+    ['/api/integration/mode', { mode: 'official' }], ['/api/integration/mode', { mode: 'gateway' }],
+  ]);
+});
+
+test('Codex gateway selection requires saved route capability and confirmed verified B while official selection remains available', async () => {
+  for (const change of [
+    { backend: { running: true, account: { email: 'new@example.test' }, pinnedAccount: { email: 'old@example.test' } } },
+    { verification: { status: 'not_run' } },
+    { integration: integrationFixture('official', { routing: { supported: true, mode: 'official', canSwitchOfficial: true, canSwitchGateway: false, reason: '请先完成网关接入。' } }) },
+  ]) {
+    const page = harness({ integration: integrationFixture('official'), backend: boundBackend(), verification: { status: 'passed' }, ...change });
+    await settle();
+    assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+    page.elements.get('integration-gateway-button').trigger('click'); await settle();
+    assert.equal(page.calls.some(call => call.method === 'POST'), false);
+    assert.equal(page.elements.get('integration-mode-error').hidden, false);
+  }
+  const page = harness({ integration: integrationFixture(), backend: { running: true } }); await settle();
+  assert.equal(page.elements.get('integration-official-button').disabled, false);
+});
+
+test('old mode backends preserve official status and disable mode mutation with an upgrade explanation', async () => {
+  const page = harness({ integration: { installed: true, providerId: 'openai' }, backend: boundBackend(), verification: { status: 'passed' } });
+  await settle();
+  assert.equal(page.elements.get('integration-mode-value').textContent, '官方直连');
+  assert.equal(page.elements.get('integration-official-button').disabled, true);
+  assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+  assert.match(page.elements.get('integration-mode-error').textContent, /重启网关服务后可用/);
+  assert.equal(page.elements.get('service-restart-button').disabled, false);
+  page.elements.get('integration-gateway-button').trigger('click'); await settle();
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+  const topology = topologyFor(page, worldFixture({ integration: page.integration }));
+  assert.equal(topology.routes.filter(route => route.from === 'codex').every(route => route.state === 'pending'), true);
+});
+
+test('official switching remains usable during B verification while gateway switching waits for verification', async () => {
+  const page = harness({ integration: integrationFixture(), backend: boundBackend(), verification: { status: 'running' },
+    fetch(call, api) {
+      if (call.path === '/api/integration/mode') {
+        api.integration = integrationFixture(call.body.mode);
+        return json(api.integration);
+      }
+    } }); await settle();
+  assert.equal(page.elements.get('integration-official-button').disabled, false);
+  page.elements.get('integration-official-button').trigger('click'); await settle();
+  assert.equal(page.elements.get('integration-mode-value').textContent, '官方直连');
+  assert.equal(page.verification.status, 'running');
+  assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+  page.elements.get('integration-gateway-button').trigger('click'); await settle();
+  assert.deepEqual(page.calls.filter(call => call.method === 'POST').map(call => [call.path, call.body]), [
+    ['/api/integration/mode', { mode: 'official' }],
+  ]);
+});
+
+test('an explicit other mode overrides an openai provider name in both controls and topology', async () => {
+  const integration = integrationFixture('other', { providerId: 'openai', routing: { supported: true,
+    mode: 'other', providerId: 'openai', gatewayProviderId: 'custom', canSwitchOfficial: false, canSwitchGateway: false,
+    reason: '官方提供方包含自定义地址，请先检查其地址配置。' } });
+  const page = harness({ integration, backend: boundBackend(), verification: { status: 'passed' } }); await settle();
+  assert.equal(page.elements.get('integration-mode-value').textContent, '其他提供方（openai）');
+  assert.equal(page.elements.get('integration-official-button').disabled, true);
+  assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+  const topology = topologyFor(page, worldFixture({ integration }));
+  const outgoing = topology.routes.filter(route => route.from === 'codex');
+  assert.equal(outgoing.every(route => route.state === 'pending' && route.label === '待接入'), true);
+  assert.equal(topology.local.find(route => route.from === 'codex').label, '待确认');
+  assert.doesNotMatch(JSON.stringify([...outgoing, topology.local.find(route => route.from === 'codex')]), /官方直连/);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('pending mode writes suppress duplicate clicks and rejected writes recover controls without changing modes', async () => {
+  const waiting = deferred();
+  const page = harness({ integration: integrationFixture(), fetch(call) {
+    if (call.path === '/api/integration/mode') return waiting.promise;
+  } }); await settle();
+  page.elements.get('integration-official-button').trigger('click');
+  page.elements.get('integration-official-button').trigger('click'); await settle();
+  assert.equal(page.calls.filter(call => call.path === '/api/integration/mode').length, 1);
+  assert.equal(page.elements.get('integration-official-button').disabled, true);
+  assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+  assert.equal(page.elements.get('integration-mode-value').textContent, 'Bifröst 网关');
+  waiting.resolve(json({ error: { message: '配置版本已变化，请刷新后重试。' } }, 409)); await settle();
+  assert.match(page.elements.get('notice').textContent, /配置版本已变化/);
+  assert.equal(page.elements.get('integration-mode-value').textContent, 'Bifröst 网关');
+  assert.equal(page.elements.get('integration-official-button').disabled, false);
+  assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+});
+
+test('a missing mode endpoint stays disabled for the old process and becomes available after service replacement', async () => {
+  const page = harness({ integration: integrationFixture(), fetch(call) {
+    if (call.path === '/api/integration/mode') return json({ error: { message: 'missing' } }, 404);
+  } }); await settle();
+  page.elements.get('integration-official-button').trigger('click'); await settle();
+  assert.equal(page.elements.get('integration-official-button').disabled, true);
+  assert.match(page.elements.get('notice').textContent, /后台尚未提供连接模式切换/);
+  await page.run('refreshStatus()'); await settle();
+  assert.equal(page.elements.get('integration-official-button').disabled, true);
+  page.token = 'updated-mode-service'; await page.run('refreshStatus()'); await settle();
+  assert.equal(page.elements.get('integration-official-button').disabled, false);
+});
 
 test('dashboard initializes read-only, preserves A/B statistics, and does not periodically refresh account quotas', async () => {
   const page = harness(); await settle();

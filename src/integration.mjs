@@ -86,6 +86,30 @@ export class Integration {
     });
   }
 
+  /** Selects the saved connection without changing provider settings or credentials. */
+  switchMode(mode) {
+    return this.#serial(async () => {
+      if (!['official', 'gateway'].includes(mode)) {
+        throw failure('INTEGRATION_CONFLICT', 'Select either the official or gateway connection.');
+      }
+      const [snapshot, state] = await Promise.all([this.#readConfig(), this.#readState()]);
+      const description = this.#describe(snapshot, state);
+      if (description.routing.mode === mode) return description;
+      const available = mode === 'official' ? description.routing.canSwitchOfficial : description.routing.canSwitchGateway;
+      if (!available) {
+        throw failure('INTEGRATION_CONFLICT', description.routing.reason || 'The requested connection is unavailable.');
+      }
+      const providerId = mode === 'official' ? 'openai' : description.routing.gatewayProviderId;
+      await this.#batchWrite(snapshot, [{ keyPath: 'model_provider', value: providerId, mergeStrategy: 'replace' }]);
+      const updated = await this.#readConfig();
+      const result = this.#describe(updated, state);
+      if (fieldAt(updated.layer.config, 'model_provider').value !== providerId || result.routing.mode !== mode) {
+        throw failure('INTEGRATION_CONFLICT', 'The selected provider is overridden or changed during the switch.');
+      }
+      return result;
+    });
+  }
+
   /** Returns private provider settings for internal A routing. Never expose this result through the management API. */
   originalProvider() {
     return this.#serial(async () => {
@@ -255,13 +279,55 @@ export class Integration {
         index < LEGACY_FIELDS.length ? field.installed : field.original));
   }
 
+  #routing(snapshot, state, description) {
+    const providerId = snapshot.config?.model_provider ?? 'openai';
+    const gatewayProviderId = state?.providerId ?? null;
+    const official = snapshot.config?.model_providers?.openai;
+    let chatGPTOverridden = false;
+    if (snapshot.config?.chatgpt_base_url != null) {
+      try {
+        const address = new URL(snapshot.config.chatgpt_base_url);
+        chatGPTOverridden = address.protocol !== 'https:' || address.username !== '' || address.password !== ''
+          || !['https://chatgpt.com', 'https://chat.openai.com'].includes(address.origin);
+      } catch { chatGPTOverridden = true; }
+    }
+    // Do not call a custom endpoint stored under the built-in provider "official".
+    const officialOverridden = snapshot.config?.openai_base_url != null || chatGPTOverridden
+      || ['base_url', 'model_catalog_url'].some(key => official?.[key] != null);
+    const higherLayer = snapshot.layers.slice(0, snapshot.layers.indexOf(snapshot.layer))
+      .some(layer => !layer.disabledReason && fieldAt(layer.config, 'model_provider').exists);
+    let gatewayReason = null;
+    const provider = gatewayProviderId == null ? null : snapshot.config?.model_providers?.[gatewayProviderId];
+    if (!state) gatewayReason = '尚未保存网关接入配置，请先完成 Codex 接入。';
+    else if (description.needsUpgrade) gatewayReason = '请先更新已保存的网关模型路由。';
+    else if (!description.installed || !state.fields.every(field => matches(fieldAt(snapshot.config, field.keyPath), field.installed))) {
+      gatewayReason = '已保存的网关配置被修改或覆盖，请先检查 Codex 接入配置。';
+    } else if (!state.fields.every((field, index) => matches(field.installed, this.#desiredFields(state.providerId, state.version)[index].installed))) {
+      gatewayReason = '网关地址或密钥已变更，请先恢复并重新接入。';
+    } else if (provider?.requires_openai_auth !== true || (provider.wire_api !== undefined && provider.wire_api !== 'responses')
+      || Object.keys(provider.http_headers || {}).some(key => key.toLowerCase() === HEADER_NAME.toLowerCase() && key !== HEADER_NAME)) {
+      gatewayReason = '已保存的提供方不再符合本网关的认证或协议要求。';
+    }
+    const mode = providerId === 'openai' && !officialOverridden ? 'official'
+      : providerId === gatewayProviderId && !gatewayReason ? 'gateway' : 'other';
+    const officialReason = officialOverridden ? '官方提供方包含自定义地址，请先检查其地址配置。' : null;
+    return {
+      supported: true, mode, providerId, gatewayProviderId,
+      canSwitchOfficial: mode !== 'official' && !higherLayer && !officialReason,
+      canSwitchGateway: mode !== 'gateway' && !higherLayer && !gatewayReason,
+      ...(higherLayer ? { reason: '更高优先级的配置固定了模型提供方，请先解除覆盖。' }
+        : gatewayReason || officialReason ? { reason: gatewayReason || officialReason } : {}),
+    };
+  }
+
   #describe(snapshot, state) {
     const providerId = snapshot.config?.model_provider;
     const installed = !!state && this.#allMatch(snapshot, state, 'installed');
     const needsUpgrade = !!state && (state.version === 1 || (state.phase === 'upgrading' && !installed));
     const result = { installed, configPath: this.#configPath, canInstall: false, needsUpgrade };
     if (typeof providerId === 'string') result.providerId = providerId;
-    const refuse = reason => ({ ...result, reason });
+    const describeRouting = value => ({ ...value, routing: this.#routing(snapshot, state, value) });
+    const refuse = reason => describeRouting({ ...result, reason });
     if (typeof providerId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(providerId)
       || ['openai', 'ollama', 'lmstudio'].includes(providerId)) {
       return refuse('Select an existing custom provider before connecting the gateway.');
@@ -287,7 +353,7 @@ export class Integration {
         return refuse('Provider fields were edited after installation. Restore refused to overwrite those changes.');
       }
     }
-    return { ...result, canInstall: true };
+    return describeRouting({ ...result, canInstall: true });
   }
 
   async #batchWrite(snapshot, edits) {
@@ -315,7 +381,8 @@ export class Integration {
       if (cause.code === 'ENOENT') return null;
       throw failure('INTEGRATION_STATE_INVALID', 'The recovery file is unreadable. No config changes were made.', cause);
     }
-    const validId = typeof state?.providerId === 'string' && /^[A-Za-z0-9_-]+$/.test(state.providerId);
+    const validId = typeof state?.providerId === 'string' && /^[A-Za-z0-9_-]+$/.test(state.providerId)
+      && !['openai', 'ollama', 'lmstudio'].includes(state.providerId);
     const desired = validId ? this.#desiredFields(state.providerId, state.version) : [];
     if (![1, STATE_VERSION].includes(state?.version) || typeof state.configPath !== 'string' || !samePath(state.configPath, this.#configPath)
       || !validId || !['prepared', 'installed', 'restoring', ...(state.version === 2 ? ['upgrading'] : [])].includes(state.phase)

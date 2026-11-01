@@ -27,16 +27,19 @@ class ConfigRpc {
     this.beforeWrite = null;
     this.afterWrite = null;
     this.layerEnabled = true;
+    this.overrides = {};
   }
 
   async request(method, params) {
     if (method === 'config/read') {
       assert.deepEqual(params, { includeLayers: true });
-      const effective = mergeConfig(this.inherited, this.config);
+      const effective = mergeConfig(mergeConfig(this.inherited, this.config), this.overrides);
       return {
         config: effective,
         origins: {},
-        layers: [{
+        layers: [...(Object.keys(this.overrides).length ? [{
+          name: { type: 'session' }, version: 'sha256:session', config: copy(this.overrides), disabledReason: null,
+        }] : []), {
           name: { type: 'user', file: this.configPath, profile: null },
           version: `sha256:${this.version}`,
           config: copy(this.config),
@@ -128,7 +131,10 @@ async function setupLegacy(t, config = originalConfig(), inherited) {
 test('install changes exactly four provider fields; repeat install is idempotent', async t => {
   const { integration, rpc, statePath, configPath } = await setup(t);
   const original = copy(rpc.config);
-  assert.deepEqual(await integration.inspect(), { installed: false, configPath, canInstall: true, needsUpgrade: false, providerId: 'custom' });
+  const { routing, ...initial } = await integration.inspect();
+  assert.deepEqual(initial, { installed: false, configPath, canInstall: true, needsUpgrade: false, providerId: 'custom' });
+  assert.equal(routing.mode, 'other');
+  assert.equal(routing.canSwitchGateway, false);
   const installed = await integration.install();
   assert.equal(installed.installed, true);
   const expected = copy(original);
@@ -478,4 +484,174 @@ test('a conflicting edit blocks v1 upgrade and originalProvider without changing
   await assert.rejects(integration.originalProvider(), { code: 'INTEGRATION_CONFLICT' });
   assert.equal(await readFile(statePath, 'utf8'), before);
   assert.equal(rpc.writes.length, 0);
+});
+
+test('official and saved gateway modes round-trip without changing accounts, models, or recovery settings', async t => {
+  const { integration, rpc, statePath, options } = await setup(t);
+  await integration.install();
+  const installedConfig = copy(rpc.config);
+  const recovery = await readFile(statePath, 'utf8');
+  assert.equal((await integration.inspect()).routing.mode, 'gateway');
+
+  const official = await integration.switchMode('official');
+  assert.equal(official.installed, true);
+  assert.equal(official.routing.mode, 'official');
+  assert.equal(official.routing.canSwitchGateway, true);
+  assert.deepEqual(rpc.config, { ...installedConfig, model_provider: 'openai' });
+  assert.equal(await readFile(statePath, 'utf8'), recovery);
+  assert.deepEqual(rpc.writes.at(-1).edits, [{ keyPath: 'model_provider', value: 'openai', mergeStrategy: 'replace' }]);
+  assert.equal((await integration.originalProvider()).config.base_url, originalConfig().model_providers.custom.base_url);
+
+  const restarted = new Integration(options);
+  const gateway = await restarted.switchMode('gateway');
+  assert.equal(gateway.routing.mode, 'gateway');
+  assert.equal(gateway.routing.gatewayProviderId, 'custom');
+  assert.deepEqual(rpc.config, installedConfig);
+  assert.equal(await readFile(statePath, 'utf8'), recovery);
+  const count = rpc.writes.length;
+  await restarted.switchMode('gateway');
+  assert.equal(rpc.writes.length, count);
+  await restarted.restore();
+  assert.deepEqual(rpc.config, originalConfig());
+});
+
+test('official mode works without a saved gateway and absent provider defaults to official', async t => {
+  const config = originalConfig();
+  delete config.model_provider;
+  const { integration, rpc, statePath } = await setup(t, config);
+  assert.equal((await integration.inspect()).routing.mode, 'official');
+  await integration.switchMode('official');
+  assert.equal(rpc.writes.length, 0);
+  await assert.rejects(integration.switchMode('gateway'), { code: 'INTEGRATION_CONFLICT' });
+  await assert.rejects(integration.switchMode('invalid'), { code: 'INTEGRATION_CONFLICT' });
+  assert.equal(rpc.writes.length, 0);
+  await assert.rejects(readFile(statePath), { code: 'ENOENT' });
+
+  rpc.config.model_provider = 'custom';
+  rpc.version += 1;
+  assert.equal((await integration.switchMode('official')).routing.mode, 'official');
+  assert.deepEqual(rpc.config, { ...config, model_provider: 'openai' });
+});
+
+test('gateway switching refuses edited settings but official mode remains available', async t => {
+  for (const field of ['base_url', 'model_catalog_url', 'requires_openai_auth', 'wire_api', 'header']) {
+    const { integration, rpc } = await setup(t);
+    await integration.install();
+    const provider = rpc.config.model_providers.custom;
+    if (field === 'header') provider.http_headers['X-Account-Bridge-Key'] = 'edited-private-key';
+    else provider[field] = field === 'requires_openai_auth' ? false : 'user-change';
+    rpc.version += 1;
+    const changed = copy(rpc.config);
+    await integration.switchMode('official');
+    const status = await integration.inspect();
+    assert.equal(status.routing.canSwitchGateway, false);
+    assert.equal(JSON.stringify(status).includes('edited-private-key'), false);
+    await assert.rejects(integration.switchMode('gateway'), { code: 'INTEGRATION_CONFLICT' });
+    assert.deepEqual(rpc.config, { ...changed, model_provider: 'openai' });
+    assert.equal(rpc.writes.length, 2);
+  }
+});
+
+test('switching neither bypasses higher-priority provider locks nor effective gateway field overrides', async t => {
+  const { integration, rpc } = await setup(t);
+  await integration.install();
+  rpc.overrides = { model_provider: 'custom' };
+  let routing = (await integration.inspect()).routing;
+  assert.equal(routing.canSwitchOfficial, false);
+  await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_CONFLICT' });
+  assert.equal(rpc.writes.length, 1);
+
+  rpc.overrides = {};
+  await integration.switchMode('official');
+  rpc.overrides = { model_providers: { custom: { base_url: 'https://override.example.invalid' } } };
+  routing = (await integration.inspect()).routing;
+  assert.equal(routing.canSwitchGateway, false);
+  await assert.rejects(integration.switchMode('gateway'), { code: 'INTEGRATION_CONFLICT' });
+  assert.equal(rpc.writes.length, 2);
+});
+
+test('a custom endpoint named openai cannot be advertised or selected as official', async t => {
+  const config = originalConfig();
+  config.model_providers.openai = { base_url: 'https://private-gateway.example.invalid/v1' };
+  const { integration, rpc } = await setup(t, config);
+  assert.equal((await integration.inspect()).routing.canSwitchOfficial, false);
+  await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_CONFLICT' });
+  rpc.config.model_provider = 'openai';
+  assert.equal((await integration.inspect()).routing.mode, 'other');
+  assert.equal(rpc.writes.length, 0);
+  assert.equal(JSON.stringify(await integration.inspect()).includes('private-gateway'), false);
+});
+
+test('a root or higher-priority OpenAI URL override prevents claiming official direct routing', async t => {
+  for (const inherited of [false, true]) {
+    const { integration, rpc } = await setup(t);
+    await integration.install();
+    await integration.switchMode('official');
+    if (inherited) rpc.overrides = { openai_base_url: 'https://private-root.example.invalid/v1' };
+    else rpc.config.openai_base_url = 'https://private-root.example.invalid/v1';
+    const before = copy(rpc.config);
+    const status = await integration.inspect();
+    assert.equal(status.routing.mode, 'other');
+    assert.equal(status.routing.canSwitchOfficial, false);
+    assert.equal(JSON.stringify(status).includes('private-root'), false);
+    await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_CONFLICT' });
+    assert.deepEqual(rpc.config, before);
+    assert.equal(rpc.writes.length, 2);
+  }
+});
+
+test('custom subscription endpoints cannot be labelled official while the native default remains usable', async t => {
+  for (const address of ['https://subscription-proxy.example.invalid/backend-api', 'http://chatgpt.com/backend-api', 'not-a-url']) {
+    const config = originalConfig();
+    config.chatgpt_base_url = address;
+    const { integration, rpc } = await setup(t, config);
+    await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_CONFLICT' });
+    assert.equal(rpc.writes.length, 0);
+  }
+  const config = originalConfig();
+  config.chatgpt_base_url = 'https://chatgpt.com/backend-api/';
+  const { integration } = await setup(t, config);
+  assert.equal((await integration.switchMode('official')).routing.mode, 'official');
+});
+
+test('switches retain optimistic concurrency and recover after a lost committed response', async t => {
+  const { integration, rpc, options, statePath } = await setup(t);
+  await integration.install();
+  const recovery = await readFile(statePath, 'utf8');
+  rpc.beforeWrite = server => {
+    server.config.model_reasoning_effort = 'low';
+    server.version += 1;
+    server.beforeWrite = null;
+  };
+  await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_WRITE_FAILED' });
+  assert.equal(rpc.config.model_provider, 'custom');
+  rpc.afterWrite = server => { server.afterWrite = null; throw new Error('lost response after switch'); };
+  await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_WRITE_FAILED' });
+  assert.equal(rpc.config.model_provider, 'openai');
+  const count = rpc.writes.length;
+  assert.equal((await new Integration(options).switchMode('official')).routing.mode, 'official');
+  assert.equal(rpc.writes.length, count);
+  assert.equal(rpc.config.model_reasoning_effort, 'low');
+  assert.equal(await readFile(statePath, 'utf8'), recovery);
+});
+
+test('a new override during switching is reported instead of claiming that official mode is active', async t => {
+  const { integration, rpc } = await setup(t);
+  await integration.install();
+  rpc.afterWrite = server => { server.afterWrite = null; server.overrides = { model_provider: 'custom' }; };
+  await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_CONFLICT' });
+  assert.equal((await integration.inspect()).routing.mode, 'gateway');
+  assert.equal(rpc.config.model_provider, 'openai');
+});
+
+test('concurrent connection switches serialize while retaining one recovery baseline', async t => {
+  const { integration, rpc, statePath } = await setup(t);
+  await integration.install();
+  const recovery = await readFile(statePath, 'utf8');
+  const results = await Promise.all([
+    integration.switchMode('official'), integration.switchMode('gateway'), integration.switchMode('official'),
+  ]);
+  assert.deepEqual(results.map(item => item.routing.mode), ['official', 'gateway', 'official']);
+  assert.equal(rpc.config.model_provider, 'openai');
+  assert.equal(await readFile(statePath, 'utf8'), recovery);
 });

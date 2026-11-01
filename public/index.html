@@ -425,13 +425,21 @@
         </div>
 
         <details class="account-foldout">
-          <summary>Codex 接入配置<span>安装、复制与还原</span></summary>
+          <summary>Codex 连接模式<span>官方直连与 Bifröst 网关</span></summary>
           <section class="panel" aria-labelledby="integration-title">
-            <div class="panel-heading"><div><div class="eyebrow">INTEGRATION</div><h2 id="integration-title">接入当前 Codex</h2></div><span class="pill" id="integration-state">未接入</span></div>
+            <div class="panel-heading"><div><div class="eyebrow">INTEGRATION</div><h2 id="integration-title">本机 Codex 连接</h2></div><span class="pill" id="integration-state">读取中</span></div>
+            <div class="integration-mode" aria-labelledby="integration-mode-title">
+              <div class="integration-mode-heading"><span id="integration-mode-title">当前配置</span><strong id="integration-mode-value" aria-live="polite">读取中</strong></div>
+              <p class="integration-mode-description" id="integration-mode-description">读取本机 Codex 的连接模式。</p>
+              <div class="integration-mode-actions"><button class="button secondary" id="integration-official-button" type="button" disabled>切换到官方</button><button class="button primary" id="integration-gateway-button" type="button" disabled>切换到 Bifröst 网关</button></div>
+              <p class="gateway-error" id="integration-mode-error" role="status" hidden></p>
+              <p class="footnote">切换会保存配置。请完全退出并重新打开 Codex 后使用新模式；此处不重启网关服务。</p>
+            </div>
             <p class="panel-copy" id="integration-description">管理当前 Codex 的网关接入。</p>
             <div class="config-path"><span>配置文件</span><code id="config-path">读取中</code></div>
             <p class="integration-note">配置变更后，刷新 Codex 模型目录或重开 Codex。</p>
-            <div class="stacked-buttons"><button class="button primary" id="install-button" type="button" disabled>接入本机 Codex</button><button class="button secondary" id="copy-button" type="button" disabled>复制接入配置</button><button class="button quiet" id="restore-button" type="button" hidden>恢复接入前配置</button></div>
+            <div class="stacked-buttons"><button class="button secondary" id="install-button" type="button" disabled>配置网关路由</button><button class="button secondary" id="copy-button" type="button" disabled>复制接入配置</button><button class="button quiet" id="restore-button" type="button" hidden>恢复接入前的提供方配置</button></div>
+            <p class="footnote">“恢复”只还原提供方地址等接入字段。切换官方直连请使用上方按钮。</p>
             <p class="footnote">网关密钥仅在复制配置时读取，不在页面展示。</p>
           </section>
         </details>

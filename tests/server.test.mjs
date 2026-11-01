@@ -264,6 +264,205 @@ test('configuration containing gateway key is only available inside the local ma
   assert.match(data.toml, /model_providers\."custom"/);
 });
 
+test('copied gateway settings target a custom provider while official mode is selected', async t => {
+  for (const entry of [
+    { providerId: 'openai', gatewayProviderId: 'saved_gateway', expected: 'saved_gateway' },
+    { providerId: 'custom', gatewayProviderId: null, expected: 'custom' },
+    { providerId: 'openai', gatewayProviderId: null, expected: 'account_b' },
+    { providerId: 'ollama', gatewayProviderId: 'openai', expected: 'account_b' },
+    { providerId: 'invalid\nprovider', gatewayProviderId: 'lmstudio', expected: 'account_b' },
+  ]) await t.test(`${JSON.stringify(entry.providerId)} / ${JSON.stringify(entry.gatewayProviderId)}`, async t => {
+    const { url, cookie } = await fixture(t, { integration: { inspect: async () => ({
+      providerId: entry.providerId, routing: { gatewayProviderId: entry.gatewayProviderId },
+    }) } });
+    const response = await fetch(`${url}/api/integration`, { headers: { cookie } });
+    assert.equal(response.status, 200);
+    const { toml } = await response.json();
+    assert.match(toml, new RegExp(`^\\[model_providers\\.${JSON.stringify(entry.expected)}\\]`));
+    assert.doesNotMatch(toml, /model_providers\."(?:openai|ollama|lmstudio)"/);
+  });
+});
+
+test('Codex connection switching requires the local session, CSRF, and a local request origin', async t => {
+  const switched = [];
+  const integration = { inspect: async () => ({ installed: true }),
+    switchMode: async mode => { switched.push(mode); return { routing: { mode } }; } };
+  const { url, cookie, status } = await fixture(t, { integration });
+  const send = headers => fetch(`${url}/api/integration/mode`, { method: 'POST', headers,
+    body: '{"mode":"official"}' });
+  assert.equal((await send({ 'X-Bridge-CSRF': status.csrfToken })).status, 401);
+  assert.equal((await send({ cookie })).status, 403);
+  assert.equal((await send({ cookie, 'X-Bridge-CSRF': status.csrfToken,
+    Origin: 'https://external.invalid' })).status, 403);
+  assert.equal((await send({ cookie, 'X-Bridge-CSRF': status.csrfToken,
+    'Sec-Fetch-Site': 'cross-site' })).status, 403);
+  assert.deepEqual(switched, []);
+  const response = await send({ cookie, 'X-Bridge-CSRF': status.csrfToken, Origin: url });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { routing: { mode: 'official' } });
+  assert.deepEqual(switched, ['official']);
+});
+
+test('Codex connection switching rejects malformed, unknown, and oversized input before reading credentials or writing', async t => {
+  const { url, cookie, status, backend } = await fixture(t, { integration: {
+    inspect: async () => ({ installed: true }), switchMode: () => assert.fail('invalid input must not write config'),
+  } });
+  backend.credentials = () => assert.fail('invalid input must not read credentials');
+  const headers = { cookie, 'X-Bridge-CSRF': status.csrfToken, 'Content-Type': 'application/json' };
+  const send = body => fetch(`${url}/api/integration/mode`, { method: 'POST', headers, body });
+  for (const body of ['', '{}', 'null', '[]', '1', 'false', '"official"', '{',
+    '{"mode":null}', '{"mode":1}', '{"mode":"custom"}', '{"mode":"OPENAI"}',
+    '{"mode":"official","providerId":"untrusted"}', '{"mode":"gateway","base_url":"https://external.invalid"}']) {
+    assert.equal((await send(body)).status, 400, body);
+  }
+  const oversized = JSON.stringify({ mode: 'official', padding: 'x'.repeat(64 * 1024) });
+  assert.equal((await send(oversized)).status, 413);
+});
+
+test('switching Codex to official works without account B, verification, or an upstream request', async t => {
+  const modes = [];
+  const expected = { installed: true, canInstall: false, routing: { supported: true,
+    mode: 'official', providerId: 'openai', gatewayProviderId: 'custom', canSwitchOfficial: false, canSwitchGateway: true } };
+  const { url, cookie, status } = await fixture(t, {
+    backend: { rpc: { running: false }, account: null, login: { state: 'idle' }, publicBinding: () => null,
+      readAccount: async () => { throw new Error('B is offline'); },
+      credentials: () => assert.fail('official mode must not require account B') },
+    integration: { inspect: async () => ({ installed: true }),
+      switchMode: async mode => { modes.push(mode); return expected; } },
+    fetchImpl: () => assert.fail('connection switching must not run inference'),
+  });
+  assert.equal(status.ready, false);
+  const response = await fetch(`${url}/api/integration/mode`, { method: 'POST',
+    headers: { cookie, 'X-Bridge-CSRF': status.csrfToken }, body: '{"mode":"official"}' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), expected);
+  assert.deepEqual(modes, ['official']);
+});
+
+test('switching Codex to the gateway requires a bound account and verification for that exact account', async t => {
+  const token = { email: 'account-b@example.invalid', accountId: 'current-b' };
+  for (const scenario of [
+    { name: 'unbound', authenticated: false, verification: { status: 'passed', accountId: token.accountId, accountEmail: token.email } },
+    { name: 'not verified', authenticated: true, verification: { status: 'not_run' } },
+    { name: 'different account', authenticated: true, verification: { status: 'passed', accountId: 'old-b', accountEmail: token.email } },
+    { name: 'different identity', authenticated: true, verification: { status: 'passed', accountId: token.accountId, accountEmail: 'old-b@example.invalid' } },
+    { name: 'current account', authenticated: true, verification: { status: 'passed', accountId: token.accountId, accountEmail: token.email }, allowed: true },
+  ]) await t.test(scenario.name, async t => {
+    const modes = [];
+    const expected = { installed: true, routing: { supported: true, mode: 'gateway', providerId: 'custom' } };
+    const { url, cookie, status, backend } = await fixture(t, { initialVerification: scenario.verification,
+      integration: { inspect: async () => ({ installed: true }),
+        switchMode: async mode => { modes.push(mode); return expected; } },
+      fetchImpl: () => assert.fail('switching uses prior verification, never new inference') });
+    backend.credentials = async () => {
+      if (!scenario.authenticated) throw Object.assign(new Error('Bind B first.'), { status: 409 });
+      return token;
+    };
+    const response = await fetch(`${url}/api/integration/mode`, { method: 'POST',
+      headers: { cookie, 'X-Bridge-CSRF': status.csrfToken }, body: '{"mode":"gateway"}' });
+    assert.equal(response.status, scenario.allowed ? 200 : 409);
+    assert.deepEqual(modes, scenario.allowed ? ['gateway'] : []);
+    if (scenario.allowed) assert.deepEqual(await response.json(), expected);
+  });
+});
+
+test('official mode stays available during B verification while gateway mode waits for its result', { timeout: 2000 }, async t => {
+  let started, release, saved;
+  const began = new Promise(resolve => { started = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const completed = new Promise(resolve => { saved = resolve; });
+  t.after(() => release());
+  const token = { email: 'account-b@example.invalid', accountId: 'current-b' };
+  const switched = [];
+  const { url, cookie, status, backend } = await fixture(t, {
+    integration: { inspect: async () => ({ installed: true }),
+      switchMode: async mode => { switched.push(mode); return { routing: { mode } }; } },
+    fetchImpl: async () => { started(); await gate; return new Response(
+      'data: {"type":"response.completed","response":{"status":"completed","output":[{"content":[{"type":"output_text","text":"Verified"}]}]}}\n\n'); },
+    saveVerification: async result => { saved(result); },
+  });
+  backend.credentials = async () => token;
+  backend.limits = async () => null;
+  const headers = { cookie, 'X-Bridge-CSRF': status.csrfToken };
+  const verifying = await fetch(`${url}/api/verify`, { method: 'POST', headers, body: '{}' });
+  assert.equal(verifying.status, 202); await began;
+  const send = mode => fetch(`${url}/api/integration/mode`, { method: 'POST', headers, body: JSON.stringify({ mode }) });
+  assert.equal((await send('gateway')).status, 409);
+  assert.deepEqual(switched, []);
+  assert.equal((await send('official')).status, 200);
+  assert.deepEqual(switched, ['official']);
+  release(); assert.equal((await completed).status, 'passed');
+});
+
+test('Codex connection conflicts keep their error code without exposing private error detail', async t => {
+  let fail = true;
+  const { url, cookie, status } = await fixture(t, { integration: {
+    inspect: async () => ({ installed: true }),
+    switchMode: async mode => {
+      if (fail) throw Object.assign(new Error('SECRET_PROVIDER_DETAIL private-gateway-key-test'), { code: 'INTEGRATION_CONFLICT' });
+      return { routing: { mode } };
+    },
+  } });
+  const send = () => fetch(`${url}/api/integration/mode`, { method: 'POST',
+    headers: { cookie, 'X-Bridge-CSRF': status.csrfToken }, body: '{"mode":"official"}' });
+  const response = await send();
+  assert.equal(response.status, 409);
+  const data = await response.json();
+  assert.equal(data.error.code, 'INTEGRATION_CONFLICT');
+  assert.equal(JSON.stringify(data).includes('SECRET_PROVIDER_DETAIL'), false);
+  assert.equal(JSON.stringify(data).includes('private-gateway-key-test'), false);
+  fail = false;
+  assert.equal((await send()).status, 200);
+});
+
+test('Codex connection failures report an unavailable configuration without leaking internal errors', async t => {
+  let code = 'INTEGRATION_CONFIG_UNAVAILABLE';
+  const { url, cookie, status } = await fixture(t, { integration: {
+    inspect: async () => ({ installed: true }),
+    switchMode: async () => { throw Object.assign(new Error('SECRET_PROVIDER_DETAIL'), { code }); },
+  } });
+  for (const next of ['INTEGRATION_CONFIG_UNAVAILABLE', 'INTEGRATION_STATE_INVALID', 'INTEGRATION_WRITE_FAILED', 'PRIVATE_UNEXPECTED_CODE']) {
+    code = next;
+    const response = await fetch(`${url}/api/integration/mode`, { method: 'POST',
+      headers: { cookie, 'X-Bridge-CSRF': status.csrfToken }, body: '{"mode":"official"}' });
+    assert.equal(response.status, 503);
+    const data = await response.json();
+    assert.equal(data.error.code, next.startsWith('INTEGRATION_') ? next : 'integration_switch_failed');
+    assert.equal(JSON.stringify(data).includes('SECRET_PROVIDER_DETAIL'), false);
+    assert.equal(JSON.stringify(data).includes('PRIVATE_UNEXPECTED_CODE'), false);
+  }
+});
+
+test('Codex connection switching reports a missing backend capability before reading B credentials', async t => {
+  const { url, cookie, status, backend } = await fixture(t);
+  backend.credentials = () => assert.fail('missing capability must not read credentials');
+  const response = await fetch(`${url}/api/integration/mode`, { method: 'POST',
+    headers: { cookie, 'X-Bridge-CSRF': status.csrfToken }, body: '{"mode":"gateway"}' });
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.code, 'integration_mode_unavailable');
+});
+
+test('Codex connection writes use the shared management lock and release it after completion', async t => {
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const modes = [];
+  const { url, cookie, status, server } = await fixture(t, { integration: {
+    inspect: async () => ({ installed: true }),
+    switchMode: async mode => { modes.push(mode); entered(); await gate; return { routing: { mode } }; },
+  } });
+  const send = () => fetch(`${url}/api/integration/mode`, { method: 'POST',
+    headers: { cookie, 'X-Bridge-CSRF': status.csrfToken }, body: '{"mode":"official"}' });
+  const pending = send(); await started;
+  assert.equal(server.activeAdminOperations, 1);
+  assert.equal((await send()).status, 409);
+  assert.deepEqual(modes, ['official']);
+  release(); assert.equal((await pending).status, 200);
+  assert.equal(server.activeAdminOperations, 0);
+  assert.equal((await send()).status, 200);
+});
+
 test('device login is forwarded only after validating the requested mode', async (t) => {
   const { url, cookie, status, backend } = await fixture(t);
   let requested;

@@ -73,6 +73,8 @@ const elements = Object.fromEntries([
   'bind-button', 'bind-description', 'bound-account', 'model-select', 'verify-button',
   'verification-result', 'verification-label', 'verification-text', 'verification-meta',
   'integration-state', 'integration-description', 'config-path', 'install-button',
+  'integration-mode-value', 'integration-mode-description', 'integration-mode-error',
+  'integration-official-button', 'integration-gateway-button',
   'copy-button', 'restore-button', 'gateway-state', 'gateway-url', 'metric-requests',
   'metric-completed', 'metric-failed', 'gateway-error',
   'metric-a-requests', 'metric-a-completed', 'metric-a-failed', 'account-a-last-model',
@@ -113,6 +115,7 @@ let status = null;
 let statusRequest = null;
 let statusRequestEpoch = -1;
 let busyAction = null;
+let integrationModeUnavailableToken = null;
 let modelsLoaded = false;
 let modelsRequest = null;
 let noticeTimer = null;
@@ -804,6 +807,16 @@ function renderAccountSummaries() {
   renderWorldTree();
 }
 
+function codexGatewaySelected(integration) {
+  if (integration?.routing?.supported === true) return integration.routing.mode === 'gateway';
+  return integration?.installed === true && integration.providerId !== 'openai';
+}
+
+function codexOfficialSelected(integration) {
+  if (integration?.routing?.supported === true) return integration.routing.mode === 'official';
+  return integration?.providerId === 'openai';
+}
+
 // Only adapted caller-to-quota directions appear in the drawing. A standard API
 // or a configured listener does not establish that a desktop app is integrated.
 function bridgeTopology({ connected, gateway, integration, models, modelError, backend, codebuddy, cursor, messages, clients }) {
@@ -847,7 +860,10 @@ function bridgeTopology({ connected, gateway, integration, models, modelError, b
   };
   const ingress = client => {
     if (!connected) return pending('管理服务连接中断。', '待确认');
-    if (client === 'codex') return integration?.installed === true ? configured('本机 Codex 已安装网关路由。') : pending('本机 Codex 网关路由尚未确认，请到账号管理检查。', '待接入');
+    if (client === 'codex') return codexGatewaySelected(integration) ? configured('本机 Codex 已选择网关路由；配置变更需重开 Codex 生效。')
+      : codexOfficialSelected(integration)
+        ? pending('本机 Codex 当前保存为官方直连。可在账号管理切换到 Bifröst 网关后重开 Codex。', '官方直连')
+        : pending('本机 Codex 网关路由尚未确认，请到账号管理检查。', '待接入');
     if (client === 'claude') {
       const running = messages?.channels?.CodeBuddy?.running;
       return running === true ? configured('Claude Messages 入口已启动。') : pending('Claude Messages 入口尚未确认。', '待确认');
@@ -876,7 +892,10 @@ function bridgeTopology({ connected, gateway, integration, models, modelError, b
   });
   const local = [
     { from: 'codex', to: 'codex', name: '原模型 A / B', protocol: 'Responses',
-      ...(connected && integration?.installed === true ? configured('原模型 A 随 Codex 请求携带认证；B 需要独立绑定与模型授权。A 不通过公共用户 Key 开放。') : pending('原模型接入状态未确认。', '待确认')) },
+      ...(connected && codexGatewaySelected(integration) ? configured('原模型 A 随 Codex 请求携带认证；B 需要独立绑定与模型授权。A 不通过公共用户 Key 开放。')
+        : connected && codexOfficialSelected(integration)
+          ? pending('本机 Codex 已保存官方直连配置。账号 B 需切回网关模式后使用。', '官方直连')
+          : pending('原模型接入状态未确认。', '待确认')) },
     { from: 'claude', to: 'claude', name: 'Claude 原订阅', protocol: 'Messages / CLI',
       ...(connected && messages?.channels?.Claude?.running === true ? configured('CLI 订阅入口已启动；此状态未验证 CLI 登录、模型权限或真实推理。') : pending('CLI 订阅入口尚未确认。', '待确认')) },
     { from: 'codebuddy', to: 'codebuddy', name: 'CodeBuddy 自有额度', protocol: '客户端原生 / 网关',
@@ -1475,6 +1494,30 @@ async function refreshCursor() {
   return pending;
 }
 
+function renderIntegrationMode({ integration, idle, bound, passed, verifying }) {
+  const routing = integration.routing || {};
+  const supported = routing.supported === true
+    && integrationModeUnavailableToken !== (status?.csrfToken || 'unknown-service');
+  const mode = routing.supported === true ? ['official', 'gateway', 'other'].includes(routing.mode) ? routing.mode : 'other'
+    : codexOfficialSelected(integration) ? 'official' : codexGatewaySelected(integration) ? 'gateway' : 'other';
+  const enabled = supported && idle && managementConnected && !managementStatusError && !restartInProgress;
+  text('integration-mode-value', mode === 'official' ? '官方直连' : mode === 'gateway' ? 'Bifröst 网关'
+    : integration.providerId ? `其他提供方（${integration.providerId}）` : '尚未确认');
+  text('integration-mode-description', mode === 'official' ? '请求使用 Codex 官方连接及当前登录账号。'
+    : mode === 'gateway' ? '请求经过 Bifröst，按所选模型分配账号与渠道。'
+      : '请选择官方连接，或使用已保存的 Bifröst 网关配置。');
+  elements['integration-official-button'].disabled = !enabled || mode === 'official' || routing.canSwitchOfficial !== true;
+  elements['integration-gateway-button'].disabled = !enabled || verifying || mode === 'gateway' || routing.canSwitchGateway !== true || !bound || !passed;
+  text('integration-official-button', busyAction === 'integration-mode-official' ? '正在切换到官方…' : mode === 'official' ? '当前为官方直连' : '切换到官方');
+  text('integration-gateway-button', busyAction === 'integration-mode-gateway' ? '正在切换到网关…' : mode === 'gateway' ? '当前为 Bifröst 网关' : '切换到 Bifröst 网关');
+  const error = !supported ? '切换功能需重启网关服务后可用。请在控制台点击“重启网关服务”，恢复连接后刷新页面。'
+    : mode !== 'gateway' && routing.canSwitchGateway !== true ? routing.reason || '尚无可切换的网关路由，请先完成下方网关接入配置。'
+      : mode !== 'gateway' && (!bound || !passed) ? '切换到网关前，请登录并确认账号 B，完成推理验证。'
+        : routing.reason || '';
+  text('integration-mode-error', error);
+  elements['integration-mode-error'].hidden = !error;
+}
+
 function render() {
   if (!status) return;
   const backend = status.backend || {};
@@ -1545,16 +1588,17 @@ function render() {
   }
   text('verification-meta', [verification.accountEmail, checkedAt].filter(Boolean).join(' · '));
 
-  pill('integration-state', needsUpgrade ? '待更新路由' : integration.installed ? '已接入' : '未接入', needsUpgrade ? 'pending' : integration.installed ? 'success' : '');
-  text('integration-description', needsUpgrade ? '更新模型路由后，原有模型使用账号 A，新增的两个 B 模型使用账号 B。' : integration.installed ? '已为本机 Codex 添加两个 B 模型。原有模型使用账号 A，两个 B 模型使用账号 B。' : integration.reason || '完成推理验证后，在 Codex 模型选择器中添加两个 B 模型，并按模型分配账号。');
+  renderIntegrationMode({ integration, idle, bound, passed, verifying });
+  pill('integration-state', needsUpgrade ? '待更新路由' : integration.installed ? '路由配置已保存' : '未配置网关', needsUpgrade ? 'pending' : integration.installed ? 'success' : '');
+  text('integration-description', needsUpgrade ? '请更新已保存的网关模型路由。' : integration.installed ? '网关路由已保存。实际连接模式见上方“当前配置”。' : integration.reason || '完成推理验证后，可配置本机 Codex 的网关模型路由。');
   text('config-path', integration.configPath || '未检测到配置路径');
   elements['install-button'].disabled = !idle || !passed || !bound || !integration.canInstall || (integration.installed && !needsUpgrade) || verifying;
-  text('install-button', busyAction === 'install' ? '正在写入配置…' : needsUpgrade ? '更新模型路由' : integration.installed ? '本机 Codex 已接入' : '接入本机 Codex');
+  text('install-button', busyAction === 'install' ? '正在写入配置…' : needsUpgrade ? '更新模型路由' : integration.installed ? '网关路由已配置' : '配置网关路由');
   elements['copy-button'].disabled = !idle || !passed || !bound || verifying;
   text('copy-button', busyAction === 'copy' ? '正在复制…' : '复制接入配置');
   elements['restore-button'].hidden = !integration.installed;
   elements['restore-button'].disabled = !idle || verifying;
-  text('restore-button', busyAction === 'restore' ? '正在恢复…' : '恢复接入前配置');
+  text('restore-button', busyAction === 'restore' ? '正在恢复…' : '恢复接入前的提供方配置');
 
   pill('gateway-state', gateway.enabled ? '可接收请求' : backend.running ? '等待确认账号' : '等待后端启动', gateway.enabled ? 'success' : '');
   text('gateway-url', gateway.baseUrl || '服务启动后显示');
@@ -2218,6 +2262,28 @@ elements['verify-button'].addEventListener('click', () => {
   });
 });
 
+async function switchIntegrationMode(mode) {
+  if (!['official', 'gateway'].includes(mode)
+    || elements[`integration-${mode}-button`].disabled) return;
+  await action(`integration-mode-${mode}`, async () => {
+    let integration;
+    try { integration = await post('/api/integration/mode', { mode }); }
+    catch (error) {
+      if (error.status === 404) {
+        integrationModeUnavailableToken = status?.csrfToken || 'unknown-service';
+        throw new Error('当前后台尚未提供连接模式切换。请先在控制台重启网关服务，恢复连接后重试。');
+      }
+      throw error;
+    }
+    if (status) status = { ...status, integration };
+    notify(`已保存${mode === 'official' ? '官方直连' : 'Bifröst 网关'}配置。请完全退出并重新打开 Codex，再选择该模式可用的模型。`);
+  });
+}
+
+for (const mode of ['official', 'gateway']) {
+  elements[`integration-${mode}-button`].addEventListener('click', () => { void switchIntegrationMode(mode); });
+}
+
 elements['install-button'].addEventListener('click', () => {
   void action('install', async () => {
     await post('/api/integration/install');
@@ -2228,7 +2294,7 @@ elements['install-button'].addEventListener('click', () => {
 elements['restore-button'].addEventListener('click', () => {
   void action('restore', async () => {
     await post('/api/integration/restore');
-    notify('已恢复接入前的 Codex 配置。重启 Codex 后生效。');
+    notify('已恢复接入前的提供方配置。请重开 Codex；官方直连与网关模式请使用上方切换按钮。');
   });
 });
 
