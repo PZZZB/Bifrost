@@ -1,5 +1,7 @@
 # Windows 个人混合网关
 
+如果公司已通过 Bifrost 快捷方式或 `Start-Bridge.ps1` 运行 Server，请使用 [已有 Server 添加远端来源](server-remote-sources.md)，沿用原来的 Codex 地址和公司登录。下文 Desktop 用于选择独立运行入口的部署。
+
 Desktop 运行在公司 Windows 电脑，客户端只连接 `http://127.0.0.1:43160/v1`。同一个 `/v1/models` 列表合并公司 CodeBuddy 和远端 Bifrost 的可用模型，直接选模型即可，无需切换内外网模式或客户端地址。
 
 | 可见模型示例 | 实际请求路径 | 额度与权限 |

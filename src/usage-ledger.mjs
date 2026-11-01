@@ -3,7 +3,7 @@ import { chmod, mkdir, open, stat, truncate } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
 const FORMAT_VERSION = 1;
-const ACCOUNTS = ['A', 'B', 'With', 'CodeBuddy', 'Claude', 'Cursor'];
+const ACCOUNTS = ['A', 'B', 'With', 'CodeBuddy', 'Claude', 'Cursor', 'Bifrost'];
 const RECENT_LIMIT = 100;
 const MAX_LINE_BYTES = 64 * 1024;
 const UTF8 = new TextDecoder('utf-8', { fatal: true });

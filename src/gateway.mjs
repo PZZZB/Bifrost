@@ -8,6 +8,8 @@ import { CODEBUDDY_RESPONSES_STATE_PREFIX } from './codebuddy-responses.mjs';
 import { resolveCursorModel, cursorModelAvailability } from './cursor-service.mjs';
 import { CURSOR_RESPONSES_STATE_PREFIX } from './cursor-responses.mjs';
 import { classifyDiagnosticFailure, normalizeDiagnosticRecord, responsesTerminalEvidence } from './request-diagnostics.mjs';
+import { codexClient } from './clients/codex.mjs';
+import { REMOTE_RESPONSES_STATE_PREFIX } from './runtime/server-remotes.mjs';
 
 export function keyMatches(actual, expected) {
   if (typeof actual !== 'string' || typeof expected !== 'string' || !expected) return false;
@@ -144,7 +146,7 @@ export class Gateway {
     isDraining = () => false, cursorProvider = null, cursorEnabled = () => cursorProvider !== null,
     getCursorModels = async () => [], getCodeBuddyModels = null,
     getCursorAuthorizationVersion = () => null, getCodeBuddyAuthorizationVersion = () => null,
-    onDiagnostic = () => {}, getAuthorizationVersion = null }) {
+    onDiagnostic = () => {}, getAuthorizationVersion = null, remoteSources = null }) {
     if (typeof getAProvider !== 'function') throw new TypeError('getAProvider is required for account routing.');
     if (codeBuddyProvider !== null && (typeof codeBuddyProvider.status !== 'function' || typeof codeBuddyProvider.request !== 'function') ||
         typeof codeBuddyEnabled !== 'function' || getCodeBuddyModels !== null && typeof getCodeBuddyModels !== 'function') throw new TypeError('Invalid CodeBuddy Responses provider.');
@@ -152,16 +154,17 @@ export class Gateway {
         typeof cursorEnabled !== 'function' || typeof getCursorModels !== 'function') throw new TypeError('Invalid Cursor Responses provider.');
     if (typeof getCursorAuthorizationVersion !== 'function' || typeof getCodeBuddyAuthorizationVersion !== 'function') throw new TypeError('Invalid account catalog version getters.');
     if (typeof onDiagnostic !== 'function' || getAuthorizationVersion !== null && typeof getAuthorizationVersion !== 'function') throw new TypeError('Invalid request diagnostic hooks.');
+    if (remoteSources !== null && ['models', 'model', 'request', 'status'].some(name => typeof remoteSources[name] !== 'function')) throw new TypeError('Invalid remote sources.');
     Object.assign(this, { backend, gatewayKey, getAProvider, fetchImpl, upstream, catalogWaitMs, onUsage,
       codeBuddyProvider, codeBuddyEnabled, modelPolicy, isDraining, cursorProvider, cursorEnabled, getCursorModels, getCodeBuddyModels,
-      getCursorAuthorizationVersion, getCodeBuddyAuthorizationVersion, onDiagnostic });
+      getCursorAuthorizationVersion, getCodeBuddyAuthorizationVersion, onDiagnostic, remoteSources });
     this.getAuthorizationVersion = getAuthorizationVersion ?? (account => account === 'Cursor' ? getCursorAuthorizationVersion()
-      : account === 'CodeBuddy' ? getCodeBuddyAuthorizationVersion() : null);
+      : account === 'CodeBuddy' ? getCodeBuddyAuthorizationVersion() : account === 'Bifrost' ? remoteSources?.generation : null);
     this.pendingRequests = 0;
     this.bCatalog = null; this.catalogRefresh = null;
     this.threadTraffic = new Map();
     this.metrics = { requests: 0, completed: 0, failed: 0, active: 0, lastError: null, lastUsage: null,
-      accounts: Object.fromEntries(['A', 'B', 'CodeBuddy', 'Cursor'].map(account => [account, accountCounters()])) };
+      accounts: Object.fromEntries(['A', 'B', 'CodeBuddy', 'Cursor', ...(remoteSources ? ['Bifrost'] : [])].map(account => [account, accountCounters()])) };
   }
 
   traffic(threadId) { return structuredClone(this.threadTraffic.get(threadId) ?? null); }
@@ -180,7 +183,7 @@ export class Gateway {
     const threadId = requestThreadId(headers);
     if (!threadId) return null;
     if (!this.threadTraffic.has(threadId)) {
-      this.threadTraffic.set(threadId, { threadId, accounts: Object.fromEntries(['A', 'B', 'CodeBuddy', 'Cursor'].map(name => [name,
+      this.threadTraffic.set(threadId, { threadId, accounts: Object.fromEntries(Object.keys(this.metrics.accounts).map(name => [name,
         accountCounters()])) });
       if (this.threadTraffic.size > 256) this.threadTraffic.delete(this.threadTraffic.keys().next().value);
     }
@@ -303,6 +306,13 @@ export class Gateway {
       if (error.code === 'model_alias_conflict') throw error;
       this.metrics.accounts.Cursor.lastError = redact(error.message);
     } finally { clearTimeout(timer); }
+    if (this.remoteSources) {
+      await this.observeRemotes();
+      const entries = codexClient.catalog(this.remoteSources.models()).models;
+      const ids = new Set(data.models.map(model => model.slug ?? model.id));
+      if (entries.some(model => ids.has(model.slug))) throw new BridgeError('远端模型别名与本地目录冲突。', 503, 'model_alias_conflict');
+      data = { ...data, models: [...data.models, ...entries] };
+    }
     if (this.modelPolicy) {
       await this.modelPolicy.observe(data);
       data = this.modelPolicy.filterCatalog(data);
@@ -310,9 +320,16 @@ export class Gateway {
     // Recheck both sources after all awaited metadata/policy operations. No
     // await separates this filter from the committed catalog response.
     data.models = data.models.filter(model => (codeBuddyCurrent() || !resolveCodeBuddyModel(model?.slug ?? model?.id))
-      && (cursorCurrent() || !resolveCursorModel(model?.slug ?? model?.id)));
+      && (cursorCurrent() || !resolveCursorModel(model?.slug ?? model?.id))
+      && (!/^remote\//i.test(model?.slug ?? model?.id) || this.remoteSources?.model(model.slug ?? model.id)));
     res.writeHead(200, { 'Cache-Control': 'no-store', 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
+  }
+
+  async observeRemotes() {
+    if (this.modelPolicy && this.remoteSources) await this.modelPolicy.observe({ models: this.remoteSources.models().map(model => ({
+      ...model, available: true,
+    })) }, 'Bifrost', { complete: true, defaultEnabled: true, authorizationVersion: this.remoteSources.generation });
   }
 
   async proxy(req, res, url) {
@@ -388,15 +405,18 @@ export class Gateway {
       const originalBody = await readBody(req);
       {
         const { data, alias, codeBuddy, cursor } = parseModel(originalBody, req.headers);
+        const remote = this.remoteSources?.model(data.model);
+        if (/^remote\//i.test(data.model) && !remote) throw new BridgeError('远端模型未就绪或已撤销权限，请刷新目录。', 503, 'remote_model_unavailable');
+        if (remote) await this.observeRemotes();
         if (diagnostic) {
-          diagnostic.account = cursor ? 'Cursor' : codeBuddy ? 'CodeBuddy' : alias ? 'B' : 'A';
-          diagnostic.model = data.model; diagnostic.upstreamModel = cursor?.upstream ?? alias?.upstream ?? data.model;
+          diagnostic.account = remote ? 'Bifrost' : cursor ? 'Cursor' : codeBuddy ? 'CodeBuddy' : alias ? 'B' : 'A';
+          diagnostic.model = data.model; diagnostic.upstreamModel = remote?.upstreamModel ?? cursor?.upstream ?? alias?.upstream ?? data.model;
           diagnostic.stage = 'routing';
           try { diagnostic.authorizationVersion = this.getAuthorizationVersion(diagnostic.account); } catch { /* Unknown authorization generation is not guessed. */ }
         }
         this.modelPolicy?.assertEnabled(data.model);
-        const account = cursor ? 'Cursor' : codeBuddy ? 'CodeBuddy' : alias ? 'B' : 'A';
-        route = { account, model: data.model, upstreamModel: cursor?.upstream ?? alias?.upstream ?? data.model };
+        const account = remote ? 'Bifrost' : cursor ? 'Cursor' : codeBuddy ? 'CodeBuddy' : alias ? 'B' : 'A';
+        route = { account, model: data.model, upstreamModel: remote?.upstreamModel ?? cursor?.upstream ?? alias?.upstream ?? data.model };
         accountMetrics = this.metrics.accounts[account];
         if (inference) {
           accountMetrics.requests++; accountMetrics.active++; accountMetrics.lastModel = data.model;
@@ -409,7 +429,14 @@ export class Gateway {
         if (!cursor && hasProviderState(data, CURSOR_RESPONSES_STATE_PREFIX)) {
           throw new BridgeError('此会话包含 Cursor 专用接续状态，请继续使用 Cursor 模型或新建会话。', 400, 'cursor_history_channel_mismatch');
         }
-        if (codeBuddy || cursor) {
+        if (!remote && hasProviderState(data, REMOTE_RESPONSES_STATE_PREFIX)) {
+          throw new BridgeError('此会话包含远端 Bifrost 接续状态，请继续使用原模型或新建会话。', 400, 'remote_history_channel_mismatch');
+        }
+        if (remote) {
+          if (diagnostic) diagnostic.stage = 'upstream_request';
+          response = await this.remoteSources.request({ path: `${path}${url.search}`, body: data,
+            scope: clientScope(req.headers['x-bifrost-client-scope']), session: requestThreadId(req.headers) ?? '', signal: abort.signal });
+        } else if (codeBuddy || cursor) {
           const provider = cursor ? this.cursorProvider : this.codeBuddyProvider;
           if (provider === null || (cursor ? this.cursorEnabled() : this.codeBuddyEnabled()) !== true) {
             throw new BridgeError(`${cursor ? 'Cursor' : 'CodeBuddy'} Responses 通道尚未启用。`, 503, cursor ? 'cursor_unavailable' : 'codebuddy_unavailable');

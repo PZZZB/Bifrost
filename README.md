@@ -45,6 +45,8 @@ Windows PowerShell：
 
 桌面只保留 **Bifrost** 一个入口，用于启动或复用服务并打开管理页。日常重启在网页执行，可选择“空闲后重启”并在执行前取消；需要从命令行重启时，可运行 `Start-Bridge.ps1 -Restart -Open`。
 
+公司已有本地网关时，也可以给同一个服务添加远端 Bifrost 用户来源，让 Codex 在原模型列表选择公司模型或 Mac 上的 Claude；见 [已有 Server 添加远端来源](docs/server-remote-sources.md)。配置使用普通用户 Key 和 Windows 当前用户 DPAPI，客户端继续使用原来的本地地址。
+
 也可在项目目录执行 `npm start`。Windows 下这两个入口均由当前用户的 `Bifrost` 后台任务启动或复用服务；任务由 Windows 任务计划程序托管，关闭启动终端或 Codex 桌面应用后继续运行，登录 Windows 后自动启动。管理页面默认是 <http://127.0.0.1:43155>。
 
 首次运行会固定 Node 的绝对路径，并将官方 Codex CLI 二进制按 SHA-256 校验后保存在项目 `.state/runtime/codex/`；此处不保存账号凭证。原账号和网关配置继续使用已有目录。任务使用当前用户的登录身份，不保存登录密码；无限运行时限、异常退出后最多重启三次，间隔一分钟。后台配置位于运行数据目录的 `service/service.json`，日志仍为项目 `.state/server.log`、`.state/server-error.log`。

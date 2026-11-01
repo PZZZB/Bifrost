@@ -14,9 +14,17 @@ const headersFor = response => {
 /** Wrap opaque state without decoding provider state, and map only protocol model fields. */
 export class DesktopWire {
   #codec;
-  constructor({ secret } = {}) { this.#codec = new ClientStateCodec({ secret }); }
+  #prefix;
+  constructor({ secret, prefix = '' } = {}) {
+    if (typeof prefix !== 'string' || prefix && !/^[a-z][a-z0-9-]{0,79}:$/.test(prefix)) throw new TypeError('Invalid state prefix.');
+    this.#codec = new ClientStateCodec({ secret }); this.#prefix = prefix;
+  }
   #state(value, context, direction) {
-    return this.#codec[direction](value, context.scope, `${context.id}:${context.protocol}`);
+    if (direction === 'open') {
+      if (typeof value !== 'string' || !value.startsWith(this.#prefix)) throw new BridgeError('会话状态不属于当前模型来源，请新建会话。', 409, 'desktop_state_mismatch');
+      return this.#codec.open(value.slice(this.#prefix.length), context.scope, `${context.id}:${context.protocol}`);
+    }
+    return this.#prefix + this.#codec.seal(value, context.scope, `${context.id}:${context.protocol}`);
   }
   input(body, context) {
     const copy = structuredClone(body);

@@ -1,7 +1,7 @@
 import { cursorEffortParameter, cursorImageCapability } from './cursor-service.mjs';
 
 const EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
-const CHANNELS = new Set(['A', 'B', 'CodeBuddy', 'Cursor']);
+const CHANNELS = new Set(['A', 'B', 'CodeBuddy', 'Cursor', 'Bifrost']);
 const SOURCES = new Set(['remote', 'native-cache', 'account-catalog']);
 const positive = value => Number.isSafeInteger(value) && value > 0 && value <= 1_000_000_000;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -15,6 +15,8 @@ function compatibility(channel, promptMode) {
     note: '使用原生 Codex 请求协议；账号和模型别名按所选路由处理。' };
   if (channel === 'CodeBuddy') return { mode: 'protocol-adapter', label: '协议适配',
     note: '转换 Responses、Messages 与 Chat 格式，工具由客户端执行；目录存在不代表已完成真实验证。' };
+  if (channel === 'Bifrost') return { mode: 'protocol-adapter', label: '远端用户协议适配',
+    note: '本地 Responses 转为远端用户接口；工具在客户端执行，权限和余额由远端 Bifrost 校验。' };
   if (channel === 'Cursor' && promptMode === 'project-rules') return { mode: promptMode, label: '项目规则兼容模式',
     note: '保留 Cursor 内置系统提示，Codex 指令通过隔离目录的项目规则读取，不保留原 system/developer 优先级。' };
   if (channel === 'Cursor' && promptMode === 'system') return { mode: promptMode, label: '系统指令模式',
@@ -79,7 +81,7 @@ export function capabilitiesFromCatalog(value, { channel, promptMode } = {}) {
 /** Bare seed names and client aliases must not erase source capability metadata. */
 export function hasCatalogCapabilityData(source, { channel } = {}) {
   if (!object(source)) return false;
-  if (channel === 'CodeBuddy' || channel === 'Cursor') return ['supportsToolCall', 'supportsTools', 'supportsToolCalls',
+  if (channel === 'CodeBuddy' || channel === 'Cursor' || channel === 'Bifrost') return ['supportsToolCall', 'supportsTools', 'supportsToolCalls',
     'supportsImages', 'supportsVision', 'supportsImageInput', 'supportsReasoning', 'inputModalities', 'contextWindow',
     'efforts', 'defaultEffort', 'parameters', 'variants', 'capabilities'].some(field => Object.hasOwn(source, field));
   return ['context_window', 'input_modalities', 'supported_reasoning_levels', 'supports_tools', 'supports_tool_calls',

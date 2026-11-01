@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, open, rename, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-const ACCOUNTS = new Set(['A', 'B', 'CodeBuddy', 'Cursor', 'Claude', 'With']);
+const ACCOUNTS = new Set(['A', 'B', 'CodeBuddy', 'Cursor', 'Claude', 'With', 'Bifrost']);
 const STATUSES = new Set(['completed', 'tool_pending', 'incomplete', 'failed', 'interrupted']);
 const STAGES = new Set(['authentication', 'validation', 'routing', 'upstream_request', 'upstream_response', 'stream', 'downstream']);
 const USAGE_FIELDS = ['inputTokens', 'outputTokens', 'totalTokens', 'cachedInputTokens', 'cacheWriteTokens', 'reasoningTokens'];
@@ -43,7 +43,7 @@ export function classifyDiagnosticFailure(error, { httpStatus = null, stage = 'u
   else if (['model_not_found', 'model_unavailable', 'unsupported_model', 'unknown_model', 'cursor_model_unavailable',
     'codebuddy_model_unavailable', 'anthropic_unsupported_model', 'with_unsupported_model'].includes(supplied)) code = 'model_unavailable';
   else if (status === 403 || ['permission_error', 'permission_denied'].includes(supplied)) code = 'access_denied';
-  else if (status === 429 || ['rate_limit_error', 'rate_limit_exceeded', 'insufficient_quota', 'quota_exceeded'].includes(supplied)) code = 'quota_or_rate_limited';
+  else if (status === 402 || status === 429 || ['rate_limit_error', 'rate_limit_exceeded', 'insufficient_quota', 'quota_exceeded'].includes(supplied)) code = 'quota_or_rate_limited';
   else if (['cursor_unavailable', 'codebuddy_unavailable', 'provider_unavailable', 'not_ready'].includes(supplied)) code = 'provider_unavailable';
   else if (/^(?:unknown_(?:b|cursor|codebuddy)_model|(?:cursor|codebuddy)_history_channel_mismatch)$/.test(supplied)) code = 'routing_rejected';
   else if (['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT',

@@ -35,6 +35,7 @@ import { loadMacClaudeClient } from './mac-claude-client.mjs';
 import { UnifiedWebAccounts } from './unified-web-accounts.mjs';
 import { createWebAccounts } from './web-accounts.mjs';
 import { loadPaymentRuntime } from './payments/runtime.mjs';
+import { startServerRemotes } from './runtime/server-remotes.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serviceVersion = await createServiceVersion({ projectDir });
@@ -63,12 +64,13 @@ try { usageLedger = await UsageLedger.open({ path: join(stateDir, 'usage.jsonl')
 catch (error) { console.error(`Token statistics unavailable: ${redact(error.message)}`); }
 let backendRpc, configRpc, backend, integration, gateway, clientVersion, accountQuotas, serviceControl;
 let withService, cursorProvider, requestDiagnostics, clientAccess = null, clientService = null, clientAdmin = null, clientBilling = null;
-let paymentRuntime = null, paymentsFault = false;
+let paymentRuntime = null, paymentsFault = false, serverRemotes = null;
 const modelPolicy = await ModelPolicy.open({ path: join(stateDir, 'model-policy.json') });
 try { requestDiagnostics = await RequestDiagnostics.open({ path: join(stateDir, 'request-diagnostics.jsonl') }); }
 catch { console.error('Request diagnostics unavailable; model forwarding remains enabled.'); }
 function authorizationVersion(account) {
-  return account === 'CodeBuddy' ? codeBuddyService.authorizationVersion : account === 'Cursor' ? cursorService.authorizationVersion : null;
+  return account === 'CodeBuddy' ? codeBuddyService.authorizationVersion : account === 'Cursor' ? cursorService.authorizationVersion
+    : account === 'Bifrost' ? serverRemotes?.generation ?? null : null;
 }
 async function recordDiagnostic(record) {
   if (record.terminalVerified === true || ['failed', 'interrupted', 'incomplete'].includes(record.status)
@@ -125,6 +127,9 @@ try {
 // Load optional account catalogs without delaying the gateway or starting inference.
 void modelDiscovery.refresh().catch(error => console.error(`Model discovery: ${redact(error.message)}`));
 if (!delegation) {
+  try { serverRemotes = await startServerRemotes({ stateDir, secret: state.gatewayKey }); }
+  catch { console.error('Remote sources unavailable; existing local sources remain enabled. Check the protected remote configuration.'); }
+  modelPolicy.setAuthorizationVersionGetter('Bifrost', () => serverRemotes?.generation ?? null);
   const binary = process.env.CODEX_BINARY || 'codex';
   const { stdout: versionOutput } = await promisify(execFile)(binary, ['--version'], {
     windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024,
@@ -143,7 +148,7 @@ if (!delegation) {
     codeBuddyEnabled: () => codeBuddyService.enabled,
     getCodeBuddyModels: () => codeBuddyService.getModels(),
     getCodeBuddyAuthorizationVersion: () => codeBuddyService.authorizationVersion,
-    modelPolicy,
+    modelPolicy, remoteSources: serverRemotes,
     cursorProvider, cursorEnabled: () => cursorService.enabled, getCursorModels: () => cursorService.getModels(),
     getCursorAuthorizationVersion: () => cursorService.authorizationVersion,
     isDraining: () => serviceControl?.draining === true,
@@ -239,6 +244,7 @@ async function shutdown(code = 0) {
   await clientService?.close();
   await paymentRuntime?.close();
   await macClaude?.close();
+  await serverRemotes?.close();
   await Promise.allSettled([modelDiscovery.close(), providerQuotas.close()]);
   await Promise.allSettled([backendRpc?.close(), configRpc?.close(), withService.close(), codeBuddyService.close(), cursorProvider.close(), cursorService.close()]);
   // Account for response-finally work triggered by closing sockets before flushing.

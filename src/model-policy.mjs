@@ -5,7 +5,7 @@ import { resolveBModel, resolveCodeBuddyModel } from './models.mjs';
 import { CURSOR_MODELS } from './cursor-service.mjs';
 import { capabilitiesFromCatalog, hasCatalogCapabilityData, unverifiedModel, verificationFromRecord } from './model-capabilities.mjs';
 
-export const MODEL_POLICY_CHANNELS = Object.freeze(['A', 'B', 'CodeBuddy', 'Cursor']);
+export const MODEL_POLICY_CHANNELS = Object.freeze(['A', 'B', 'CodeBuddy', 'Cursor', 'Bifrost']);
 const MAX_DISABLED = 2048;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const LEGACY_EXTERNAL_DEFAULTS = new Set(['claude-codebuddy-opus-5-5', ...CURSOR_MODELS.map(model => model.id)]);
@@ -22,6 +22,7 @@ function invalid(message = '模型开关参数无效。') {
   return new BridgeError(message, 400, 'invalid_model_policy');
 }
 function fixedChannel(id) {
+  if (/^remote\//i.test(id)) return 'Bifrost';
   if (resolveBModel(id)) return 'B';
   if (resolveCodeBuddyModel(id)) return 'CodeBuddy';
   if (/^(?:claude-codebuddy-|codebuddy[-:/])/i.test(id)) return 'CodeBuddy';
@@ -128,7 +129,7 @@ export class ModelPolicy {
   #modelAvailability(id) {
     const value = this.#availability.get(id), channel = this.#models.get(id)?.channel;
     const getter = this.#authorizationSources.get(channel);
-    if (getter && ['CodeBuddy', 'Cursor'].includes(channel) && (!value || value.authorizationVersion !== getter())) {
+    if (getter && ['CodeBuddy', 'Cursor', 'Bifrost'].includes(channel) && (!value || value.authorizationVersion !== getter())) {
       return { available: false, reason: '账号授权已变化或尚未取得当前账号目录，请刷新后重试。' };
     }
     if (!value) return undefined;
@@ -186,7 +187,7 @@ export class ModelPolicy {
       // Client catalogs contain bridge-generated limits. Only the provider's
       // own directory may populate external capabilities.
       const details = ['A', 'B'].includes(channel) && hasCatalogCapabilityData(model, { channel })
-        || channelHint === channel && ['CodeBuddy', 'Cursor'].includes(channel)
+        || channelHint === channel && ['CodeBuddy', 'Cursor', 'Bifrost'].includes(channel)
           && (hasCatalogCapabilityData(model, { channel }) || promptMode !== undefined || !previousDetails || previousDetails.authorizationVersion !== version)
         ? { authorizationVersion: version,
           value: capabilitiesFromCatalog(model, { channel, promptMode: promptMode

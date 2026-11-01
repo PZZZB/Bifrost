@@ -304,7 +304,8 @@ function translate(raw, instructionMarker, profile = {}) {
       } catch (error) { if (error instanceof AdapterError) throw error; fail('工具 arguments 不是有效 JSON。', 'input.arguments'); }
       if (!object(args)) fail('工具参数必须是对象。', 'input.arguments');
       finiteJson(args, 'input.arguments');
-      assistantBlocks([{ type: 'tool_use', id: call, name: mapped.alias, input: args }]);
+      const block = { type: 'tool_use', id: call, name: mapped.alias, input: args };
+      assistantBlocks([(profile.restoreTool ?? (value => value))(block)]);
       pending.set(call, mapped); seenCalls.add(call);
     } else if (['function_call_output', 'custom_tool_call_output', 'tool_search_output'].includes(type)) {
       inputItemShape(item, ['type', 'id', 'call_id', 'name', 'output', 'status', 'namespace', 'execution', 'tools'], 'input.tool_output');
@@ -335,13 +336,13 @@ function translate(raw, instructionMarker, profile = {}) {
   if (typeof choice === 'string') {
     if (!['auto', 'none', 'required'].includes(choice)) fail('tool_choice 无效。', 'tool_choice');
     if (choice === 'required' && !tools.declarations.length) fail('tool_choice=required 没有可用的客户端工具。OpenAI 托管搜索不可用。', 'tool_choice');
-    upstream.tool_choice = { type: choice === 'required' ? 'any' : choice, disable_parallel_tool_use: !parallel };
+    upstream.tool_choice = { type: choice === 'required' ? 'any' : choice, ...(!parallel ? { disable_parallel_tool_use: true } : {}) };
   } else {
     shape(choice, ['type', 'name', 'namespace'], 'tool_choice');
     if (!['function', 'custom', 'tool_search'].includes(choice.type)) fail('tool_choice 不受支持。', 'tool_choice');
     const selected = tools.byKey.get(tools.key(choice.type, choice.namespace, choice.type === 'tool_search' ? 'tool_search' : choice.name));
     if (!selected?.declared) fail('tool_choice 未匹配已声明工具。', 'tool_choice');
-    upstream.tool_choice = { type: 'tool', name: selected.alias, disable_parallel_tool_use: !parallel };
+    upstream.tool_choice = { type: 'tool', name: selected.alias, ...(!parallel ? { disable_parallel_tool_use: true } : {}) };
   }
   return { original: body, upstream, tools, parallel, effectiveTools };
 }
@@ -420,6 +421,9 @@ class Conversion {
       } else if (block.type === 'redacted_thinking' && this.profile.allowRedactedThinking && typeof block.data === 'string') {
         item = { type: 'reasoning', id: id(`rs_${this.profile.idPrefix ?? 'bifrost_messages'}`), summary: [] };
       } else if (block.type === 'tool_use' && typeof block.name === 'string' && object(block.input)) {
+        if (block.caller !== undefined && (!object(block.caller) || block.caller.type !== 'direct' || Object.keys(block.caller).length !== 1)) {
+          protocol('此工具来源注记尚不能完整接续。');
+        }
         const tool = this.request.tools.byAlias.get(block.name);
         if (!tool?.declared || typeof block.id !== 'string' || [...this.blocks.values()].some(entry => entry.block.type === 'tool_use' && entry.block.id === block.id)) protocol('Messages 返回了未声明或重复工具。');
         if (!/^[A-Za-z0-9_.:-]{1,256}$/.test(block.id)) protocol('Messages 工具 call_id 无效。');
@@ -476,6 +480,7 @@ class Conversion {
         try { args = state.hadArguments ? JSON.parse(state.arguments) : block.input; } catch { protocol('Messages 工具参数 JSON 被截断。'); }
         if (!object(args)) protocol('Messages 工具参数必须是对象。');
         try { finiteJson(args, 'upstream.arguments'); } catch { protocol('Messages 工具参数含无效 JSON 数值或嵌套。'); }
+        this.profile.observeTool?.({ ...block, input: args });
         if (item.type === 'custom_tool_call') {
           if (Object.keys(args).length !== 1 || typeof args.input !== 'string') protocol('Messages 自定义工具缺少原始 input。');
           item.input = args.input;
