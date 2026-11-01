@@ -89,6 +89,8 @@ test('a configured Claude node boots without Codex, discovers its own pool and p
   const restored = await read(`/api/upstream-accounts/${id}`, { revision: paused.data.revision, enabled: true, name: 'My isolated Claude' }); assert.equal(restored.status, 200);
   assert.equal((await userModels()).length, 2);
   const settings = await read('/api/model-settings'); assert.deepEqual(settings.data.models.map(m => m.id), ['Claude-opus', 'Claude-sonnet']);
+  assert.equal(settings.data.discovery.Claude.state, 'ready'); assert.equal(settings.data.discovery.Claude.count, 2);
+  assert.equal(settings.data.models[0].compatibility.mode, 'protocol-adapter');
   const selection = await read('/api/model-settings', { revision: settings.data.revision, disabledModels: ['Claude-opus'] }); assert.equal(selection.status, 200);
   assert.deepEqual((await userModels()).map(m => m.id), ['Claude-sonnet']);
   const before = (await read('/api/client-admin')).data.accounts.find(a => a.id === accountId).billing;

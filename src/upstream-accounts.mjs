@@ -48,9 +48,9 @@ export class UpstreamAccounts {
     });
   }
   async modelSettings() {
-    await this.refreshModels();
+    const refreshed = await this.refreshModels();
     const snapshot = this.modelPolicy.snapshot();
-    return { ...snapshot, models: this.catalog() };
+    return { ...snapshot, models: this.catalog(), discovery: refreshed?.discovery ?? {} };
   }
   async snapshot() {
     const models = this.catalog(), remotes = this.getRemotes();

@@ -202,10 +202,18 @@ if (accountStore) {
       codex: () => ({ configured: Boolean(backend), authenticated: Boolean(backend?.account), bound: Boolean(state.enabled && state.pinnedAccount && backend?.account) }),
       codebuddy: () => codeBuddyService?.status(), cursor: () => cursorService?.status(), with: () => withService?.status() },
     getRemotes: () => serverRemotes, modelPolicy,
-    getModels: () => macClaude ? macClaude.models().map(m => ({ ...m, enabled: !modelPolicy.snapshot().disabledModels.includes(m.id) })) : modelPolicy.snapshot().models,
+    getModels: () => {
+      const policy = modelPolicy.snapshot();
+      return macClaude ? macClaude.models().map(m => ({ ...policy.models.find(p => p.id === m.id), ...m,
+        enabled: !policy.disabledModels.includes(m.id) })) : policy.models;
+    },
     refreshModels: async () => {
-      if (macClaude) await modelPolicy.observe({ models: macClaude.models() }, 'Claude', { complete: true });
-      else { await modelDiscovery.refresh(); await gateway?.observeRemotes(); }
+      if (macClaude) {
+        await modelPolicy.observe({ models: macClaude.models() }, 'Claude', { complete: true });
+        return { discovery: { Claude: { state: !sourceAllowed('Claude') ? 'disabled' : macClaude.status().available ? 'ready' : 'error',
+          count: macClaude.models().length } } };
+      }
+      const discovered = await modelDiscovery.refresh(); await gateway?.observeRemotes(); return discovered;
     },
     capabilities: () => ({ accountPool: true, clientIntegration: Boolean(integration), userManagement: clientService?.status().enabled === true,
       billing: Boolean(clientBilling), diagnostics: Boolean(requestDiagnostics), activeKinds: accountPool?.rows().filter(a => a.enabled).map(a => a.kind) ?? [] }),

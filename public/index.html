@@ -8,7 +8,7 @@
     <title>Bifröst · The Rainbow Bridge</title>
     <link rel="stylesheet" href="/style.css">
     <script src="/app.js" defer></script>
-  <script src="/account-pool.js" defer></script>
+    <script src="/account-pool.js" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -123,8 +123,8 @@
           </section>
 
           <section class="panel model-settings-panel" aria-labelledby="model-settings-title">
-            <div class="panel-heading"><div><div class="eyebrow">CODEX MODELS</div><h2 id="model-settings-title">模型选择</h2></div><span class="pill pending" id="model-settings-state">读取中</span></div>
-            <p class="panel-copy">按账号目录勾选要开放给 Codex 的模型。新模型默认关闭；不可用或尚未适配的模型会显示原因。保存后在 Codex 中刷新模型目录，或重开 Codex。</p>
+            <div class="panel-heading"><div><div class="eyebrow">PUBLISHED MODELS</div><h2 id="model-settings-title">模型选择</h2></div><span class="pill pending" id="model-settings-state">读取中</span></div>
+            <p class="panel-copy" id="model-settings-description">按账号目录管理当前网关开放的模型；不可用或尚未适配的模型会显示原因。保存后在客户端刷新模型目录，或重开客户端。</p>
             <label class="model-search-label" for="model-settings-search">搜索模型或渠道<input type="search" id="model-settings-search" placeholder="输入模型名称、ID 或渠道" autocomplete="off" disabled></label>
             <p class="model-settings-summary" id="model-settings-summary" role="status" aria-live="polite"></p>
             <p class="gateway-error" id="model-settings-discovery" role="status" hidden></p>
