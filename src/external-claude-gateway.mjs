@@ -162,7 +162,9 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
     }
   })(); });
   server.headersTimeout = 10_000; server.requestTimeout = 30_000;
-  server.maxHeadersCount = 40; server.maxConnections = 64; server.keepAliveTimeout = 5_000;
+  // Agent clients include SDK and distributed-tracing headers. Keep the total
+  // byte limit above, while accepting their ordinary header count at ingress.
+  server.maxHeadersCount = 128; server.maxConnections = 64; server.keepAliveTimeout = 5_000;
   server.on('connect', (_req, socket) => socket.destroy());
   server.on('upgrade', (_req, socket) => socket.destroy());
   return server;

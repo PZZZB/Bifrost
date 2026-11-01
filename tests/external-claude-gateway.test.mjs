@@ -40,6 +40,21 @@ test('remote keys and cookies are replaced before calling the fixed local gatewa
   assert.equal(response.headers.get('set-cookie'), null);
 });
 
+test('agent SDK tracing headers fit ingress without being forwarded or bypassing authentication', async t => {
+  let calls = 0;
+  const headers = Object.fromEntries(Array.from({ length: 48 }, (_, index) => [`x-client-trace-${index}`, 'trace']));
+  const { send } = await fixture(t, { fetchImpl: async (_url, options) => {
+    calls++;
+    assert.equal([...options.headers.keys()].some(name => name.startsWith('x-client-trace-')), false);
+    return Response.json({ data: [] });
+  } });
+  assert.equal((await send('/v1/models', { headers })).status, 200);
+  assert.equal((await send('/v1/models', { headers, key: 'invalid' })).status, 401);
+  assert.equal((await send('/v1/models', { headers: { ...headers, authorization: [`Bearer ${aliceKey}`, `Bearer ${aliceKey}`] } })).status, 400);
+  assert.equal((await send('/v1/models', { headers: { ...headers, 'x-oversized': 'x'.repeat(16_384) } })).status, 431);
+  assert.equal(calls, 1);
+});
+
 test('matching attacker-controlled sessions cannot share identities across clients', async t => {
   const sessions = [];
   const { send } = await fixture(t, { fetchImpl: async (_url, options) => {
