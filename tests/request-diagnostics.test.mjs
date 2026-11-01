@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -11,7 +11,7 @@ const entry = (overrides = {}) => ({ requestId: randomUUID(), time: '2026-10-23T
   account: 'B', model: 'B-gpt-6.1-sol', upstreamModel: 'gpt-6.1-sol', status: 'completed', httpStatus: 200,
   durationMs: 125, firstResponseMs: 20, usage: { input_tokens: 10, output_tokens: 2 }, ...overrides });
 async function fixture(t, options = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'bifrost-request-diagnostics-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'bifrost-request-diagnostics-')));
   const path = join(directory, 'state', 'diagnostics.jsonl');
   const journal = await RequestDiagnostics.open({ path, ...options });
   t.after(async () => { await journal.close(); await rm(directory, { recursive: true, force: true }); });

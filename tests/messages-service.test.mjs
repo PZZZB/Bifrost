@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -42,7 +42,7 @@ function providerFixture() {
 async function fixture(testContext, { installed = config(), damaged = false, missing = false,
   codeBuddyEnabled = true, listenFailure = null, providerFailure = false, reservedPorts = [],
   startTcpForwarderImpl, httpFetch } = {}) {
-  const stateDir = await mkdtemp(join(tmpdir(), 'messages-service-'));
+  const stateDir = await realpath(await mkdtemp(join(tmpdir(), 'messages-service-')));
   const path = join(stateDir, 'messages-gateway.json');
   const source = damaged ? '{invalid-json' : JSON.stringify(installed);
   if (!missing) await writeFile(path, source);
@@ -131,7 +131,7 @@ test('a LAN listener can use a distinct loopback upstream on the same unreserved
 });
 
 test('legacy delegation preserves existing injected lifecycle options', async testContext => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'messages-legacy-options-'));
+  const stateDir = await realpath(await mkdtemp(join(tmpdir(), 'messages-legacy-options-')));
   testContext.after(() => rm(stateDir, { recursive: true, force: true }));
   const daemon = {}, provider = {}, listenImpl = () => {}, onUsage = () => {};
   let received;
@@ -220,7 +220,7 @@ test('Claude-only setup works with CodeBuddy disabled and defaults cache ownersh
 });
 
 async function privateKeyFixture(testContext) {
-  const directory = await mkdtemp(join(tmpdir(), 'messages-private-key-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'messages-private-key-')));
   testContext.after(() => rm(directory, { recursive: true, force: true }));
   return { directory, path: join(directory, 'independent-upstream-key.txt') };
 }

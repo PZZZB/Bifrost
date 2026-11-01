@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, readdir, readFile, writeFile, rename, symlink, unlink, link } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readdir, readFile, realpath, writeFile, rename, symlink, unlink, link } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CursorResponsesProvider, CURSOR_RESPONSES_STATE_PREFIX } from '../src/cursor-responses.mjs';
@@ -24,7 +24,7 @@ class Messages {
   }
 }
 async function fixture(t, scenario, settings = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'bifrost-cursor-responses-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'bifrost-cursor-responses-')));
   const created = [], resumed = [], sends = [], results = [], cancelled = [], closed = [];
   let apiKey = 'cursor-fixture-key', catalog = [{ id: upstream, displayName: 'Gemini 4 Argon' }, { id: 'grok-4.7', displayName: 'Grok 4.7' }];
   const service = { enabled: true,
@@ -438,10 +438,21 @@ test('a single HTTP attributes terminal run usage once even without a stream usa
   assert.equal((await f.provider.status()).runUsageDiagnostics[0].httpAttribution, 'single-http');
 });
 
-test('request timeout and cancellation during late create/send cancel every started SDK run', async t => {
-  const timeout = await fixture(t, async () => {}, { requestTimeoutMs: 10 });
-  const timed = await timeout.request(); assert.equal(timed.status, 504); assert.equal((await timed.json()).error.code, 'cursor_timeout');
-  assert.equal(timeout.provider.activeRuns, 0); assert.ok(timeout.cancelled.length > 0);
+test('request timeout and cancellation during late create/send cancel every started SDK run', { timeout: 10_000 }, async t => {
+  const timeout = await fixture(t, async () => {}, { requestTimeoutMs: 10_000 });
+  // The fake SDK holds no sockets. Advance the intentionally unref'd timeout
+  // only after its run starts, instead of racing real filesystem work in 10 ms.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let settled = false;
+    const pending = timeout.request().then(response => { settled = true; return response; });
+    while (!timeout.sends.length && !settled) await tick();
+    assert.ok(timeout.sends.length > 0);
+    t.mock.timers.tick(10_000);
+    const timed = await pending;
+    assert.equal(timed.status, 504); assert.equal((await timed.json()).error.code, 'cursor_timeout');
+    assert.equal(timeout.provider.activeRuns, 0); assert.ok(timeout.cancelled.length > 0);
+  } finally { t.mock.timers.reset(); }
   for (const kind of ['createGate', 'sendGate']) {
     let release;
     const gate = new Promise(resolveGate => { release = resolveGate; });
@@ -591,7 +602,7 @@ test('state root and resume junctions cannot authorize SDK calls or delete files
   for (const name of ['cursor-sdk', 'resume']) {
     const f = await fixture(t, async context => { context.text('Done.'); context.finish(); }, { realCheckpoint: true });
     const first = await (await f.request()).json(); await f.provider.close();
-    const outside = await mkdtemp(join(tmpdir(), 'bifrost-cursor-external-'));
+    const outside = await realpath(await mkdtemp(join(tmpdir(), 'bifrost-cursor-external-')));
     t.after(() => rm(outside, { recursive: true, force: true }));
     const original = name === 'cursor-sdk' ? join(f.directory, 'cursor-sdk') : join(f.directory, 'cursor-sdk', 'resume');
     const target = join(outside, 'relocated');
