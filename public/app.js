@@ -1,5 +1,8 @@
 'use strict';
 
+// Windows supervisor verification can take up to ten seconds before version metadata is read.
+const SERVICE_STATUS_TIMEOUT_MS = 15000;
+
 const byId = (id) => document.getElementById(id);
 
 function paintOfficialBrandIcons() {
@@ -154,6 +157,8 @@ let modelSettingsUnavailable = false;
 let modelSettingsError = '';
 let modelDraft = new Map();
 let modelGroupActions = [];
+const modelGroupExpanded = new Map();
+let modelGroupViews = [];
 let modelSettingsLoaded = false;
 let cursorStatus = null;
 let cursorRequest = null;
@@ -1103,12 +1108,13 @@ async function refreshServiceStatus() {
   if (serviceRequest) return serviceRequest;
   serviceRequest = (async () => {
     try {
-      serviceStatus = await request('/api/service/status', { signal: AbortSignal.timeout(5000) });
+      serviceStatus = await request('/api/service/status', { signal: AbortSignal.timeout(SERVICE_STATUS_TIMEOUT_MS) });
       serviceUnavailable = false; serviceError = '';
       if (restartConfirmation && Number.isSafeInteger(serviceStatus.activeRequests) && serviceStatus.activeRequests >= 0) restartActiveRequests = serviceStatus.activeRequests;
     } catch (error) {
       serviceUnavailable = error.status === 404;
-      serviceError = serviceUnavailable ? '' : error.message || '暂时无法读取服务状态。';
+      serviceError = serviceUnavailable ? '' : ['TimeoutError', 'AbortError'].includes(error.name)
+        ? '服务状态查询超时，请稍后重试。' : error.message || '暂时无法读取服务状态。';
     } finally { serviceRequest = null; renderServiceControl(); }
   })();
   return serviceRequest;
@@ -1124,13 +1130,17 @@ function completeModelDiscoverySupported() {
 
 const modelChannel = model => model.channel === 'CursorTeams' ? 'Cursor' : model.channel || '其他渠道';
 const modelChannelLabels = { A: '账号 A', B: '账号 B', CodeBuddy: 'CodeBuddy', Cursor: 'Cursor Teams' };
+const modelSourceKey = model => typeof model.sourceAccountId === 'string' && model.sourceAccountId
+  ? `account:${model.sourceAccountId}` : `channel:${modelChannel(model)}`;
+const modelSourceName = model => typeof model.sourceAccountName === 'string' && model.sourceAccountName.trim()
+  ? model.sourceAccountName : modelChannelLabels[modelChannel(model)] || modelChannel(model);
 function modelSettingsEditable() {
   return managementConnected && !busyAction && !restartInProgress && !modelSettingsUnavailable && !modelSettingsError && modelSettings !== null;
 }
 function filteredModels() {
   const query = elements['model-settings-search'].value.trim().toLocaleLowerCase();
   return (modelSettings?.models ?? []).filter(model => !query || [model.id, model.name, modelChannel(model),
-    modelChannelLabels[modelChannel(model)], model.reason].some(value => typeof value === 'string' && value.toLocaleLowerCase().includes(query)));
+    modelChannelLabels[modelChannel(model)], modelSourceName(model), model.reason].some(value => typeof value === 'string' && value.toLocaleLowerCase().includes(query)));
 }
 function renderChannelModelCounts() {
   for (const [channel, catalogId, enabledId, authenticated] of [
@@ -1159,6 +1169,11 @@ function renderModelSettingsControls() {
   for (const { button, ids, enabled } of modelGroupActions) {
     button.disabled = !available || !ids.some(id => modelDraft.get(id) !== enabled);
   }
+  for (const { count, models, matches } of modelGroupViews) {
+    const selectable = models.filter(model => model.available !== false);
+    const selected = selectable.filter(model => modelDraft.get(model.id) === true).length;
+    count.textContent = `已勾选 ${selected} / 可用 ${selectable.length} · 共 ${models.length} 项${matches === null ? '' : ` · 匹配 ${matches} 项`}`;
+  }
   if (modelSettingsUnavailable) pill('model-settings-state', '待更新服务', 'pending');
   else if (modelSettingsError) pill('model-settings-state', '读取失败', 'error');
   else if (modelSettings) {
@@ -1184,6 +1199,8 @@ function modelEvidenceDetails(model) {
     label.textContent = name; content.textContent = value; row.append(label, content); fields.append(row);
   };
   const capabilities = model.capabilities;
+  if (model.sourceAccountId) appendField('额度来源', modelSourceName(model));
+  if (typeof model.sourceCredential?.label === 'string') appendField('授权方式', model.sourceCredential.label);
   const support = value => value?.adapterSupport === true ? '适配器已支持，模型待实测'
     : value?.source === 'response-usage' ? '按响应计量'
     : value?.support === true ? '支持' : value?.support === false ? '不支持' : '目录未声明';
@@ -1210,32 +1227,52 @@ function modelEvidenceDetails(model) {
 }
 
 function renderModelSettingsList() {
+  // Capture native disclosure state before replacing rows; toggle events can be queued.
+  for (const view of modelGroupViews) {
+    if (!view.searching) modelGroupExpanded.set(view.key, view.group.open);
+  }
+  const searching = elements['model-settings-search'].value.trim() !== '';
   const groups = new Map();
   for (const model of filteredModels()) {
-    const channel = modelChannel(model);
-    if (!groups.has(channel)) groups.set(channel, []);
-    groups.get(channel).push(model);
+    const key = modelSourceKey(model);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(model);
   }
   modelGroupActions = [];
+  modelGroupViews = [];
   const nodes = [];
-  for (const [channel, models] of groups) {
-    const group = document.createElement('fieldset'); group.className = 'model-settings-group';
-    const legend = document.createElement('legend'); legend.textContent = `${modelChannelLabels[channel] || channel} · ${models.length} 项`;
-    group.append(legend);
+  for (const [key, models] of groups) {
+    const channel = modelChannel(models[0]), sourceName = modelSourceName(models[0]);
+    const group = document.createElement('details'); group.className = 'model-settings-group';
+    group.setAttribute('data-model-channel', channel);
+    if (models[0].sourceAccountId) group.setAttribute('data-source-account-id', models[0].sourceAccountId);
+    group.open = searching || modelGroupExpanded.get(key) === true;
+    const summary = document.createElement('summary'); summary.className = 'model-group-summary';
+    const name = document.createElement('strong'); name.textContent = sourceName;
+    const count = document.createElement('small'); count.className = 'model-group-count';
+    summary.append(name, count);
+    const view = { key, channel, group, count, searching, matches: searching ? models.length : null,
+      models: modelSettings.models.filter(model => modelSourceKey(model) === key) };
+    modelGroupViews.push(view);
+    group.addEventListener('toggle', () => {
+      if (!view.searching && modelGroupViews.includes(view)) modelGroupExpanded.set(key, group.open);
+    });
+    const content = document.createElement('div'); content.className = 'model-group-content';
+    group.append(summary, content);
     const actions = document.createElement('div'); actions.className = 'model-group-actions';
     const selectable = models.filter(model => model.available !== false).map(model => model.id);
     for (const [enabled, title] of [[true, '全选可用项'], [false, '全关可用项']]) {
       const button = document.createElement('button'); button.type = 'button'; button.className = 'button quiet small';
-      button.textContent = title; button.setAttribute('aria-label', `${modelChannelLabels[channel] || channel}：${title}（当前搜索结果）`);
+      button.textContent = title; button.setAttribute('aria-label', `${sourceName}：${title}（当前搜索结果）`);
       button.addEventListener('click', () => {
         if (!modelSettingsEditable() || button.disabled) return;
         for (const id of selectable) modelDraft.set(id, enabled);
         renderModelSettingsList();
-        text('model-settings-message', '批量选择仅作用于本渠道当前搜索结果中的可用模型；点击保存后生效。');
+        text('model-settings-message', '批量选择仅作用于本账号当前搜索结果中的可用模型；点击保存后生效。');
       });
       actions.append(button); modelGroupActions.push({ button, ids: selectable, enabled });
     }
-    group.append(actions);
+    content.append(actions);
     for (const model of models) {
       const label = document.createElement('label'); label.className = 'model-option';
       const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = model.id; checkbox.checked = modelDraft.get(model.id) === true;
@@ -1252,7 +1289,7 @@ function renderModelSettingsList() {
         reason.textContent = model.reason || '源端当前不可用或尚未适配。';
         details.append(reason);
       }
-      label.append(checkbox, details); group.append(label, modelEvidenceDetails(model));
+      label.append(checkbox, details); content.append(label, modelEvidenceDetails(model));
     }
     nodes.push(group);
   }
@@ -1328,15 +1365,21 @@ async function bootstrapManagementSession(signal) {
 async function waitForServiceRestart(previousToken, reconnectAfterMs = 1500) {
   const deadline = Date.now() + 60000;
   const pause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+  const remainingSignal = maximum => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error('等待服务恢复超时。');
+    return AbortSignal.timeout(Math.min(maximum, remaining));
+  };
   await pause(Math.min(10000, Math.max(750, Number.isFinite(reconnectAfterMs) ? reconnectAfterMs : 1500)));
   let reconnected = false;
   while (Date.now() < deadline) {
     try {
-      const health = await request('/health', { signal: AbortSignal.timeout(Math.min(2000, deadline - Date.now())) });
+      const health = await request('/health', { signal: remainingSignal(2000) });
       if (health.ok !== true) throw new Error('服务尚未就绪。');
-      await bootstrapManagementSession(AbortSignal.timeout(Math.max(1, Math.min(2000, deadline - Date.now()))));
-      await refreshStatus({ duringRestart: true, signal: AbortSignal.timeout(Math.max(1, Math.min(5000, deadline - Date.now()))) });
-      serviceStatus = await request('/api/service/status', { signal: AbortSignal.timeout(Math.max(1, Math.min(5000, deadline - Date.now()))) });
+      await bootstrapManagementSession(remainingSignal(2000));
+      await refreshStatus({ duringRestart: true, signal: remainingSignal(5000) });
+      if (status?.csrfToken && status.csrfToken !== previousToken) reconnected = true;
+      serviceStatus = await request('/api/service/status', { signal: remainingSignal(SERVICE_STATUS_TIMEOUT_MS) });
       serviceUnavailable = false; serviceError = ''; renderServiceControl();
       const reportedError = typeof serviceStatus?.error === 'string' ? serviceStatus.error : serviceStatus?.error?.message;
       if (reportedError && !serviceStatus.pending) {
@@ -1345,6 +1388,7 @@ async function waitForServiceRestart(previousToken, reconnectAfterMs = 1500) {
       if (!status?.csrfToken || status.csrfToken === previousToken) throw new Error('正在等待新服务接管。');
       reconnected = true;
       if (serviceUnavailable || serviceError || serviceStatus?.pending || serviceStatus?.ready !== true) throw new Error('服务已连接，正在等待就绪。');
+      if (Date.now() >= deadline) throw new Error('等待服务恢复超时。');
       return;
     } catch (error) {
       if (error.restartFailed) throw error;
@@ -2511,7 +2555,7 @@ elements['model-settings-save-button'].addEventListener('click', () => {
     }
     if (modelSettingsRequest) await modelSettingsRequest;
     await refreshModelSettings({ replaceDraft: true });
-    text('model-settings-message', '已保存。请在 Codex 中刷新模型目录，或重开 Codex。');
+    text('model-settings-message', '已保存。请在客户端刷新模型目录，或重开客户端。');
   });
 });
 elements['model-settings-reset-button'].addEventListener('click', () => {

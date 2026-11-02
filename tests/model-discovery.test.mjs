@@ -58,6 +58,24 @@ test('management discovery includes full source catalogs while preserving legacy
   await discovery.refresh(); assert.equal(policy.assertEnabled('CodeBuddy-new-model'), true);
 });
 
+test('directory refresh bypasses CodeBuddy metadata caching and keeps newly discovered models disabled', async t => {
+  const { discovery, cb } = await fixture(t);
+  let reads = 0;
+  cb.getModels = async ({ signal, force }) => {
+    assert.equal(force, true);
+    assert.equal(signal.aborted, false);
+    return [...cbModels(), ...(reads++ ? [{ id: 'CodeBuddy-kimi-k3.1-pro', name: 'CodeBuddy Kimi K3.1 Pro',
+      upstream: 'kimi-k3.1-pro', available: true, source: 'remote' }] : [])];
+  };
+  const initial = await discovery.refresh();
+  assert.equal(initial.models.some(model => model.id === 'CodeBuddy-kimi-k3.1-pro'), false);
+  const refreshed = await discovery.refresh();
+  const added = refreshed.models.find(model => model.id === 'CodeBuddy-kimi-k3.1-pro');
+  assert.equal(added.available, true);
+  assert.equal(added.enabled, false);
+  assert.equal(added.source, 'remote');
+});
+
 test('partial catalog failure preserves switches and safe cached names without blocking another channel', async t => {
   const { policy, discovery, cu } = await fixture(t);
   const before = await discovery.refresh(), saved = [...before.disabledModels];

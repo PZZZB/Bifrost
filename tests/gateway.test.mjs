@@ -38,6 +38,47 @@ test('a disabled subscription source blocks catalog and inference before reading
   assert.equal(response.status, 503); assert.equal(backend.calls.length, 0); assert.equal(calls, 0);
 });
 
+test('disabling caller A stops its directory and inference while an independently authorized B remains usable', async t => {
+  const calls = [];
+  const terminal = 'data: {"type":"response.completed","response":{"id":"resp-b","status":"completed"}}\n\n';
+  const { gateway, backend, url } = await fixture(t, async (address, options) => {
+    calls.push({ address, headers: options.headers, body: options.body });
+    if (address.includes('/models')) return Response.json({ models: [{ slug: 'gpt-6-astra' }, { slug: 'gpt-6.1-sol' }] });
+    return new Response(terminal, { headers: { 'content-type': 'text/event-stream' } });
+  });
+  let aEnabled = false;
+  gateway.sourceEnabled = account => account !== 'A' || aEnabled;
+  const headers = { authorization: `Bearer ${key}`, 'content-type': 'application/json' };
+  const denied = await fetch(url + '/backend-api/codex/responses', { method: 'POST', headers,
+    body: JSON.stringify({ model: 'gpt-6.1-sol', input: 'offline fixture' }) });
+  assert.equal(denied.status, 503); await denied.text();
+  assert.equal(calls.length, 0); assert.equal(backend.calls.length, 0);
+  const catalog = await fetch(url + '/backend-api/codex/models', { headers });
+  assert.equal(catalog.status, 200);
+  assert.deepEqual((await catalog.json()).models.map(model => model.slug), ['B-gpt-6-astra', 'B-gpt-6.1-sol']);
+  assert.equal(calls.length, 1); assert.equal(calls[0].headers.get('authorization'), `Bearer ${credentials.value}`);
+  const response = await fetch(url + '/backend-api/codex/responses', { method: 'POST', headers,
+    body: JSON.stringify({ model: 'B-gpt-6.1-sol', input: 'offline fixture' }) });
+  assert.equal(response.status, 200); assert.equal(await response.text(), terminal);
+  assert.equal(calls.every(call => call.address.startsWith('https://chatgpt.com/backend-api/codex/')), true);
+  aEnabled = true;
+  const restored = await fetch(url + '/backend-api/codex/responses', { method: 'POST',
+    headers: { ...headers, 'x-account-bridge-key': key, authorization: 'Bearer restored-client-a' },
+    body: JSON.stringify({ model: 'gpt-6.1-sol', input: 'offline fixture' }) });
+  assert.equal(restored.status, 200); await restored.text();
+  assert.equal(calls.at(-1).address.startsWith('https://account-a.example.invalid/'), true);
+  assert.equal(calls.at(-1).headers.get('authorization'), 'Bearer restored-client-a');
+});
+
+test('registering a caller source does not let a gateway Key replace its OpenAI login credential', async t => {
+  let calls = 0;
+  const { url } = await fixture(t, async () => { calls++; throw new Error('Caller login is required'); });
+  const response = await fetch(url + '/backend-api/codex/responses', { method: 'POST', headers: {
+    authorization: `Bearer ${key}`, 'content-type': 'application/json',
+  }, body: JSON.stringify({ model: 'gpt-6.1-sol', input: 'offline fixture' }) });
+  assert.equal(response.status, 401); assert.match(await response.text(), /账户 A 授权/); assert.equal(calls, 0);
+});
+
 test('gateway replaces A auth and preserves request tools and SSE bytes exactly', async (t) => {
   const events = [
     { type: 'response.output_item.added', item: { type: 'function_call', name: 'exec_command', arguments: '{"cmd":"echo 测试"}', call_id: 'call-one' } },

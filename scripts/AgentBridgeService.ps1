@@ -8,7 +8,8 @@ param(
     [string]$CodexHome = (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex'),
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')][string]$TaskName = 'Bifrost',
     [ValidateRange(1024, 65535)][int]$Port = 43155,
-    [ValidateRange(1, 120)][int]$WaitSeconds = 30
+    [ValidateRange(1, 120)][int]$WaitSeconds = 30,
+    [switch]$AsJson
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Run-AgentBridgeService.ps1') -LibraryOnly
@@ -117,7 +118,11 @@ $scheduler.Connect()
 $folder = $scheduler.GetFolder('\')
 $task = Get-AgentBridgeRegisteredTask $folder $TaskName
 if ($task) { Assert-AgentBridgeTaskOwner $task $configuration $serviceConfigPath }
-if ($Action -eq 'Status') { Get-AgentBridgeServiceStatus $task $configuration $servicePath; return }
+if ($Action -eq 'Status') {
+    $status = Get-AgentBridgeServiceStatus $task $configuration $servicePath
+    if ($AsJson) { $status | ConvertTo-Json -Depth 4 -Compress } else { $status }
+    return
+}
 if ($Action -in @('Stop', 'Restart') -and $task) {
     $heldNode = $null; $heldChildren = @()
     try {

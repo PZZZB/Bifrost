@@ -465,6 +465,124 @@ test('selects only a catalog-confirmed Opus 5.5 ID, caches metadata and exposes 
   client.identity = 'employee-two'; await provider.status(); assert.equal(client.reads, 3);
 });
 
+test('explicit catalog refresh reveals newly added models immediately while ordinary reads retain their TTL', async () => {
+  let time = 1000;
+  const { client, provider } = fixture({ now: () => time });
+  await provider.getModels();
+  client.models.push({ id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro', supportsToolCall: true });
+  assert.equal((await provider.status()).catalog.models.some(model => model.id === 'CodeBuddy-kimi-k3.1-pro'), false);
+  assert.equal((await provider.getModels({ force: 'true' })).length, 1);
+  assert.equal(client.reads, 1);
+  const refreshed = await provider.getModels({ force: true });
+  assert.equal(refreshed.some(model => model.id === 'CodeBuddy-kimi-k3.1-pro'), true);
+  assert.equal(client.reads, 2);
+  assert.deepEqual((await provider.status()).catalog.models, refreshed);
+  assert.deepEqual(await provider.getModels(), refreshed);
+  time += 29999; await provider.status(); assert.equal(client.reads, 2);
+  time++; await provider.status(); assert.equal(client.reads, 3);
+  assert.equal(client.calls.length, 0);
+});
+
+function deferredCatalog() {
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+const freshCatalog = () => ({ source: 'remote', liveVerified: true,
+  models: [{ id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro', supportsToolCall: true }] });
+
+test('older concurrent catalog success or failure cannot replace or clear a forced refresh', async () => {
+  for (const outcome of ['success', 'failure']) {
+    const { client, provider } = fixture();
+    const started = deferredCatalog(), oldCatalog = deferredCatalog();
+    client.modelCatalog = async () => {
+      client.reads++;
+      if (client.reads === 1) { started.resolve(); return oldCatalog.promise; }
+      return freshCatalog();
+    };
+    const older = provider.getModels(); await started.promise;
+    const refreshed = await provider.getModels({ force: true });
+    assert.equal(refreshed[0].id, 'CodeBuddy-kimi-k3.1-pro');
+    if (outcome === 'success') {
+      oldCatalog.resolve({ source: 'native-cache', savedAt: 1, models: catalog });
+      await older;
+    } else {
+      const failure = new Error('Fixture old catalog failure');
+      const rejected = assert.rejects(older, error => error === failure);
+      oldCatalog.reject(failure); await rejected;
+    }
+    assert.deepEqual(await provider.getModels(), refreshed);
+    const status = await provider.status();
+    assert.equal(status.ready, true); assert.deepEqual(status.catalog.models, refreshed);
+    assert.deepEqual(catalogProvenance(status.catalog), { source: 'remote', savedAt: null, liveVerified: true });
+    assert.equal(client.reads, 2); assert.equal(client.calls.length, 0);
+  }
+});
+
+test('an older call waiting for account status cannot overwrite a newer forced catalog', async () => {
+  const { client, provider } = fixture();
+  const oldStatus = deferredCatalog(); let statusReads = 0;
+  client.status = () => ++statusReads === 1 ? oldStatus.promise : Client.prototype.status.call(client);
+  client.modelCatalog = async () => ++client.reads === 1 ? freshCatalog() : { source: 'native-cache', savedAt: 1, models: catalog };
+  const older = provider.getModels({ force: true });
+  const refreshed = await provider.getModels({ force: true });
+  oldStatus.resolve(Client.prototype.status.call(client)); await older;
+  assert.deepEqual(await provider.getModels(), refreshed);
+  assert.deepEqual(catalogProvenance((await provider.status()).catalog), { source: 'remote', savedAt: null, liveVerified: true });
+  assert.equal(client.reads, 2); assert.equal(client.calls.length, 0);
+});
+
+test('ordinary cached status reads do not invalidate an in-flight forced refresh', async () => {
+  const { client, provider } = fixture();
+  const before = await provider.getModels();
+  const started = deferredCatalog(), pending = deferredCatalog();
+  client.modelCatalog = async () => { client.reads++; started.resolve(); return pending.promise; };
+  const refresh = provider.getModels({ force: true }); await started.promise;
+  assert.deepEqual((await provider.status()).catalog.models, before);
+  pending.resolve(freshCatalog());
+  const refreshed = await refresh;
+  assert.deepEqual((await provider.status()).catalog.models, refreshed);
+  assert.deepEqual(await provider.getModels(), refreshed);
+  assert.equal(client.reads, 2); assert.equal(client.calls.length, 0);
+});
+
+test('aborted model discovery neither starts a catalog read nor caches a late cancelled response', async () => {
+  const { client, provider } = fixture();
+  const early = new AbortController(); early.abort();
+  await assert.rejects(provider.getModels({ force: true, signal: early.signal }), error => error.status === 499);
+  assert.equal(client.reads, 0);
+  const started = deferredCatalog(), oldCatalog = deferredCatalog(), abort = new AbortController();
+  client.modelCatalog = async ({ signal }) => {
+    client.reads++;
+    if (client.reads === 1) { assert.equal(signal, abort.signal); started.resolve(); return oldCatalog.promise; }
+    return freshCatalog();
+  };
+  const older = provider.getModels({ force: true, signal: abort.signal }); await started.promise;
+  const refreshed = await provider.getModels({ force: true });
+  abort.abort();
+  const rejected = assert.rejects(older, error => error.status === 499);
+  oldCatalog.resolve(catalog); await rejected;
+  assert.deepEqual(await provider.getModels(), refreshed);
+  assert.equal(client.reads, 2); assert.equal(client.calls.length, 0);
+});
+
+test('logout invalidates in-flight model reads even when the old client ignores the auth change', async () => {
+  const { client, provider } = fixture();
+  const started = deferredCatalog(), oldCatalog = deferredCatalog();
+  client.modelCatalog = async () => {
+    client.reads++;
+    if (client.reads === 1) { started.resolve(); return oldCatalog.promise; }
+    return freshCatalog();
+  };
+  const older = provider.getModels(); await started.promise;
+  client.authenticated = false;
+  assert.equal((await provider.status()).authenticated, false);
+  oldCatalog.resolve(catalog); await older;
+  client.authenticated = true;
+  assert.equal((await provider.getModels())[0].id, 'CodeBuddy-kimi-k3.1-pro');
+  assert.equal(client.reads, 2); assert.equal(client.calls.length, 0);
+});
+
 test('native catalog metadata preserves its saved time without claiming live permission or a verified Token rate', async () => {
   const savedAt = Date.parse('2026-10-19T12:00:00.000Z');
   let time = savedAt + 1000;

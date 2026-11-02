@@ -8,6 +8,9 @@ import { B_MODELS, resolveBModel } from './models.mjs';
 
 const STATIC_FILES = { '/': ['index.html', 'text/html; charset=utf-8'],
   '/account-pool.js': ['account-pool.js', 'text/javascript; charset=utf-8'],
+  '/account-pool.css': ['account-pool.css', 'text/css; charset=utf-8'],
+  '/client-controls.js': ['client-controls.js', 'text/javascript; charset=utf-8'],
+  '/client-controls.css': ['client-controls.css', 'text/css; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'] };
 
@@ -19,6 +22,7 @@ function json(res, status, data) {
 export function createBridgeServer({ backend, gateway, integration, state, publicDir, baseUrl,
   usageLedger = null, accountQuotas = null, providerQuotas = null, requestDiagnostics = null, clientAdmin = null, accountPool = null,
   codeBuddyService = null, serviceControl = null, modelPolicy = null, modelDiscovery = null, cursorService = null, cursorProvider = null,
+  ownerClientApi = null, clientControls = null,
   getWithStatus = async () => ({ configured: false, running: false,
     model: { id: 'claude-opus-5-5', name: 'With · Opus 5.5' },
     gateway: { baseUrl: 'http://192.168.168.1:43157' },
@@ -34,6 +38,15 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
   let verifying = null;
   let adminBusy = false;
   let adminOperation = null;
+
+  async function requireCodexGateway() {
+    if (!backend) throw new BridgeError('请先添加并验证独立订阅账号。', 503);
+    if (verifying) throw new BridgeError('请等待当前推理验证结束。', 409);
+    const token = await backend.credentials();
+    if (verification.status !== 'passed' || verification.accountId !== token.accountId || verification.accountEmail !== token.email) {
+      throw new BridgeError('请先完成账户 B 的真实推理验证。', 409);
+    }
+  }
 
   function checkBrowser(req) {
     const cookie = req.headers.cookie?.split(';').map((part) => part.trim())
@@ -117,6 +130,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       const url = new URL(req.url, base);
       if (url.origin !== base.origin) throw new BridgeError('请求目标不允许。', 403);
       if (backendPath(url.pathname)) { if (!gateway) throw new BridgeError('当前网关未启用此协议入口。', 404); await gateway.proxy(req, res, url); return; }
+      if (ownerClientApi?.handles(url.pathname)) { await ownerClientApi.handle(req, res); return; }
       if (url.pathname === '/health' && req.method === 'GET') { json(res, 200, { ok: true, version: '0.1.0' }); return; }
       if (req.method === 'GET' && STATIC_FILES[url.pathname]) {
         const [file, type] = STATIC_FILES[url.pathname];
@@ -132,6 +146,10 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
         throw new BridgeError('当前网关未启用此管理能力。', 404, 'node_capability_unavailable');
       }
       if (req.method === 'GET') {
+        if (url.pathname === '/api/client-controls') {
+          if (!clientControls) throw new BridgeError('本机客户端管理尚未加载，请空闲重启网关后查看。', 503, 'client_controls_unavailable');
+          json(res, 200, { ...await clientControls.snapshot(), csrfToken: csrf }); return;
+        }
         if (url.pathname === '/api/node') { if (!accountPool) throw new BridgeError('账号池需重启加载。', 503); json(res, 200, { capabilities: accountPool.capabilities(), csrfToken: csrf }); return; }
         if (url.pathname === '/api/upstream-accounts' || url.pathname === '/api/upstream-account-types') {
           if (!accountPool) throw new BridgeError('账号池需重启加载。', 503);
@@ -255,6 +273,12 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       adminOperation = url.pathname;
       try {
         const body = await bodyJson(req, url.pathname === '/api/model-settings' ? 1024 * 1024 : 64 * 1024);
+        const localClient = /^\/api\/client-controls\/([a-z][a-z0-9-]{0,31})\/(launch|mode|sync|settings)$/.exec(url.pathname);
+        if (localClient) {
+          if (!clientControls) throw new BridgeError('本机客户端管理尚未加载，请空闲重启网关后查看。', 503, 'client_controls_unavailable');
+          if (localClient[1] === 'codex' && localClient[2] === 'mode' && body?.mode === 'gateway') await requireCodexGateway();
+          json(res, 200, { ...await clientControls.mutate(localClient[1], localClient[2], body), csrfToken: csrf }); return;
+        }
         if (url.pathname === '/api/upstream-accounts') {
           if (!accountPool) throw new BridgeError('账号池需重启加载。', 503);
           json(res, 200, await accountPool.create(body)); return;
@@ -285,7 +309,9 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
         }
         if (url.pathname === '/api/model-settings') {
           if (!modelPolicy) throw new BridgeError('当前运行版本尚未启用模型管理。', 503);
-          json(res, 200, await modelPolicy.update(body)); return;
+          const updated = await modelPolicy.update(body);
+          void clientControls?.autoSync().catch(() => {});
+          json(res, 200, updated); return;
         }
         if (url.pathname === '/api/cursor/login' || url.pathname === '/api/cursor/logout') {
           if (!cursorService) throw new BridgeError('Cursor 渠道尚未配置。', 503);
@@ -324,14 +350,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
           if (typeof integration.switchMode !== 'function') {
             throw new BridgeError('当前后台尚未启用 Codex 连接切换，请重启网关加载。', 503, 'integration_mode_unavailable');
           }
-          if (body.mode === 'gateway') {
-            if (!backend) throw new BridgeError('请先添加并验证独立订阅账号。', 503);
-            if (verifying) throw new BridgeError('请等待当前推理验证结束。', 409);
-            const token = await backend.credentials();
-            if (verification.status !== 'passed' || verification.accountId !== token.accountId || verification.accountEmail !== token.email) {
-              throw new BridgeError('请先完成账户 B 的真实推理验证。', 409);
-            }
-          }
+          if (body.mode === 'gateway') await requireCodexGateway();
           let result;
           try { result = await integration.switchMode(body.mode); }
           catch (error) {

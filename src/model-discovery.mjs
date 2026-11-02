@@ -29,7 +29,8 @@ export class ModelDiscovery {
     const abort = new AbortController(); this.#active.add(abort);
     let timer;
     try {
-      const pending = Promise.resolve().then(() => service.getModels({ signal: abort.signal }));
+      const pending = Promise.resolve().then(() => service.getModels({ signal: abort.signal,
+        ...(channel === 'CodeBuddy' ? { force: true } : {}) }));
       const list = await Promise.race([pending, new Promise((_, reject) => {
         timer = setTimeout(() => { abort.abort(); reject(new Error()); }, this.timeoutMs);
       }), new Promise((_, reject) => abort.signal.addEventListener('abort', () => reject(new Error()), { once: true }))]);

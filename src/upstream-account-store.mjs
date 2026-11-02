@@ -6,7 +6,7 @@ import { BridgeError, writeJson } from './storage.mjs';
 import { validateBifrostUrl } from './providers/bifrost-remote.mjs';
 import { PROTOCOL_PATHS } from './routing/model-router.mjs';
 
-export const LEGACY_SLOTS = Object.freeze({ codex: 'B', codebuddy: 'CodeBuddy', cursor: 'Cursor', claude: 'Claude', with: 'With' });
+export const LEGACY_SLOTS = Object.freeze({ 'codex-client': 'A', codex: 'B', codebuddy: 'CodeBuddy', cursor: 'Cursor', claude: 'Claude', with: 'With' });
 export const UPSTREAM_KINDS = Object.freeze([...Object.keys(LEGACY_SLOTS), 'bifrost']);
 const fields = (v, names) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === names.length && names.every(k => Object.hasOwn(v, k));
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;

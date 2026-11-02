@@ -538,6 +538,8 @@ function sse(event) { return new TextEncoder().encode(`event: ${event.type}\ndat
 export class CodeBuddyProvider {
   #cache = null;
   #catalog = null;
+  #readGeneration = 0;
+  #catalogGeneration = 0;
   #thinkingState = null;
   constructor({ client, now = Date.now, catalogTtlMs = 30_000,
     loadThinkingState = () => new CodeBuddyThinkingState() } = {}) {
@@ -553,26 +555,42 @@ export class CodeBuddyProvider {
     try { return await this.#thinkingState; }
     catch { this.#thinkingState = null; throw new AdapterError('CodeBuddy 思考接续密钥暂不可用。', 503); }
   }
-  async #metadata(signal) {
+  async #metadata(signal, force = false) {
     if (aborted(signal)) throw new AdapterError('CodeBuddy 请求已取消。', 499);
+    const generation = ++this.#readGeneration;
     const status = typeof this.client.status === 'function' ? await this.client.status({ signal }) : null;
+    if (aborted(signal)) throw new AdapterError('CodeBuddy 请求已取消。', 499);
     const account = status?.identity ?? null;
-    if (status?.authenticated === false) { this.#cache = null; this.#catalog = null; throw new AdapterError('CodeBuddy 员工账号尚未登录。', 401); }
+    if (status?.authenticated === false) {
+      if (generation >= this.#catalogGeneration) {
+        this.#catalogGeneration = generation; this.#cache = null; this.#catalog = null;
+      }
+      throw new AdapterError('CodeBuddy 员工账号尚未登录。', 401);
+    }
     const identity = status?.identity?.uid ?? '';
-    if (this.#cache && this.#cache.identity === identity && this.#cache.expires > this.now()) return { models: this.#cache.models, identity: account };
-    this.#catalog = null;
+    if (!force && this.#cache && this.#cache.identity === identity && this.#cache.expires > this.now()) return { models: this.#cache.models, identity: account };
+    // Invocation order also covers calls still waiting for auth status. A cache
+    // hit must not supersede an explicit refresh that is already in flight.
+    this.#catalogGeneration = Math.max(this.#catalogGeneration, generation);
     try {
       const catalog = await this.client.modelCatalog({ signal });
-      this.#catalog = publicCatalog(catalog);
+      if (aborted(signal)) throw new AdapterError('CodeBuddy 请求已取消。', 499);
+      const snapshot = publicCatalog(catalog);
       const models = catalogModels(catalog);
-      for (const model of models) model.descriptor.source = this.#catalog.source;
-      this.#catalog.models = models.map(model => structuredClone(model.descriptor));
-      this.#cache = { identity, models, expires: this.now() + this.catalogTtlMs };
+      for (const model of models) model.descriptor.source = snapshot.source;
+      snapshot.models = models.map(model => structuredClone(model.descriptor));
+      if (generation === this.#catalogGeneration) {
+        this.#catalog = snapshot;
+        this.#cache = { identity, models, expires: this.now() + this.catalogTtlMs };
+      }
       return { models, identity: account };
-    } catch (error) { this.#cache = null; throw error; }
+    } catch (error) {
+      if (generation === this.#catalogGeneration) { this.#cache = null; this.#catalog = null; }
+      throw error;
+    }
   }
-  async getModels({ signal } = {}) {
-    const { models } = await this.#metadata(signal);
+  async getModels({ signal, force = false } = {}) {
+    const { models } = await this.#metadata(signal, force === true);
     return models.map(model => structuredClone(model.descriptor));
   }
   async status() {

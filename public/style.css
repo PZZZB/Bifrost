@@ -293,3 +293,22 @@ footer { border-color: #839b9f29; margin-top: 29px; padding: 25px 0 30px; color:
   .integration-mode-actions>.button { width: 100%; white-space: normal; }
 }
 .pool-usage{padding:18px 0 24px;border-top:1px solid var(--border)}.pool-usage h4{margin:0 0 16px}.pool-usage-window{display:grid;grid-template-columns:1fr auto;gap:8px;margin:14px 0}.pool-usage-window progress{grid-column:1/-1;width:100%;height:8px;accent-color:var(--accent)}.pool-usage-window small{grid-column:1/-1;color:var(--muted);overflow-wrap:anywhere}.pool-usage>.footnote{margin-bottom:0}@media(max-width:600px){.pool-usage-window{grid-template-columns:1fr}.pool-usage-window>span{font-size:12px}}
+
+.model-settings-list { display: grid; gap: 10px; max-height: none; overflow: visible; padding: 0; }
+.model-settings-group { min-width: 0; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: #0a141d35; }
+.model-group-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; padding: 13px 14px; cursor: pointer; list-style: none; }
+.model-group-summary::-webkit-details-marker { display: none; }
+.model-group-summary::before { content: ''; width: 6px; height: 6px; flex: none; border-right: 1px solid var(--dim); border-bottom: 1px solid var(--dim); transform: rotate(-45deg); margin-right: 2px; }
+.model-settings-group[open]>.model-group-summary::before { transform: rotate(45deg); }
+.model-group-summary:hover { background: #a7d8c305; }
+.model-group-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 9px; }
+.model-group-summary>strong { color: var(--text); font-size: 12px; font-weight: 550; }
+.model-group-count { color: var(--dim); font-size: 10px; line-height: 1.7; margin-left: auto; font-variant-numeric: tabular-nums; }
+.model-settings-group[open]>.model-group-summary { border-bottom: 1px solid var(--border); }
+.model-group-content { max-height: 360px; overflow-y: auto; overscroll-behavior: contain; scrollbar-color: #466161 transparent; padding: 10px 7px; }
+.model-group-content>.model-group-actions { margin: 0 2px 8px; }
+@media(max-width:670px) {
+  .model-group-summary { padding: 12px; }
+  .model-group-count { flex-basis: 100%; margin-left: 18px; }
+  .model-group-content { max-height: 420px; }
+}

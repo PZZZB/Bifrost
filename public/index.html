@@ -7,8 +7,11 @@
     <meta name="referrer" content="same-origin">
     <title>Bifröst · The Rainbow Bridge</title>
     <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/account-pool.css">
+    <link rel="stylesheet" href="/client-controls.css">
     <script src="/app.js" defer></script>
     <script src="/account-pool.js" defer></script>
+    <script src="/client-controls.js" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -125,12 +128,12 @@
           <section class="panel model-settings-panel" aria-labelledby="model-settings-title">
             <div class="panel-heading"><div><div class="eyebrow">PUBLISHED MODELS</div><h2 id="model-settings-title">模型选择</h2></div><span class="pill pending" id="model-settings-state">读取中</span></div>
             <p class="panel-copy" id="model-settings-description">按账号目录管理当前网关开放的模型；不可用或尚未适配的模型会显示原因。保存后在客户端刷新模型目录，或重开客户端。</p>
-            <label class="model-search-label" for="model-settings-search">搜索模型或渠道<input type="search" id="model-settings-search" placeholder="输入模型名称、ID 或渠道" autocomplete="off" disabled></label>
+            <label class="model-search-label" for="model-settings-search">搜索模型或账号<input type="search" id="model-settings-search" placeholder="输入模型名称、ID 或账号" autocomplete="off" disabled></label>
             <p class="model-settings-summary" id="model-settings-summary" role="status" aria-live="polite"></p>
             <p class="gateway-error" id="model-settings-discovery" role="status" hidden></p>
             <div class="model-settings-list" id="model-settings-list" aria-label="账号模型目录"><p class="model-settings-empty">正在读取模型目录…</p></div>
             <div class="button-row model-settings-actions"><button class="button primary" id="model-settings-save-button" type="button" disabled>保存模型选择</button><button class="button quiet" id="model-settings-reset-button" type="button" disabled>恢复勾选</button><button class="button quiet" id="model-settings-refresh-button" type="button" disabled>刷新账号目录</button></div>
-            <p class="footnote">批量选择仅作用于本渠道当前搜索结果中的可用模型。目录在打开页面、授权变更或手动刷新时更新；模型功能以各渠道实际适配为准。</p>
+            <p class="footnote">批量选择仅作用于本账号当前搜索结果中的可用模型。目录在打开页面、授权变更或手动刷新时更新；模型功能取决于入口协议与上游适配。</p>
             <p class="inline-status management-message" id="model-settings-message" role="status" aria-live="polite"></p>
             <div class="gateway-error" id="model-settings-error" role="status" hidden></div>
           </section>
@@ -271,7 +274,7 @@
       </section>
 
       <section class="workspace-panel" id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts" tabindex="0" hidden>
-        <div class="pool-heading"><div><h2>账号池</h2><p class="panel-copy">当前网关已接入的上游账号。授权、模型和额度按账号独立管理。</p></div><div class="button-row"><button class="button secondary" id="pool-refresh" type="button">刷新</button><button class="button primary" id="pool-add" type="button" disabled>添加账号</button></div></div>
+        <div class="pool-heading"><div><h2>账号池</h2><p class="panel-copy">统一管理额度来源与模型。当前客户端身份和独立授权账号分别标注；转发方式由入口协议与上游接口共同决定。</p></div><div class="button-row"><button class="button secondary" id="pool-refresh" type="button">刷新</button><button class="button primary" id="pool-add" type="button" disabled>添加账号</button></div></div>
         <p class="gateway-error" id="pool-error" role="status" hidden></p><p class="inline-status" id="pool-message" role="status" aria-live="polite"></p>
         <form class="panel pool-create" id="pool-create" hidden>
           <h3>添加账号</h3><div class="pool-fields"><label>账号类型<select id="pool-kind" required></select></label><label>账号名称<input id="pool-name" maxlength="80" autocomplete="off" required></label></div>
@@ -433,6 +436,8 @@
           </section>
       </section>
       <section class="workspace-panel" id="panel-connections" role="tabpanel" aria-labelledby="tab-connections" tabindex="0" hidden>
+        <section class="panel client-controls-panel" id="client-controls-panel" aria-label="统一客户端管理"><p class="panel-copy">正在读取本机客户端…</p></section>
+        <section class="panel pool-route-preview" id="pool-route-preview" aria-label="查看客户端调用路径"><p class="panel-copy">正在读取入口协议与模型来源…</p></section>
         <details class="account-foldout">
           <summary>Codex 连接模式<span>官方直连与 Bifröst 网关</span></summary>
           <section class="panel" aria-labelledby="integration-title">
@@ -453,6 +458,8 @@
           </section>
         </details>
 
+        <details class="account-foldout">
+          <summary>本机 Codex 登录信息<span>仅本机身份观测</span></summary>
           <section class="panel account-provider-card" aria-labelledby="account-a-title">
             <div class="panel-heading"><div><div class="eyebrow">ACCOUNT A</div><h2 id="account-a-title">当前 Codex 会话</h2></div></div>
             <dl class="account-summary">
@@ -465,7 +472,9 @@
             </dl>
             <p class="footnote">沿用当前 Codex 的登录，由 Codex 管理登录与退出。</p>
             <p class="footnote">状态来自最近一次额度查询；切换 Codex 账号后，请在控制台刷新额度。</p>
+            <p class="footnote">此处仅显示本机登录观测，不代表其他调用者的身份。额度来源与协议路径在账号池管理。</p>
           </section>
+        </details>
 
       </section>
       <section class="workspace-panel" id="panel-clients" role="tabpanel" aria-labelledby="tab-clients" tabindex="0" hidden>

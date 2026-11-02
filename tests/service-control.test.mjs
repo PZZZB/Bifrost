@@ -12,6 +12,7 @@ function fixture({ configPatch = {}, identityPatch = {}, platform = 'win32', wri
   let active = 0, stopped = 0, removed = 0;
   const writes = [];
   const controller = createServiceControl({ stateDir, projectDir, processId: 1234, parentProcessId: 1233, platform, now: () => 1800000000000,
+    supervisorOwner: async () => ({ OwnerId: config.OwnerId, NodePid: 1234, RunnerPid: 1233 }),
     getActiveRequests: () => active, onRestart: async () => { stopped++; await onRestart?.(controller); },
     read: read ?? (async path => path.endsWith('service.json') ? config : identity),
     write: write ?? (async (path, value) => { writes.push({ path, value }); }), remove: async () => { removed++; }, ...controlOptions });
@@ -60,6 +61,42 @@ test('unsupported, orphaned, mismatched and old supervisors fail without a resta
     assert.equal((await controller.status()).supported, false);
     await assert.rejects(controller.request({ allowInterrupt: false }), error => error.code === 'restart_unsupported');
     assert.equal(stopped(), 0); assert.equal(writes.length, 0);
+  }
+});
+
+test('matching saved Windows identity cannot enable restart without a live supervisor', async () => {
+  for (const supervisorOwner of [null, async () => null,
+    async () => ({ OwnerId: 'A'.repeat(64), NodePid: 1234, RunnerPid: 9999 }),
+    async () => ({ OwnerId: 'A'.repeat(64), NodePid: 9999, RunnerPid: 1233 }),
+    async () => ({ OwnerId: 'B'.repeat(64), NodePid: 1234, RunnerPid: 1233 }),
+    async () => { throw new Error('private supervisor error'); }]) {
+    const { controller, writes, stopped } = fixture({ controlOptions: { supervisorOwner } });
+    const status = await controller.status();
+    assert.equal(status.supported, false);
+    assert.equal(status.independentOfCodex, false);
+    assert.equal(JSON.stringify(status).includes('private supervisor error'), false);
+    await assert.rejects(controller.request({ allowInterrupt: false }), error => error.code === 'restart_unsupported');
+    assert.equal(stopped(), 0);
+    assert.equal(writes.length, 0);
+  }
+});
+
+test('a Windows supervisor dying before or after marker persistence leaves the gateway running', async () => {
+  for (const duringWrite of [false, true]) {
+    let alive = true;
+    const liveOwner = { OwnerId: 'A'.repeat(64), NodePid: 1234, RunnerPid: 1233 };
+    const subject = fixture({
+      ...(duringWrite ? { write: async () => { alive = false; } } : {}),
+      controlOptions: { supervisorOwner: async () => alive ? liveOwner : null },
+    });
+    await subject.controller.request({ allowInterrupt: false });
+    if (!duringWrite) alive = false;
+    await subject.controller.activate();
+    assert.equal(subject.stopped(), 0);
+    assert.equal(subject.controller.pending, false);
+    assert.equal(subject.controller.draining, false);
+    assert.equal(subject.removed(), duringWrite ? 1 : 0);
+    assert.match((await subject.controller.status()).error, /身份已变化/);
   }
 });
 

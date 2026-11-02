@@ -3,6 +3,14 @@
 const BASE_URL = 'https://copilot.tencent.com';
 const DEFAULT_DOMAIN = 'copilot.tencent.com';
 const USER_AGENT = 'Bifrost/0.1.0 (compatible; CodeBuddy/4.12.2)';
+// The catalog endpoint selects its product configuration from the leading
+// client identifiers. This envelope matches the installed CodeBuddy 4.12.2
+// request contract and retains Bifrost attribution. Inference is unchanged.
+const CATALOG_HEADERS = Object.freeze({
+  'User-Agent': 'CodeBuddyIDE/4.12.2 CodeBuddy/4.12.2 Bifrost/0.1.0',
+  'X-Product': 'SaaS', 'X-IDE-Type': 'CodeBuddyIDE', 'X-IDE-Name': 'CodeBuddyIDE',
+  'X-IDE-Version': '4.12.2', 'X-Product-Version': '4.12.2',
+});
 const LOGIN_HOSTS = new Set(['copilot.tencent.com', 'www.codebuddy.cn',
   'tencent.sso.codebuddy.cn', 'tencent.sso.copilot.tencent.com']);
 
@@ -356,6 +364,7 @@ export class EmployeeOAuthClient {
       const headers = { Authorization: `Bearer ${auth.accessToken}`, 'X-User-Id': identity.uid,
         'X-Domain': auth.domain, 'User-Agent': USER_AGENT,
         Accept: method === 'POST' ? 'text/event-stream' : 'application/json' };
+      if (method === 'GET' && path === '/v3/config') Object.assign(headers, CATALOG_HEADERS);
       if (identity.enterpriseId) headers['X-Enterprise-Id'] = identity.enterpriseId;
       const tenantId = identity.tenantId || identity.enterpriseId;
       if (tenantId) headers['X-Tenant-Id'] = tenantId;

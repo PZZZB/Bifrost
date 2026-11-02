@@ -83,7 +83,8 @@ function harness(overrides = {}) {
     accounts: { A: { requests: 7, completed: 7, failed: 0 }, B: { requests: 5, completed: 4, failed: 1 } } },
     backend, integration, verification, ...(overrides.node ? { node: overrides.node } : {}) });
   const fetch = async (path, options = {}) => {
-    const call = { path, method: options.method ?? 'GET', headers: options.headers, body: options.body ? JSON.parse(options.body) : null };
+    const call = { path, method: options.method ?? 'GET', headers: options.headers, signal: options.signal,
+      body: options.body ? JSON.parse(options.body) : null };
     calls.push(call);
     if (overrides.fetch) {
       const result = await overrides.fetch(call, api);
@@ -118,9 +119,10 @@ function harness(overrides = {}) {
     set quotas(value) { quotas = value; }, get quotas() { return quotas; },
     set diagnostics(value) { diagnostics = value; }, get diagnostics() { return diagnostics; },
     changeHash(value) { location.hash = value; windowListeners.get('hashchange')?.({ type: 'hashchange' }); },
+    advance(milliseconds) { clock += milliseconds; },
     get elapsed() { return clock; } };
   class Clock extends Date { static now() { return clock; } }
-  const context = vm.createContext({ document, fetch, Response, Headers, AbortSignal, URL, navigator: {}, Date: Clock,
+  const context = vm.createContext({ document, fetch, Response, Headers, AbortSignal: overrides.AbortSignal ?? AbortSignal, URL, navigator: {}, Date: Clock,
     Option: class extends Element { constructor(label, value) { super('option'); this.textContent = label; this.value = value; } },
     window: { location, history: { replaceState(state, title, url) { historyCalls.push({ state, title, url }); location.href = new URL(url, location).href; } },
       addEventListener(type, listener) { windowListeners.set(type, listener); },
@@ -370,6 +372,77 @@ test('accepted restart waits for a new process token, bootstraps cookie, and sub
   assert.ok(page.calls.slice(rootIndex + 1).some(call => call.path === '/api/status'));
 });
 
+const budgetSignals = { timeout: milliseconds => ({ budgetMs: milliseconds }) };
+const statusTimeout = () => Object.assign(new Error('signal timed out'), { name: 'TimeoutError' });
+
+test('a slow live supervisor check remains visible and usable beyond the old five-second budget', async () => {
+  const page = harness({ AbortSignal: budgetSignals, fetch(call, api) {
+    if (call.path !== '/api/service/status') return;
+    if (call.signal.budgetMs < 7800) throw statusTimeout();
+    api.advance(7800);
+  } });
+  await settle();
+  assert.equal(page.elements.get('service-ready').textContent, '已就绪');
+  assert.match(page.elements.get('service-independent').textContent, /独立运行/);
+  assert.equal(page.elements.get('service-error').hidden, true);
+  assert.equal(page.elements.get('service-restart-button').disabled, false);
+});
+
+test('a restarted process with a slow supervisor check reconnects without submitting another restart', async () => {
+  let accepted = false, slowChecks = 0;
+  const page = harness({ AbortSignal: budgetSignals, fetch(call, api) {
+    if (call.path === '/api/service/restart') {
+      accepted = true; api.token = 'new-slow-service-csrf';
+      return json({ accepted: true, reconnectAfterMs: 750 }, 202);
+    }
+    if (accepted && call.path === '/api/service/status') {
+      if (call.signal.budgetMs < 7800) throw statusTimeout();
+      api.advance(7800); slowChecks++;
+    }
+  } });
+  await settle(); await page.run('restartService(false)'); await settle();
+  assert.ok(slowChecks >= 1);
+  assert.ok(page.elapsed < 60000);
+  assert.match(page.elements.get('service-message').textContent, /已重启并恢复连接/);
+  assert.equal(page.elements.get('service-error').hidden, true);
+  assert.equal(page.calls.filter(call => call.path === '/api/service/restart').length, 1);
+});
+
+test('slow recovery checks keep the remaining deadline and cannot report success after sixty seconds', async () => {
+  let accepted = false, advanced = false, remainingBudget;
+  const page = harness({ AbortSignal: budgetSignals, fetch(call, api) {
+    if (call.path === '/api/service/restart') {
+      accepted = true; api.token = 'new-late-service-csrf';
+      return json({ accepted: true, reconnectAfterMs: 750 }, 202);
+    }
+    if (accepted && !advanced && call.path === '/api/status') { api.advance(59000); advanced = true; }
+    if (accepted && remainingBudget === undefined && call.path === '/api/service/status') {
+      remainingBudget = call.signal.budgetMs;
+      api.advance(1000);
+    }
+  } });
+  await settle(); await page.run('restartService(false)'); await settle();
+  assert.ok(remainingBudget > 0 && remainingBudget <= 250);
+  assert.doesNotMatch(page.elements.get('service-message').textContent, /已重启并恢复连接/);
+  assert.match(page.elements.get('notice').textContent, /已重新连接.*60 秒内尚未就绪/);
+  assert.equal(page.calls.filter(call => call.path === '/api/service/restart').length, 1);
+});
+
+test('a real status timeout has a readable error and a later successful read restores controls', async () => {
+  let timedOut = true;
+  const page = harness({ fetch(call) {
+    if (timedOut && call.path === '/api/service/status') throw statusTimeout();
+  } });
+  await settle();
+  assert.match(page.elements.get('service-error').textContent, /服务状态查询超时/);
+  assert.doesNotMatch(page.elements.get('service-error').textContent, /signal timed out/);
+  assert.equal(page.elements.get('service-restart-button').disabled, true);
+  timedOut = false;
+  await page.run('refreshServiceStatus()');
+  assert.equal(page.elements.get('service-error').hidden, true);
+  assert.equal(page.elements.get('service-restart-button').disabled, false);
+});
+
 test('interrupting restart is submitted only after clicking its explicit confirmation button', async () => {
   const page = harness({ fetch(call, api) {
     if (call.path === '/api/service/restart') {
@@ -492,6 +565,131 @@ const inputFor = (page, id) => modelInputs(page).find(input => input.value === i
 const listText = element => [element.textContent, ...element.children.map(child => child instanceof Element ? listText(child) : String(child))].join(' ');
 const groupButton = (page, channel, title) => page.elements.get('model-settings-list').querySelectorAll('button')
   .find(button => button.attributes.get('aria-label') === `${channel}：${title}（当前搜索结果）`);
+const modelGroups = page => page.elements.get('model-settings-list').querySelectorAll('details[data-model-channel]');
+const modelGroupFor = (page, channel) => modelGroups(page).find(group => group.getAttribute('data-model-channel') === channel);
+const setModelGroupOpen = (group, open) => { group.open = open; group.trigger('toggle'); };
+
+test('account model groups start collapsed with native summaries, counts and separate bulk actions', async () => {
+  const page = catalogPage(); await settle();
+  const groups = modelGroups(page);
+  assert.deepEqual(groups.map(group => group.getAttribute('data-model-channel')), ['A', 'B', 'CodeBuddy', 'Cursor']);
+  assert.ok(groups.every(group => group.open === false));
+  for (const group of groups) {
+    const summary = group.children[0];
+    assert.equal(summary.tagName, 'SUMMARY');
+    assert.equal(summary.querySelectorAll('button').length, 0);
+    assert.equal(group.children[1].querySelectorAll('button').length, 2);
+  }
+  const summary = modelGroupFor(page, 'CodeBuddy').children[0];
+  assert.match(listText(summary), /CodeBuddy/);
+  assert.match(listText(summary), /已勾选 1 \/ 可用 2 · 共 3 项/);
+  assert.equal(inputFor(page, 'cb-unsupported').disabled, true);
+  assert.match(listText(modelGroupFor(page, 'CodeBuddy')), /暂未适配视频输出/);
+});
+
+test('model disclosure groups use account identities rather than merging sources on the same channel', async () => {
+  const page = harness({ models: { revision: 4, discovery: {}, models: [
+    { id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', channel: 'A', enabled: true,
+      sourceAccountId: 'legacy-codex-client', sourceAccountName: 'Codex · 当前客户端（A）' },
+    { id: 'B-gpt-6.1-sol', name: 'B-GPT-6.1 Sol', channel: 'B', enabled: true,
+      sourceAccountId: 'legacy-codex', sourceAccountName: 'Codex员工账号' },
+    { id: 'remote/one/Claude-opus', name: 'Claude Opus', channel: 'Bifrost', enabled: false,
+      sourceAccountId: 'one', sourceAccountName: '个人账号' },
+    { id: 'remote/two/Claude-opus', name: 'Claude Opus', channel: 'Bifrost', enabled: false,
+      sourceAccountId: 'two', sourceAccountName: '工作账号' },
+  ] } });
+  await settle();
+  const groups = modelGroups(page);
+  assert.deepEqual(groups.map(group => group.getAttribute('data-source-account-id')), ['legacy-codex-client', 'legacy-codex', 'one', 'two']);
+  assert.deepEqual(groups.map(group => group.children[0].children[0].textContent), ['Codex · 当前客户端（A）', 'Codex员工账号', '个人账号', '工作账号']);
+  assert.ok(groups.every(group => group.open === false));
+  groups[2].querySelectorAll('button')[0].trigger('click');
+  assert.equal(inputFor(page, 'remote/one/Claude-opus').checked, true);
+  assert.equal(inputFor(page, 'remote/two/Claude-opus').checked, false);
+  assert.match(listText(modelGroups(page)[2].children[0]), /已勾选 1 \/ 可用 1 · 共 1 项/);
+  assert.match(listText(modelGroups(page)[3].children[0]), /已勾选 0 \/ 可用 1 · 共 1 项/);
+});
+
+test('search matches account names and a rename preserves account disclosure and draft selections', async () => {
+  const model = { id: 'remote/work/Claude-sonnet', name: 'Claude Sonnet', channel: 'Bifrost', enabled: false,
+    sourceAccountId: 'work', sourceAccountName: '工作订阅' };
+  const page = harness({ models: { revision: 3, discovery: {}, models: [model] } }); await settle();
+  setModelGroupOpen(modelGroups(page)[0], true);
+  const input = inputFor(page, model.id); input.checked = true; input.trigger('change');
+  const search = page.elements.get('model-settings-search'); search.value = '工作订阅'; search.trigger('input');
+  assert.equal(modelGroups(page).length, 1); assert.equal(modelGroups(page)[0].open, true);
+  search.value = ''; search.trigger('input');
+  page.models = { revision: 3, discovery: {}, models: [{ ...model, sourceAccountName: '新账号名称' }] };
+  await page.run('refreshModelSettings()');
+  assert.equal(modelGroups(page)[0].open, true);
+  assert.equal(inputFor(page, model.id).checked, true);
+  assert.equal(modelGroups(page)[0].children[0].children[0].textContent, '新账号名称');
+  assert.match(listText(page.elements.get('model-settings-list')), /额度来源.*新账号名称/);
+  search.value = '不存在的账号'; search.trigger('input'); assert.equal(modelGroups(page).length, 0);
+  search.value = ''; search.trigger('input'); assert.equal(modelGroups(page)[0].open, true);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('individual account disclosure choices and unsaved model selections survive polling and catalog replacement', async () => {
+  const page = catalogPage(); await settle();
+  setModelGroupOpen(modelGroupFor(page, 'CodeBuddy'), true);
+  setModelGroupOpen(modelGroupFor(page, 'Cursor'), true);
+  const edited = inputFor(page, 'cb-other'); edited.checked = true; edited.trigger('change');
+  assert.match(listText(modelGroupFor(page, 'CodeBuddy').children[0]), /已勾选 2 \/ 可用 2/);
+  setModelGroupOpen(modelGroupFor(page, 'CodeBuddy'), false);
+  for (const interval of page.intervals) interval.callback(); await settle();
+  assert.equal(modelGroupFor(page, 'CodeBuddy').open, false);
+  assert.equal(modelGroupFor(page, 'Cursor').open, true);
+  page.models = { ...completeModels(), revision: 8, models: [...completeModels().models,
+    { id: 'cb-new', name: 'New CodeBuddy model', channel: 'CodeBuddy', enabled: false, available: true }] };
+  await page.run('refreshModelSettings()');
+  assert.equal(modelGroupFor(page, 'CodeBuddy').open, false);
+  assert.equal(modelGroupFor(page, 'Cursor').open, true);
+  assert.equal(inputFor(page, 'cb-other').checked, true);
+  assert.match(listText(modelGroupFor(page, 'CodeBuddy').children[0]), /已勾选 2 \/ 可用 3 · 共 4 项/);
+});
+
+test('search temporarily expands matching accounts and clearing it restores independent disclosure choices', async () => {
+  const page = catalogPage(); await settle();
+  setModelGroupOpen(modelGroupFor(page, 'A'), true);
+  const search = page.elements.get('model-settings-search'); search.value = 'CodeBuddy'; search.trigger('input');
+  assert.equal(modelGroups(page).length, 1);
+  assert.equal(modelGroupFor(page, 'CodeBuddy').open, true);
+  assert.match(listText(modelGroupFor(page, 'CodeBuddy').children[0]), /共 3 项 · 匹配 3 项/);
+  search.value = 'Opus'; search.trigger('input');
+  assert.equal(modelGroupFor(page, 'CodeBuddy').open, true);
+  assert.match(listText(modelGroupFor(page, 'CodeBuddy').children[0]), /共 3 项 · 匹配 1 项/);
+  setModelGroupOpen(modelGroupFor(page, 'CodeBuddy'), false);
+  search.value = ''; search.trigger('input');
+  assert.equal(modelGroupFor(page, 'A').open, true);
+  assert.equal(modelGroupFor(page, 'CodeBuddy').open, false);
+  assert.equal(modelGroupFor(page, 'Cursor').open, false);
+});
+
+test('bulk selection preserves an account opened before its native toggle event is delivered', async () => {
+  const page = catalogPage(); await settle();
+  modelGroupFor(page, 'CodeBuddy').open = true;
+  groupButton(page, 'CodeBuddy', '全选可用项').trigger('click');
+  assert.equal(modelGroupFor(page, 'CodeBuddy').open, true);
+  assert.equal(modelGroupFor(page, 'Cursor').open, false);
+  assert.equal(inputFor(page, 'cb-other').checked, true);
+});
+
+test('saving choices includes edits inside multiple collapsed account groups', async () => {
+  const page = catalogPage(); await settle();
+  for (const [channel, id] of [['CodeBuddy', 'cb-other'], ['Cursor', 'cursor-first']]) {
+    setModelGroupOpen(modelGroupFor(page, channel), true);
+    const input = inputFor(page, id); input.checked = true; input.trigger('change');
+    setModelGroupOpen(modelGroupFor(page, channel), false);
+  }
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const save = page.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.deepEqual(save.body, { revision: 7, disabledModels: ['original-b', 'cursor-second', 'cursor-unavailable'] });
+  assert.ok(modelGroups(page).every(group => group.open === false));
+  assert.equal(inputFor(page, 'cb-other').checked, true);
+  assert.equal(inputFor(page, 'cursor-first').checked, true);
+  assert.equal(inputFor(page, 'cb-unsupported').checked, true);
+});
 
 test('complete account catalogs include other models and keep source availability separate from saved selection', async () => {
   const page = catalogPage(); await settle();

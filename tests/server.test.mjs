@@ -209,6 +209,40 @@ test('the authenticated model-settings GET discovers complete account directorie
   assert.equal(discoveryCalls, 1);
 });
 
+test('local client controls use the administrator session and CSRF gate without exposing model credentials', async t => {
+  const mutations = [];
+  const snapshot = { version: 1, clients: [{ id: 'codebuddy', name: 'CodeBuddy', mode: 'native' }] };
+  const { url, cookie, status } = await fixture(t, { clientControls: {
+    snapshot: async () => snapshot,
+    mutate: async (...args) => { mutations.push(args); return snapshot; },
+  } });
+  assert.equal((await fetch(url + '/api/client-controls')).status, 401);
+  const read = await (await fetch(url + '/api/client-controls', { headers: { cookie } })).json();
+  assert.equal(read.clients[0].mode, 'native'); assert.equal(read.csrfToken, status.csrfToken);
+  assert.deepEqual(mutations, []);
+  const path = url + '/api/client-controls/codebuddy/sync';
+  assert.equal((await fetch(path, { method: 'POST', headers: { cookie }, body: '{}' })).status, 403);
+  const result = await fetch(path, { method: 'POST', headers: { cookie, 'x-bridge-csrf': status.csrfToken }, body: '{}' });
+  assert.equal(result.status, 200); assert.equal((await result.json()).csrfToken, status.csrfToken);
+  assert.deepEqual(mutations, [['codebuddy', 'sync', {}]]);
+});
+
+test('the unified Codex gateway action retains the original bound-account verification requirement', async t => {
+  const mutations = [];
+  const backend = { rpc: { running: true }, account: null, login: {}, readAccount: async () => null, publicBinding: () => null,
+    credentials: async () => ({ accountId: 'workspace-b', email: 'fixture@example.test' }) };
+  const { url, cookie, status } = await fixture(t, { backend, clientControls: {
+    snapshot: async () => ({ version: 1, clients: [] }),
+    mutate: async (...args) => { mutations.push(args); return { version: 1, clients: [] }; },
+  } });
+  const path = url + '/api/client-controls/codex/mode';
+  const headers = { cookie, 'x-bridge-csrf': status.csrfToken, 'content-type': 'application/json' };
+  const denied = await fetch(path, { method: 'POST', headers, body: JSON.stringify({ mode: 'gateway' }) });
+  assert.equal(denied.status, 409); assert.deepEqual(mutations, []);
+  const restored = await fetch(path, { method: 'POST', headers, body: JSON.stringify({ mode: 'native' }) });
+  assert.equal(restored.status, 200); assert.deepEqual(mutations, [['codex', 'mode', { mode: 'native' }]]);
+});
+
 test('quota API combines every bound provider without replacing the native account windows', async t => {
   let nativeReads = 0, externalReads = 0;
   const native = { A: { status: 'ok', windows: [{ remainingPercent: 25 }] }, B: { status: 'ok', windows: [{ remainingPercent: 90 }] } };

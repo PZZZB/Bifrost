@@ -137,3 +137,53 @@ test('remote sources use distinct immutable bindings, and stopping one does not 
   assert.equal(f.manager.allows('Bifrost', models[1].id), true);
   assert.deepEqual((await loadServerRemotesConfig(f.stateDir)).sources.map(s => s.id), ['second']);
 });
+
+test('registering the caller source preserves existing managed accounts, authorization files and model choices', async t => {
+  const stateDir = await directory(t), managed = await UpstreamAccountStore.open({ stateDir,
+    seeds: [{ kind: 'codex', name: 'Employee subscription' }] });
+  const b = managed.snapshot().accounts[0];
+  await managed.update(b.id, { revision: managed.snapshot().revision, name: 'Named B', enabled: false });
+  await managed.setRemote(remote('retained'), 'Named remote');
+  const before = managed.snapshot(), privateFiles = ['bridge.json', 'model-policy.json', 'auth.json'];
+  for (const file of privateFiles) await writeFile(join(stateDir, file), `untouched-${file}`, { mode: 0o600 });
+  const reopened = await UpstreamAccountStore.open({ stateDir, seeds: [{ kind: 'codex-client', name: 'Codex · 当前客户端（A）' },
+    { kind: 'codex', name: 'Ignored old name' }] });
+  assert.deepEqual(reopened.snapshot().accounts.filter(a => a.kind !== 'codex-client'), before.accounts);
+  const caller = reopened.snapshot().accounts.find(a => a.kind === 'codex-client');
+  assert.equal(caller.binding.slot, 'A'); assert.equal(caller.id, 'legacy-codex-client');
+  assert.equal(reopened.snapshot().revision, before.revision + 1);
+  await reopened.update(caller.id, { revision: reopened.snapshot().revision, name: 'Caller source', enabled: false });
+  const again = await UpstreamAccountStore.open({ stateDir, seeds: [{ kind: 'codex-client', name: 'Default' }] });
+  assert.equal(again.snapshot().accounts.length, before.accounts.length + 1);
+  assert.equal(again.snapshot().accounts.find(a => a.id === caller.id).name, 'Caller source');
+  assert.equal(again.snapshot().accounts.find(a => a.id === caller.id).enabled, false);
+  for (const file of privateFiles) assert.equal(await readFile(join(stateDir, file), 'utf8'), `untouched-${file}`);
+});
+
+test('caller accounts own A model metadata without owning reusable credentials or consuming the managed Codex slot', async t => {
+  const stateDir = await directory(t), store = await UpstreamAccountStore.open({ stateDir,
+    seeds: [{ kind: 'codex-client', name: 'Current client' }] });
+  const sourceModels = [{ id: 'gpt-native', name: 'Native', channel: 'A', enabled: false, available: true },
+    { id: 'B-model', name: 'Managed', channel: 'B', available: true }];
+  let reads = 0;
+  const manager = new UpstreamAccounts({ store, types: ['codex-client', 'codex'], getModels: () => sourceModels,
+    readers: { 'codex-client': () => { reads++; return { configured: true, ready: true, authToken: 'PRIVATE', email: 'not-a-global-identity' }; } },
+    capabilities: () => ({ clientIntegration: true, userManagement: true }) });
+  let data = await manager.snapshot(), caller = data.accounts[0];
+  assert.equal(caller.state, 'caller_required'); assert.equal(caller.credential.mode, 'caller'); assert.equal(caller.credential.reusable, false);
+  assert.equal(caller.modelCount, 1); assert.equal(caller.publishedModelCount, 0);
+  assert.equal(data.models[0].sourceAccountId, caller.id); assert.equal(data.models[0].sourceCredential.mode, 'caller');
+  assert.equal(data.accountTypes.find(a => a.kind === 'codex').canAdd, true);
+  assert.equal(data.accountTypes.find(a => a.kind === 'codex-client').canAdd, false);
+  assert.doesNotMatch(JSON.stringify(data), /PRIVATE|not-a-global-identity|authToken/);
+  await assert.rejects(manager.create({ kind: 'codex-client', name: 'Another caller' }), e => e.code === 'upstream_type_unavailable');
+  data = await manager.create({ kind: 'codex', name: 'Independent B' });
+  assert.equal(data.accounts.filter(a => a.kind === 'codex').length, 1);
+  const beforeReads = reads;
+  data = await manager.update(caller.id, { revision: data.revision, enabled: false });
+  assert.equal(reads, beforeReads); assert.equal(manager.allows('A'), false);
+  assert.equal(data.models.find(m => m.channel === 'A').enabled, false);
+  assert.equal(data.models.find(m => m.channel === 'A').available, false);
+  assert.equal(data.accounts.find(a => a.id === caller.id).state, 'disabled');
+  assert.ok(data.accounts.find(a => a.id === caller.id).routes.every(r => !r.available));
+});

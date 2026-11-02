@@ -138,9 +138,37 @@ test('new OAuth is saved only after employee validation and restored privately b
   assert.equal(requests[0].options.headers['X-Domain'], 'copilot.tencent.com');
   assert.equal(requests[0].options.headers['X-Enterprise-Id'], 'enterprise-1');
   assert.equal(requests[0].options.headers['X-Tenant-Id'], 'tenant-1');
-  assert.equal(requests[0].options.headers['User-Agent'], 'Bifrost/0.1.0 (compatible; CodeBuddy/4.12.2)');
+  assert.equal(requests[0].options.headers['User-Agent'], 'CodeBuddyIDE/4.12.2 CodeBuddy/4.12.2 Bifrost/0.1.0');
+  assert.equal(requests[0].options.headers['X-IDE-Type'], 'CodeBuddyIDE');
   assert.equal(requests[0].options.redirect, 'error');
   assert.doesNotMatch(JSON.stringify(await second.status()), /private-|unnecessary/);
+});
+
+test('catalog refresh gets new product models online without opening or reading the native client', async () => {
+  let updated = false, nativeReads = 0, chatRequests = 0;
+  const value = new EmployeeOAuthClient({ now: () => now, loadAuth: async () => stored(),
+    loadCatalog: async () => { nativeReads++; throw new Error('Native application is closed.'); },
+    fetchImpl: async (url, options) => {
+      if (url.pathname === '/v2/chat/completions') { chatRequests++; return reply({}); }
+      assert.equal(url.href, 'https://copilot.tencent.com/v3/config');
+      const headers = options.headers;
+      // The upstream returns feature flags alone for a request with no product identity.
+      const recognized = headers['User-Agent'].startsWith('CodeBuddyIDE/4.12.2 CodeBuddy/4.12.2')
+        && headers['User-Agent'].includes('Bifrost/') && headers['X-Product'] === 'SaaS'
+        && headers['X-IDE-Type'] === 'CodeBuddyIDE' && headers['X-IDE-Name'] === 'CodeBuddyIDE'
+        && headers['X-IDE-Version'] === '4.12.2' && headers['X-Product-Version'] === '4.12.2';
+      return reply(recognized ? { models: [{ id: 'kimi-k3-ioa', name: 'Kimi K3' },
+        ...(updated ? [{ id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro' }] : [])] } : { productFeatures: {} });
+    } });
+  const initial = await value.modelCatalog();
+  assert.equal(initial.models.length, 1);
+  updated = true;
+  const fresh = await value.modelCatalog();
+  assert.equal(fresh.source, 'remote');
+  assert.equal(fresh.liveVerified, true);
+  assert.ok(fresh.models.some(model => model.id === 'kimi-k3.1-pro'));
+  assert.equal(nativeReads, 0);
+  assert.equal(chatRequests, 0);
 });
 
 test('status alone restores expired cached OAuth before any model request', async () => {
@@ -473,7 +501,7 @@ test('older cached OAuth backfills only the same current enabled employee withou
     assert.equal(item.options.headers['X-Enterprise-Id'], 'enterprise-1');
     assert.equal(item.options.headers['X-Tenant-Id'], 'tenant-1');
     assert.equal(item.options.headers['X-User-Id'], 'employee-1');
-    assert.equal(item.options.headers['X-Product'], undefined);
+    assert.equal(item.options.headers['X-Product'], 'SaaS');
   }
   assert.deepEqual(saved, []);
   assert.equal(cache.identity.enterpriseId, undefined);

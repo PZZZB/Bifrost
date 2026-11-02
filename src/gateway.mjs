@@ -234,13 +234,16 @@ export class Gateway {
 
   async catalog(req, res, url, signal) {
     const started = Date.now();
-    const response = await this.fetchAccountA(`/models${url.search}`, { headers: req.headers, signal });
-    if (!response.ok) {
-      res.writeHead(response.status, { 'Cache-Control': 'no-store', 'Content-Type': response.headers.get('content-type') || 'application/json' });
-      res.end(await response.text()); return;
+    let aCatalog = { models: [] };
+    if (this.sourceEnabled('A') === true) {
+      const response = await this.fetchAccountA(`/models${url.search}`, { headers: req.headers, signal });
+      if (!response.ok) {
+        res.writeHead(response.status, { 'Cache-Control': 'no-store', 'Content-Type': response.headers.get('content-type') || 'application/json' });
+        res.end(await response.text()); return;
+      }
+      aCatalog = await response.json();
+      if (!Array.isArray(aCatalog.models)) throw new BridgeError('账户 A 的完整模型目录格式无效。', 502);
     }
-    const aCatalog = await response.json();
-    if (!Array.isArray(aCatalog.models)) throw new BridgeError('账户 A 的完整模型目录格式无效。', 502);
     let data = aCatalog;
     const codeBuddyVersion = this.getCodeBuddyAuthorizationVersion(), cursorVersion = this.getCursorAuthorizationVersion();
     const codeBuddyCurrent = () => this.codeBuddyEnabled() === true && this.getCodeBuddyAuthorizationVersion() === codeBuddyVersion;

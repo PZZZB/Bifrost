@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, realpath, writeFile, readFile, rm, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { randomBytes } from 'node:crypto';
 
@@ -48,7 +48,7 @@ test('a configured Claude node boots without Codex, discovers its own pool and p
     await Promise.race([once(current, 'exit'), delay(3000).then(() => { if (current.exitCode === null) current.kill('SIGKILL'); })]); child = null; };
   t.after(async () => { await stop(); await rm(dir, { recursive: true, force: true }); });
   async function start() {
-    output = ''; child = spawn(process.execPath, ['--import', preload, join(project, 'src/main.mjs')], { cwd: project, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    output = ''; child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, join(project, 'src/main.mjs')], { cwd: project, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     child.stdout.on('data', b => { output += b.toString(); }); child.stderr.on('data', b => { output += b.toString(); });
     for (let i = 0; i < 100; i++) {
       if (child.exitCode !== null) assert.fail(`Isolated node exited: ${output.slice(-1500)}`);

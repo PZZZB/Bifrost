@@ -40,6 +40,12 @@ import { startServerRemotes } from './runtime/server-remotes.mjs';
 import { UpstreamAccountStore } from './upstream-account-store.mjs';
 import { UpstreamAccounts, gatedAccountService } from './upstream-accounts.mjs';
 import { readLaunchdOwner } from './launchd-owner.mjs';
+import { readWindowsServiceOwner } from './windows-service-owner.mjs';
+import { createOwnerClientApi } from './owner-client-api.mjs';
+import { ClientControls } from './client-controls.mjs';
+import { createCodexClientControl } from './clients/codex-control.mjs';
+import { createFileModelControl } from './clients/file-model-control.mjs';
+import { createLocalApps } from './clients/local-apps.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serviceVersion = await createServiceVersion({ projectDir });
@@ -78,6 +84,7 @@ catch (error) { console.error(`Token statistics unavailable: ${redact(error.mess
 let backendRpc, configRpc, backend, integration, gateway, clientVersion, accountQuotas, serviceControl;
 let withService, cursorProvider, requestDiagnostics, clientAccess = null, clientService = null, clientAdmin = null, clientBilling = null;
 let paymentRuntime = null, paymentsFault = false, serverRemotes = null, accountPool = null;
+let ownerClientApi = null, clientControls = null;
 const seeds = [];
 const configured = async name => await readJson(join(stateDir, name), null);
 const userEntryConfiguration = await configured('client-gateway.json');
@@ -86,6 +93,7 @@ const userManagementRequested = Boolean(macClaude || userEntryConfiguration?.ena
   && ((legacyUserAccounts?.accounts?.length ?? 0) > 0 || (legacyUserAccounts?.invites?.length ?? 0) > 0));
 if (macClaude) seeds.push({ kind: 'claude', name: '隔离 Claude' });
 else if (!delegation) {
+  seeds.push({ kind: 'codex-client', name: 'Codex · 当前客户端（A）' });
   if (state.pinnedAccount || state.enabled || await configured('verification.json')) seeds.push({ kind: 'codex', name: 'Codex 订阅' });
   if (await configured('codebuddy.json')) seeds.push({ kind: 'codebuddy', name: 'CodeBuddy 员工账号' });
   if (await configured('cursor.json')) seeds.push({ kind: 'cursor', name: 'Cursor 账号' });
@@ -192,7 +200,7 @@ if (!delegation) {
     modelPolicy, remoteSources: serverRemotes,
     cursorProvider, cursorEnabled: () => cursorService?.enabled === true && sourceAllowed('Cursor'), getCursorModels: () => cursorService?.getModels() ?? [],
     getCursorAuthorizationVersion: () => cursorService?.authorizationVersion,
-    sourceEnabled: (channel, model) => channel === 'A' ? nativeIntegration : sourceAllowed(channel, model),
+    sourceEnabled: (channel, model) => channel === 'A' ? nativeIntegration && sourceAllowed(channel, model) : sourceAllowed(channel, model),
     isDraining: () => serviceControl?.draining === true,
     onDiagnostic: recordDiagnostic, getAuthorizationVersion: authorizationVersion,
     onUsage: record => {
@@ -213,41 +221,93 @@ withService = nativeIntegration && ['With', 'CodeBuddy', 'Claude'].some(hasSlot)
 } }) : null;
 if (accountStore) {
   accountPool = new UpstreamAccounts({ store: accountStore,
-    types: [...(macClaude ? ['claude'] : ['codex']), ...(['win32', 'darwin'].includes(process.platform) ? ['codebuddy', 'cursor', 'bifrost'] : []), ...seeds.filter(s => ['with', 'claude', 'codebuddy', 'cursor'].includes(s.kind)).map(s => s.kind)],
+    types: [...(macClaude ? ['claude'] : ['codex-client', 'codex']), ...(['win32', 'darwin'].includes(process.platform) ? ['codebuddy', 'cursor', 'bifrost'] : []), ...seeds.filter(s => ['with', 'claude', 'codebuddy', 'cursor'].includes(s.kind)).map(s => s.kind)],
     readers: {
-      claude: () => macClaude ? { configured: true, ready: macClaude.status().available, authenticated: null,
-        subscriptionUsage: macClaude.status().subscriptionUsage } : withService?.status(),
+      'codex-client': async () => {
+        if (!integration) return { configured: false, ready: false, authenticated: null, identityScope: 'caller' };
+        try {
+          await integration.originalProvider();
+          return { configured: true, ready: true, authenticated: null, identityScope: 'caller' };
+        } catch { return { configured: true, ready: false, authenticated: null, identityScope: 'caller' }; }
+      },
+      claude: () => {
+        if (macClaude) return { configured: true, ready: macClaude.status().available, authenticated: null,
+          transport: 'claude-cli', supportedProtocols: ['chat-completions', 'messages'], subscriptionUsage: macClaude.status().subscriptionUsage };
+        const channel = withService?.channelStatus('Claude');
+        return { configured: channel?.running === true, ready: channel?.running === true, authenticated: null,
+          transport: 'claude-cli', supportedProtocols: channel?.running === true ? ['messages'] : [], messageEntryAvailable: channel?.running === true };
+      },
       codex: () => ({ configured: Boolean(backend), authenticated: Boolean(backend?.account), bound: Boolean(state.enabled && state.pinnedAccount && backend?.account) }),
-      codebuddy: () => codeBuddyService?.status(), cursor: () => cursorService?.status(), with: () => withService?.status() },
+      codebuddy: async () => codeBuddyService ? { ...await codeBuddyService.status(),
+        messageEntryAvailable: withService?.channelStatus('CodeBuddy').running === true } : null,
+      cursor: () => cursorService?.status(), with: () => withService?.status() },
     getRemotes: () => serverRemotes, modelPolicy,
     getModels: () => modelPolicy.snapshot().models,
     refreshModels: async () => {
       if (macClaude) {
         await macClaude.refresh();
       }
-      const discovered = await modelDiscovery.refresh(); await gateway?.observeRemotes();
+      const [discovered] = await Promise.all([modelDiscovery.refresh(), serverRemotes?.refresh()]); await gateway?.observeRemotes();
       return { discovery: { ...Object.fromEntries(Object.entries(discovered.discovery ?? {}).filter(([kind]) => hasSlot(kind))),
         ...(macClaude ? { Claude: { state: !sourceAllowed('Claude') ? 'disabled' : macClaude.status().available ? 'ready' : 'error', count: macClaude.models().length } } : {}) } };
     },
     capabilities: () => ({ accountPool: true, clientIntegration: Boolean(integration), userManagement: clientService?.status().enabled === true,
-      billing: Boolean(clientBilling), diagnostics: Boolean(requestDiagnostics), activeKinds: accountPool?.rows().filter(a => a.enabled
+      billing: Boolean(clientBilling), diagnostics: Boolean(requestDiagnostics), userInferenceReady: clientService?.status().ready === true,
+      ownerChatReady: ownerClientApi !== null,
+      sourceArchitecture: { version: 1, callerCredentials: true, protocolRouting: true },
+      activeKinds: accountPool?.rows().filter(a => a.enabled
         && (a.kind === 'claude' || a.kind === 'cursor' && cursorService || a.kind === 'codebuddy' && codeBuddyService
-          || a.kind === 'codex' && backend || a.kind === 'bifrost' && serverRemotes || a.kind === 'with' && withService)).map(a => a.kind) ?? [] }),
+          || a.kind === 'codex-client' && integration || a.kind === 'codex' && backend || a.kind === 'bifrost' && serverRemotes || a.kind === 'with' && withService)).map(a => a.kind) ?? [] }),
+    onChange: () => clientControls?.autoSync(),
   });
 }
+const localModels = () => {
+  const published = new Map(clientModels().filter(model => model.protocols.includes('responses')).map(model => [model.id, model]));
+  return (accountPool?.catalog() ?? []).flatMap(model => {
+    if (model.channel === 'A') return [{ ...model, protocols: ['responses'] }];
+    const allowed = published.get(model.id);
+    return allowed ? [{ ...model, ...allowed, adapterCapabilities: { tools: true }, enabled: allowed.enabled === true,
+      available: allowed.available === true && model.available === true && (model.channel !== 'B' || state.enabled === true && Boolean(state.pinnedAccount)) }] : [];
+  });
+};
+async function refreshLocalModels() {
+  await Promise.all([modelDiscovery.refresh(), serverRemotes?.refresh()]);
+  await gateway?.observeRemotes();
+}
+if (nativeIntegration) {
+  ownerClientApi = createOwnerClientApi({ gatewayKey: state.gatewayKey, getModels: localModels,
+    isDraining: () => serviceControl?.draining === true,
+    requestResponses: ({ body, scope, signal }) => fetch(`${baseUrl}/responses`, { method: 'POST', signal,
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${state.gatewayKey}`,
+        'x-bifrost-client-scope': scope, originator: 'bifrost_owner_client' }, body: JSON.stringify(body) }) });
+  try {
+    const modelControls = [['codebuddy', 'CodeBuddy', resolve(process.env.CODEBUDDY_CONFIG_DIR || join(homedir(), '.codebuddy'))],
+      ['workbuddy', 'WorkBuddy', resolve(process.env.WORKBUDDY_CONFIG_DIR || process.env.CODEBUDDY_CONFIG_DIR || join(homedir(), '.workbuddy'))]]
+      .map(([id, name, directory]) => createFileModelControl({ id, name, configPath: join(directory, 'models.json'),
+        statePath: join(stateDir, 'client-configurations', `${id}.json`), gatewayUrl: `http://127.0.0.1:${port}/owner/v1/chat/completions`, gatewayKey: state.gatewayKey }));
+    const manual = [
+      { id: 'cursor', name: 'Cursor', inspect: async () => ({ mode: 'manual', reason: '当前支持将 Cursor 作为额度来源；Cursor 客户端接入本地网关尚未适配。' }) },
+      { id: 'claude', name: 'Claude', inspect: async () => ({ mode: 'manual', reason: '远端虚拟机的 Claude 需在所在电脑管理；此入口不修改虚拟机配置。' }) },
+    ];
+    clientControls = await ClientControls.open({ path: join(stateDir, 'client-controls.json'), apps: createLocalApps(),
+      adapters: [createCodexClientControl({ integration }), ...modelControls, ...manual], getModels: localModels, refreshModels: refreshLocalModels });
+  } catch { console.error('Local client controls unavailable; existing model routing remains enabled. Check the private client management state.'); }
+}
 const sourceCatalogTimer = delegation ? null : setInterval(() => {
-  void modelDiscovery.refresh().then(() => gateway?.observeRemotes()).catch(() => {});
+  void refreshLocalModels().then(() => clientControls?.autoSync()).catch(() => {});
 }, 30000);
 sourceCatalogTimer?.unref();
 serviceControl = createServiceControl({ stateDir, projectDir, version: serviceVersion,
-  supervisorOwner: () => readLaunchdOwner({ label: process.env.BRIDGE_LAUNCHD_LABEL, stateDir, projectDir }),
+  supervisorOwner: process.platform === 'win32' ? readWindowsServiceOwner
+    : () => readLaunchdOwner({ label: process.env.BRIDGE_LAUNCHD_LABEL, stateDir, projectDir }),
   getActiveRequests: () => (gateway?.pendingRequests ?? 0) + (withService?.activeRequests ?? 0) +
     Math.max(0, (cursorProvider?.activeRuns ?? 0) - (gateway?.metrics.accounts.Cursor.active ?? 0)) +
-    (server?.activeAdminOperations ?? 0) + (clientService?.activeRequests ?? 0),
+    (server?.activeAdminOperations ?? 0) + (clientService?.activeRequests ?? 0) + (ownerClientApi?.activeRequests ?? 0) + (clientControls?.activeOperations ?? 0),
   onRestart: () => shutdown(0) });
 const server = delegation ? createMagpieDelegationServer({ gatewayKey: state.gatewayKey, baseUrl }) :
   createBridgeServer({ backend, gateway, integration, state, baseUrl,
   usageLedger, accountQuotas, providerQuotas, requestDiagnostics, serviceControl, modelPolicy, modelDiscovery, cursorService, cursorProvider, clientAdmin, accountPool,
+  ownerClientApi, clientControls,
   getWithStatus: () => withService?.status(),
   codeBuddyService,
   publicDir: join(projectDir, 'public'),
@@ -320,6 +380,8 @@ async function shutdown(code = 0) {
   }
   server.close(); server.closeAllConnections();
   clearInterval(sourceCatalogTimer);
+  await clientControls?.close();
+  ownerClientApi?.close();
   await clientService?.close();
   await paymentRuntime?.close();
   await macClaude?.close();

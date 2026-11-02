@@ -37,6 +37,13 @@ export function createServiceControl({ stateDir, projectDir, getActiveRequests, 
         identity.NodePid !== processId || identity.RestartProtocol !== 1 ||
         !Number.isSafeInteger(identity.RunnerPid) || identity.RunnerPid !== parentProcessId ||
         !samePath(identity.EntryScript, join(projectDir, 'src', 'main.mjs'))) return null;
+    // Windows retains the original parent PID after its process has exited.
+    // Saved JSON alone therefore cannot prove that somebody will restart us.
+    if (typeof supervisorOwner !== 'function') return null;
+    let live;
+    try { live = await supervisorOwner({ config, identity, projectDir, stateDir, processId, parentProcessId }); }
+    catch { return null; }
+    if (live?.OwnerId !== config.OwnerId || live.NodePid !== processId || live.RunnerPid !== parentProcessId) return null;
     return config;
   }
   const current = approved => !closed && pending === approved && generation === approved.generation;
