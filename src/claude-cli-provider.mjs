@@ -117,15 +117,25 @@ function validateBody(body, model) {
 function systemText(body) {
   return typeof body.system === 'string' ? body.system : (body.system ?? []).map(block => block.text).join('\n');
 }
+function importedHistoryBlock(block) {
+  if (['text', 'image', 'document'].includes(block.type)) return [structuredClone(block)];
+  // A fresh CLI accepts this history as user context, not native assistant
+  // blocks. Ciphertext is protocol state, never useful prompt text. Keep any
+  // readable thinking, but leave signatures/redacted data in the original
+  // scoped history and native transcript used for exact session continuation.
+  if (block.type === 'thinking') return typeof block.thinking === 'string' && block.thinking
+    ? [{ type: 'text', text: JSON.stringify({ type: 'thinking', thinking: block.thinking }) }] : [];
+  if (block.type === 'redacted_thinking') return [];
+  return [{ type: 'text', text: JSON.stringify(block) }];
+}
 function initialInput(messages) {
   if (messages.length === 1) return structuredClone(messages[0].content);
   // The SDK accepts user input, not arbitrary assistant-history replacement.
   // Importing a chat therefore requires an explicit history representation once.
   const history = messages.slice(0, -1).flatMap(message => {
     const content = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content;
-    return [{ type: 'text', text: `[Imported ${message.role} history]` }, ...content.map(block =>
-      ['text', 'image', 'document'].includes(block.type) ? structuredClone(block)
-        : { type: 'text', text: JSON.stringify(block) }), { type: 'text', text: '[/Imported history]' }];
+    return [{ type: 'text', text: `[Imported ${message.role} history]` },
+      ...content.flatMap(importedHistoryBlock), { type: 'text', text: '[/Imported history]' }];
   });
   const latest = messages.at(-1).content;
   return [...history, ...(typeof latest === 'string' ? [{ type: 'text', text: latest }] : structuredClone(latest))];

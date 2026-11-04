@@ -60,6 +60,10 @@ git pull --ff-only
 
 Codex 自动压缩会请求一次无工具的文本摘要。旧中继仅允许 `auto`，会在调用模型前拒绝该压缩请求并返回 HTTP 400。此修复需要更新运行 `scripts/run-claude-relay.mjs` 的电脑或虚拟机，并重启该 Claude CLI 中继；只更新或重启 Mac 公网入口不会加载中继代码。更新后可在原会话重试压缩。
 
+当 CLI 不能复用原生会话，或无工具压缩需要独立会话时，历史会作为标注的用户上下文导入。导入保留可读思考、对话和工具记录，但不把 `thinking.signature` 或 `redacted_thinking.data` 的不透明加密数据序列化成提示文本；旧实现会让长签名作为普通文字消耗大量输入。原始签名仍保留在作用域内的协议历史及 CLI 原生记录，正常工具接续和原生恢复按完整历史匹配。参见 [Anthropic 思考加密说明](https://platform.claude.com/docs/en/build-with-claude/thinking#thinking-encryption)。这项修复需要部署到实际 Claude CLI 中继。
+
+中继继续由客户端决定何时压缩，不在背后自动改写客户端的工具历史。压缩本身也要读取待总结的历史；导入修复降低了额外输入，但不保证固定的订阅额度节省比例，也不会缩短既有原生会话里已经导入的旧文本。已存在的大上下文可在客户端压缩成功后继续，或在独立任务开始时使用新会话。
+
 Responses 转换接受 `include: null`，以及 `reasoning.encrypted_content`、`web_search_call.action.sources`、`web_search_call.results`、`file_search_call.results`、`code_interpreter_call.outputs`、`computer_call_output.output.image_url`、`message.input_image.image_url`，并兼容 Codex 的 `output.encrypted_content`。选择器只请求已有响应项的额外返回数据，公开部分参见 [OpenAI 的 include 定义](https://developers.openai.com/api/reference/typescript/resources/responses)。加密输出选择器保留本网关已有的思考接续，不为消息和工具参数伪造 OpenAI 密文。本路由不执行 OpenAI 托管搜索、代码解释器或计算机工具，不向 Messages 传递这些选择器；没有对应响应项时不伪造搜索结果、来源或图片回显。实际不支持的工具及历史、未知选择器和无法提供的 logprobs 仍明确拒绝。
 
 Codex v2 压缩使用同一个 `/responses` 接口，输入以唯一的 `compaction_trigger` 结束。转换器保留完整历史并请求上游仅生成工作摘要，禁止工具调用；只在完整的非空文本响应后生成一个网关自有的加密 `compaction` 检查点。后续按来源、用户、会话、模型与授权版本验证后恢复摘要，不尝试解密 OpenAI 的私有压缩内容。`configuration_update` 的最后一个有效 effort 控制当前推理，不混入对话文字。格式错误、未返回的工具结果、摘要截断或取消均不提交压缩成功。

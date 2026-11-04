@@ -261,6 +261,80 @@ test('imported image and document history retain their original content blocks',
   assert.equal(first.worker.sends[0].at(-1).text, 'Continue.');
 });
 
+for (const stream of [false, true]) test(`fresh ${stream ? 'SSE' : 'JSON'} history imports omit opaque reasoning bytes without losing readable history`, async t => {
+  const state = await fixture(t);
+  const signature = 'OPAQUE_SIGNATURE_FIXTURE_' + 'S'.repeat(480_000);
+  const redacted = 'OPAQUE_REDACTED_FIXTURE_' + 'R'.repeat(320_000);
+  const blocks = [
+    { type: 'thinking', thinking: 'Readable earlier reasoning.', signature },
+    { type: 'thinking', thinking: '', signature },
+    { type: 'redacted_thinking', data: redacted },
+    { type: 'text', text: 'Earlier assistant decision.' },
+    { type: 'tool_use', id: 'historical-tool', name: 'read_file', input: { path: 'fixture.txt' } },
+  ];
+  const result = { type: 'tool_result', tool_use_id: 'historical-tool', content: 'Exact earlier tool result.', is_error: true };
+  const body = { ...input, stream, tools: [], tool_choice: { type: 'none' }, messages: [
+    { role: 'user', content: 'Earlier task.' }, { role: 'assistant', content: blocks },
+    { role: 'user', content: [result] }, { role: 'assistant', content: 'Keep the decision and failure.' },
+    { role: 'user', content: 'Summarize the work.' },
+  ] };
+  const original = structuredClone(body), pending = state.request(body);
+  await until(() => state.workers[0]?.sends.length);
+  const worker = state.workers[0], sent = JSON.stringify(worker.sends[0]);
+  assert.doesNotMatch(sent, /OPAQUE_SIGNATURE_FIXTURE_|OPAQUE_REDACTED_FIXTURE_/);
+  assert.ok(Buffer.byteLength(sent) < 2000, 'Opaque protocol bytes must not inflate the imported user prompt.');
+  assert.ok(worker.sends[0].some(block => block.text === JSON.stringify({ type: 'thinking', thinking: blocks[0].thinking })));
+  assert.ok(worker.sends[0].some(block => block.text === blocks[3].text));
+  assert.ok(worker.sends[0].some(block => block.text === JSON.stringify(blocks[4])));
+  assert.ok(worker.sends[0].some(block => block.text === JSON.stringify(result)));
+  assert.equal(worker.sends[0].at(-1).text, 'Summarize the work.');
+  assert.deepEqual((await rpc(worker, 'tools/list')).value.result.tools, []);
+  answer(worker); const response = await pending;
+  assert.equal(response.status, 200);
+  const wire = await response.text();
+  if (stream) assert.match(wire, /event: message_stop/);
+  else assert.equal(JSON.parse(wire).stop_reason, 'end_turn');
+  assert.deepEqual(body, original, 'The original signed history must remain intact.');
+});
+
+test('history import does not redact ordinary text or tool data that resembles a thinking block', async t => {
+  const state = await fixture(t);
+  const literal = JSON.stringify({ type: 'thinking', thinking: 'Fixture data.', signature: 'literal-user-data' });
+  const toolResult = { type: 'tool_result', tool_use_id: 'old-tool', content: literal };
+  const body = { ...input, messages: [{ role: 'user', content: literal },
+    { role: 'assistant', content: [{ type: 'text', text: literal }] },
+    { role: 'user', content: [toolResult] }, { role: 'assistant', content: 'Preserve the fixture.' },
+    { role: 'user', content: 'Continue.' }] };
+  const first = await completed(state, body);
+  assert.equal(first.worker.sends[0].filter(block => block.text === literal).length, 2);
+  assert.ok(first.worker.sends[0].some(block => block.text === JSON.stringify(toolResult)));
+});
+
+test('signed ordinary replies retain exact native continuation across a hub restart', async t => {
+  const state = await fixture(t), pending = state.request(input);
+  await until(() => state.workers[0]?.sends.length);
+  const worker = state.workers[0], signature = 'NATIVE_REASONING_SIGNATURE_FIXTURE';
+  startMessage(worker);
+  worker.emit({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } });
+  worker.emit({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Readable native reasoning.' } });
+  worker.emit({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature } });
+  worker.emit({ type: 'content_block_stop', index: 0 });
+  worker.emit({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: 'Native answer.' } });
+  worker.emit({ type: 'content_block_stop', index: 1 });
+  worker.emit({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 4 } });
+  worker.emit({ type: 'message_stop' }); worker.result();
+  const message = await (await pending).json();
+  assert.equal(message.content[0].signature, signature);
+  await state.restart();
+  const body = continuation(input, message, 'Incremental continuation.'), original = structuredClone(body);
+  const next = state.request(body);
+  await until(() => state.workers[1]?.sends.length);
+  assert.equal(state.workers[1].options.resumeSessionId, worker.sessionId);
+  assert.deepEqual(state.workers[1].sends, ['Incremental continuation.']);
+  answer(state.workers[1]); assert.equal((await next).status, 200);
+  assert.deepEqual(body, original);
+});
+
 test('a completed ordinary session resumes natively after hub restart', async t => {
   const state = await fixture(t);
   const first = await completed(state);
