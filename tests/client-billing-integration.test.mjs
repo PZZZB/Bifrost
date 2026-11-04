@@ -7,11 +7,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import { ClientAccess } from '../src/client-access.mjs';
 import { ClientBilling } from '../src/client-billing.mjs';
 import { ClientAdmin } from '../src/client-admin.mjs';
 import { createClientServer } from '../src/client-server.mjs';
 import { BridgeError } from '../src/storage.mjs';
+import { createClaudeVmGateway } from '../src/claude-vm-gateway.mjs';
+import { loopbackHttpFetch } from '../src/client-gateway-forwarder.mjs';
 
 const MODEL = 'claude-codebuddy-opus-5-5';
 const price = { model: MODEL, enabled: true, inputRateMicros: 1000000, cachedInputRateMicros: 500000,
@@ -66,6 +69,35 @@ test('prepaid HTTP request reserves first, then deducts authoritative cached-tok
   assert.equal(result.status, 200, result.text);
   const account = f.billing.account(f.user.id);
   assert.equal(account.balanceMicros, 880); assert.equal(account.reservedMicros, 0); assert.equal(account.usedTokens, 120);
+  assert.equal(f.billing.history(f.user.id).rows.filter(row => row.type === 'settled').length, 1);
+});
+
+test('slow non-streaming Claude through the VM hop completes and settles exactly once without an unknown hold', async t => {
+  const gatewayKey = 'offline-vm-client-billing-'.repeat(3), relayKey = 'offline-vm-relay-billing-'.repeat(3);
+  let upstreamCalls = 0;
+  const gateway = createClaudeVmGateway({ gatewayKey, relayKey, upstreamPort: 3435,
+    allowedHosts: ['vm-fixture'], headerTimeoutMs: 10, requestTimeoutMs: 1000,
+    fetchImpl: async (_url, { signal }) => {
+      upstreamCalls++;
+      await delay(60, undefined, { signal });
+      return Response.json({ id: 'msg_slow_fixture', type: 'message', role: 'assistant', model: MODEL,
+        content: [{ type: 'text', text: 'offline completed' }], stop_reason: 'end_turn', stop_sequence: null,
+        usage: { input_tokens: 60, cache_read_input_tokens: 40, output_tokens: 20 } });
+    } });
+  gateway.listen(0, '127.0.0.1'); await once(gateway, 'listening');
+  t.after(() => new Promise(done => { gateway.closeAllConnections(); gateway.close(done); }));
+  const f = await fixture(t, { server: {
+    getModels: () => [{ id: MODEL, name: 'Offline Claude', channel: 'Claude' }],
+    requestMessages: ({ body, signal }) => loopbackHttpFetch(`http://127.0.0.1:${gateway.address().port}/v1/messages`, {
+      method: 'POST', headers: new Headers({ host: 'vm-fixture', authorization: `Bearer ${gatewayKey}`, 'content-type': 'application/json' }),
+      body: JSON.stringify(body), signal,
+    }),
+  } });
+  const response = await f.send('/v1/messages', { model: MODEL, messages: [{ role: 'user', content: 'offline' }], stream: false });
+  assert.equal(response.status, 200, response.text); assert.equal(upstreamCalls, 1);
+  assert.equal(response.data.content[0].text, 'offline completed');
+  const wallet = f.billing.account(f.user.id);
+  assert.equal(wallet.balanceMicros, 880); assert.equal(wallet.reservedMicros, 0); assert.equal(wallet.unresolvedCount, 0);
   assert.equal(f.billing.history(f.user.id).rows.filter(row => row.type === 'settled').length, 1);
 });
 

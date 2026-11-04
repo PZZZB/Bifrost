@@ -5,6 +5,8 @@ import { readBody } from './gateway.mjs';
 
 const ROUTES = new Map([['/v1/models', 'GET'], ['/v1/chat/completions', 'POST'],
   ['/v1/messages', 'POST'], ['/v1/messages/count_tokens', 'POST']]);
+const INFERENCE = new Set(['/v1/messages', '/v1/chat/completions']);
+const timeout = value => Number.isSafeInteger(value) && value > 0 && value <= 2_147_483_647;
 const SESSION_HEADERS = ['x-session-id', 'x-claude-code-session-id', 'x-conversation-id',
   'x-session-affinity', 'session_id', 'session-id', 'x-opencode-session'];
 const FORWARDED_HEADERS = ['accept', 'content-type', 'anthropic-version', 'anthropic-beta'];
@@ -77,6 +79,7 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
       !Array.isArray(allowedHosts) || !allowedHosts.length || allowedHosts.some(host => typeof host !== 'string' || !host) ||
       !Number.isInteger(upstreamPort) || upstreamPort < 1024 || upstreamPort > 65535 ||
       !Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 32 ||
+      !timeout(headerTimeoutMs) || !timeout(requestTimeoutMs) ||
       !Number.isInteger(maxBodyBytes) || maxBodyBytes < 1 || maxBodyBytes > 64 * 1024 * 1024) {
     throw new TypeError('Invalid external gateway configuration.');
   }
@@ -87,6 +90,8 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
     const disconnect = () => { if (!res.writableEnded) abort.abort(); };
     req.once('aborted', disconnect); res.once('close', disconnect);
     let state, reserved = false, reader, headerTimer, requestTimer;
+    const cancelRead = () => { void reader?.cancel(abort.signal.reason).catch(() => {}); };
+    abort.signal.addEventListener('abort', cancelRead, { once: true });
     try {
       if (!['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) fail(403);
       const counts = new Map();
@@ -145,11 +150,16 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
       const headers = new Headers({ authorization: `Bearer ${gatewayKey}` });
       for (const name of FORWARDED_HEADERS) if (typeof req.headers[name] === 'string') headers.set(name, req.headers[name]);
       headers.set('x-session-id', 'external-' + createHmac('sha256', sessionKey).update(JSON.stringify([client.id, session])).digest('hex'));
-      headerTimer = setTimeout(() => abort.abort(), headerTimeoutMs); headerTimer.unref();
+      // Inference may not return headers until generation completes. Retain
+      // the full request deadline for it and the short timeout for controls.
+      if (!INFERENCE.has(req.url)) {
+        headerTimer = setTimeout(() => abort.abort(), headerTimeoutMs); headerTimer.unref();
+      }
       const response = await fetchImpl(`http://127.0.0.1:${upstreamPort}${req.url}`, {
         method: req.method, headers, body, signal: abort.signal, redirect: 'manual',
       });
       clearTimeout(headerTimer);
+      abort.signal.throwIfAborted();
       if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); fail(502); }
       const output = { 'content-type': response.headers.get('content-type') || 'application/json',
         'cache-control': 'no-store', 'x-accel-buffering': 'no' };
@@ -159,8 +169,8 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
         reader = response.body.getReader();
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
           abort.signal.throwIfAborted();
+          if (done) break;
           if (!res.write(value)) await once(res, 'drain', { signal: abort.signal });
         }
       }
@@ -172,6 +182,7 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
       else errorResponse(res, [400, 401, 403, 404, 405, 413, 415, 429, 502].includes(error.status) ? error.status : 503, error.code);
     } finally {
       clearTimeout(headerTimer); clearTimeout(requestTimer);
+      abort.signal.removeEventListener('abort', cancelRead);
       if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
       if (reserved) { active--; state.active--; }
       req.removeListener('aborted', disconnect); res.removeListener('close', disconnect);
