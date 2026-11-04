@@ -9,8 +9,10 @@ const key = 'owner-gateway-KEY-fixture-only-123456789';
 const url = 'http://127.0.0.1:43155/owner/v1/chat/completions';
 const models = [{ id: 'B-model', name: 'Managed model', capabilities: { tools: { support: true }, images: { support: false } } }];
 async function fixture(t, original) {
-  const root = await fs.mkdtemp(join(tmpdir(), 'bifrost-client-files-'));
-  t.after(async () => { assert.equal(dirname(resolve(root)), resolve(tmpdir())); assert.ok(basename(root).startsWith('bifrost-client-files-'));
+  // macOS aliases /var to /private/var; keep the fixture itself free of links.
+  const temporaryRoot = await fs.realpath(tmpdir());
+  const root = await fs.mkdtemp(join(temporaryRoot, 'bifrost-client-files-'));
+  t.after(async () => { assert.equal(dirname(resolve(root)), temporaryRoot); assert.ok(basename(root).startsWith('bifrost-client-files-'));
     await fs.rm(root, { recursive: true, force: true }); });
   const configPath = join(root, 'client', 'models.json'), statePath = join(root, 'bridge', 'client.json');
   if (original !== undefined) { await fs.mkdir(dirname(configPath), { recursive: true }); await fs.writeFile(configPath, typeof original === 'string' ? original : JSON.stringify(original)); }
