@@ -56,7 +56,9 @@ git pull --ff-only
 - Responses 在本机转换为 Messages。工具由客户端的权限与沙箱控制，Claude 服务端不获得公司电脑的直接执行权限。服务端压缩及不支持的查询参数明确拒绝。
 - 思考状态绑定用户、会话、来源、模型和授权版本。同会话切换模型时，经过校验的来源专用思考状态不跨来源转发，明文消息、公开摘要和工具历史保留。网关自有压缩摘要验证原来源和授权后转为标注的用户上下文；无法解封的旧密文仍明确拒绝。更换 Key 不允许复用此前授权的密文。
 
-工具选择默认允许并行时不附加冗余的禁用参数；显式要求单工具时保留限制，由上游明确支持或拒绝，依据 [Anthropic 并行工具说明](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use)。官方 CLI 目前只接受自动工具选择，不把其他限制静默改成自动模式。
+工具选择默认允许并行时不附加冗余的禁用参数；显式要求单工具时保留限制，由上游明确支持或拒绝，依据 [Anthropic 并行工具说明](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use)。CLI 中继接受自动工具选择，以及没有工具声明或工具列表为空时的 `tool_choice: {type: "none"}`；后者由已禁用的内置工具和空客户端 MCP 工具列表保证。带工具声明的 `none` 及其他未映射限制仍明确拒绝。
+
+Codex 自动压缩会请求一次无工具的文本摘要。旧中继仅允许 `auto`，会在调用模型前拒绝该压缩请求并返回 HTTP 400。此修复需要更新运行 `scripts/run-claude-relay.mjs` 的电脑或虚拟机，并重启该 Claude CLI 中继；只更新或重启 Mac 公网入口不会加载中继代码。更新后可在原会话重试压缩。
 
 Responses 转换接受 `include: null`，以及 `reasoning.encrypted_content`、`web_search_call.action.sources`、`web_search_call.results`、`file_search_call.results`、`code_interpreter_call.outputs`、`computer_call_output.output.image_url`、`message.input_image.image_url`，并兼容 Codex 的 `output.encrypted_content`。选择器只请求已有响应项的额外返回数据，公开部分参见 [OpenAI 的 include 定义](https://developers.openai.com/api/reference/typescript/resources/responses)。加密输出选择器保留本网关已有的思考接续，不为消息和工具参数伪造 OpenAI 密文。本路由不执行 OpenAI 托管搜索、代码解释器或计算机工具，不向 Messages 传递这些选择器；没有对应响应项时不伪造搜索结果、来源或图片回显。实际不支持的工具及历史、未知选择器和无法提供的 logprobs 仍明确拒绝。
 

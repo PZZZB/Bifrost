@@ -91,9 +91,13 @@ function validateBody(body, model) {
       (!Array.isArray(body.system) || body.system.some(block => block?.type !== 'text' || typeof block.text !== 'string'))) {
     throw new Error('CLI system 只接受文本或 text 块。');
   }
-  if (body.tool_choice !== undefined && (!object(body.tool_choice) || body.tool_choice.type !== 'auto' ||
+  // With no declared tools, the worker's empty MCP list and disabled native
+  // tools already enforce none. Do not ignore none when tools are declared.
+  const noTools = body.tools === undefined || Array.isArray(body.tools) && body.tools.length === 0;
+  if (body.tool_choice !== undefined && (!object(body.tool_choice) ||
+      body.tool_choice.type !== 'auto' && !(body.tool_choice.type === 'none' && noTools) ||
       Object.keys(body.tool_choice).some(key => key !== 'type'))) {
-    throw new Error('CLI 当前仅支持不含额外限制的自动工具选择。');
+    throw new Error('CLI 当前仅支持不含额外限制的自动工具选择，或无工具声明时的 none。');
   }
   if (body.thinking !== undefined && (!object(body.thinking) ||
       !['adaptive', 'disabled'].includes(body.thinking.type) ||

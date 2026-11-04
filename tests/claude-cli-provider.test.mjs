@@ -342,6 +342,55 @@ test('interrupted ordinary history cannot be resumed as a clean completed native
   answer(state.workers[1]); assert.equal((await next).status, 200);
 });
 
+for (const tools of [undefined, []]) test(`tool_choice none with ${tools === undefined ? 'omitted' : 'empty'} tools starts an isolated tool-free session and continues incrementally`, async t => {
+  const state = await fixture(t), first = await completed(state, { ...input, tools: [tool] });
+  const body = { ...continuation(input, first.message, 'Summarize without calling tools.'), tool_choice: { type: 'none' },
+    ...(tools === undefined ? {} : { tools }) };
+  const second = await completed(state, body);
+  assert.equal(state.workers.length, 2); assert.equal(second.worker.options.resumeSessionId, undefined);
+  assert.notEqual(second.worker.sessionId, first.worker.sessionId);
+  const listed = await rpc(second.worker, 'tools/list');
+  assert.equal(listed.status, 200); assert.deepEqual(listed.value.result.tools, []);
+  assert.equal((await rpc(first.worker, 'tools/list')).value.result.tools.length, 1);
+  const nextBody = continuation(body, second.message, 'Continue without tools.');
+  const pending = state.request(nextBody);
+  await until(() => second.worker.sends.length === 2);
+  assert.equal(state.workers.length, 2); assert.deepEqual(second.worker.sends[1], 'Continue without tools.');
+  assert.deepEqual((await rpc(second.worker, 'tools/list')).value.result.tools, []);
+  answer(second.worker); assert.equal((await pending).status, 200);
+});
+
+test('tool_choice none never drops declared tools or extra choice restrictions before starting a worker', async t => {
+  const state = await fixture(t);
+  for (const body of [
+    { ...input, tools: [tool], tool_choice: { type: 'none' } },
+    { ...input, tools: null, tool_choice: { type: 'none' } },
+    { ...input, tool_choice: { type: 'none', disable_parallel_tool_use: true } },
+    { ...input, tools: [], tool_choice: { type: 'none', unexpected_option: true } },
+    { ...input, tool_choice: { type: 'any' } },
+    { ...input, tool_choice: { type: 'tool', name: tool.name } },
+    { ...input, tool_choice: 'none' },
+    { ...input, tool_choice: null },
+  ]) {
+    const response = await state.request(body);
+    assert.equal(response.status, 400); assert.equal((await response.json()).error.type, 'invalid_request_error');
+  }
+  assert.equal(state.authCalls(), 0); assert.equal(state.workers.length, 0);
+});
+
+test('tool_choice none cannot execute a native builtin tool when no client tools are declared', async t => {
+  const state = await fixture(t), pending = state.request({ ...input, tool_choice: { type: 'none' } });
+  await until(() => state.workers[0]?.sends.length);
+  const worker = state.workers[0];
+  assert.deepEqual((await rpc(worker, 'tools/list')).value.result.tools, []);
+  startMessage(worker);
+  worker.emit({ type: 'content_block_start', index: 0,
+    content_block: { type: 'tool_use', id: 'native-read', name: 'Read', input: { file_path: 'private.txt' } } });
+  const response = await pending;
+  assert.equal(response.status, 502); assert.equal((await response.json()).type, 'error');
+  assert.equal(worker.sends.length, 1); assert.equal(worker.closes, 1);
+});
+
 test('tools/list preserves complete nested schemas and reversible client names', async t => {
   const state = await fixture(t);
   const schema = { type: 'object', properties: { choice: { oneOf: [{ $ref: '#/$defs/file' }, { type: 'null' }] } },

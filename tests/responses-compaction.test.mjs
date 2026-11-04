@@ -1,10 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CodeBuddyResponsesProvider, CODEBUDDY_RESPONSES_STATE_PREFIX } from '../src/codebuddy-responses.mjs';
 import { CodeBuddyProvider, CODEBUDDY_MODEL } from '../src/codebuddy-provider.mjs';
 import { CodeBuddyThinkingState, CODEBUDDY_STATE_PREFIX } from '../src/codebuddy-thinking-state.mjs';
 import { MessagesResponsesAdapter } from '../src/protocols/messages-responses-adapter.mjs';
 import { translateResponses, ResponsesConversion, messagesJsonEvents, AdapterError } from '../src/protocols/responses-messages.mjs';
+import { ClaudeCliHub } from '../src/claude-cli-provider.mjs';
+import { BifrostRemote } from '../src/providers/bifrost-remote.mjs';
 
 const model = CODEBUDDY_MODEL.id;
 const scope = '1d8f353b-3799-49d0-b962-debbaf1f788f';
@@ -245,6 +251,77 @@ test('generic Messages compaction uses the same protocol and preserves a scoped 
     assert.equal(denied.status, 409); assert.equal((await denied.text()).includes(summary), false);
   }
   assert.equal(calls.length, 2);
+});
+
+for (const stream of [false, true]) test(`remote Claude CLI ${stream ? 'SSE' : 'JSON'} accepts a tool-free compaction and restores its summary after adapter restart`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'remote-cli-compaction-'));
+  const workers = [], remotes = [], calls = [], remoteModel = 'unit-opus-model';
+  const hub = new ClaudeCliHub({ binary: join(root, 'not-a-real-cli'), configDir: join(root, 'config'),
+    profileDir: join(root, 'profile'), stateDir: join(root, 'state'), mcpPort: 0, authStatus: async () => true,
+    workerFactory: options => {
+      let controller, closed = false;
+      const events = new ReadableStream({ start(value) { controller = value; } });
+      const worker = { options, events, sessionId: randomUUID(), sends: [], async start() {},
+        async send(value) {
+          this.sends.push(structuredClone(value));
+          const text = workers.indexOf(this) === 0 ? summary : 'CONTINUED_FROM_CLI_SUMMARY';
+          const message = { id: 'msg-cli-summary-fixture', type: 'message', role: 'assistant', model: remoteModel,
+            stop_reason: 'end_turn', content: [{ type: 'text', text }],
+            usage: { input_tokens: 13, output_tokens: 3, cache_read_input_tokens: 4 } };
+          for (const event of messagesJsonEvents(message)) {
+            if (event.type === 'message_start') event.message.usage.output_tokens = 0;
+            if (event.type === 'message_delta') event.usage = { output_tokens: 3 };
+            controller.enqueue({ type: 'stream_event', event });
+          }
+          controller.enqueue({ type: 'result', subtype: 'success', is_error: false });
+        },
+        async close() { if (!closed) { closed = true; controller.close(); } },
+      };
+      workers.push(worker); return worker;
+    } });
+  t.after(async () => { for (const remote of remotes) await remote.close(); await hub.close(); await rm(root, { recursive: true, force: true }); });
+  await hub.start();
+  const make = async () => {
+    const remote = new BifrostRemote({ id: 'home', baseUrl: 'https://bifrost.example.test/v1', apiKey: 'bfk_' + 'x'.repeat(43),
+      protocols: ['messages'], stateSecret: 'remote-cli-summary-test-secret-without-credentials',
+      fetchImpl: async (url, options) => {
+        if (url === 'https://bifrost.example.test/v1/models') return Response.json({ data: [{ id: remoteModel, protocols: ['messages'] }] });
+        assert.equal(url, 'https://bifrost.example.test/v1/messages'); assert.equal(options.method, 'POST');
+        const body = JSON.parse(options.body); calls.push(body);
+        return hub.provider(remoteModel).request({ path: '/v1/messages', body, headers: new Headers(options.headers), signal: options.signal });
+      } });
+    remotes.push(remote); await remote.refreshCatalog(); return remote;
+  };
+  const remote = await make();
+  const body = { model: remoteModel, stream, store: false, tools: [tool], input: [
+    { role: 'developer', content: 'Keep the verified tool result in the summary.' },
+    { role: 'user', content: 'Update the fixture.' },
+    { type: 'function_call', name: tool.name, call_id: 'cli_read_done', arguments: '{"path":"fixture.txt"}' },
+    { type: 'function_call_output', call_id: 'cli_read_done', output: 'EXACT_LOCAL_TOOL_RESULT' },
+    { type: 'compaction_trigger' },
+  ] };
+  const response = await remote.request('responses', { body, scope, session: 'remote-cli-compaction' });
+  assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+  const compact = await read(response, stream), checkpoint = compact.value.output[0];
+  assert.equal(compact.value.status, 'completed'); assert.equal(checkpoint.type, 'compaction');
+  assert.equal(calls.length, 1); assert.equal(workers.length, 1); assert.equal(workers[0].sends.length, 1);
+  assert.equal(calls[0].tools, undefined); assert.deepEqual(calls[0].tool_choice, { type: 'none' });
+  assert.match(JSON.stringify(workers[0].sends[0]), /EXACT_LOCAL_TOOL_RESULT/);
+  assert.ok(workers[0].options.systemPrompt.includes('Keep the verified tool result in the summary.'));
+  assert.doesNotMatch(compact.text, /EXACT_LOCAL_TOOL_RESULT|PRIVATE_COMPACTION_THINKING/);
+  assert.equal(await remote.openCompactionForHandoff(checkpoint.encrypted_content, { scope, model: remoteModel }), summary);
+  assert.equal(compact.value.usage.output_tokens, 3);
+
+  await remote.close();
+  const restarted = await make();
+  const resumed = await restarted.request('responses', { body: { model: remoteModel, stream, store: false,
+    input: [checkpoint, { role: 'user', content: 'Continue the remaining change.' }] }, scope, session: 'remote-cli-compaction' });
+  assert.equal(resumed.status, 200);
+  const result = await read(resumed, stream);
+  assert.equal(result.value.output.find(item => item.type === 'message').content[0].text, 'CONTINUED_FROM_CLI_SUMMARY');
+  assert.equal(calls.length, 2); assert.equal(workers.length, 2); assert.equal(workers[1].sends.length, 1);
+  assert.match(JSON.stringify(workers[1].sends[0]), /Goal: update the fixture/);
+  assert.doesNotMatch(JSON.stringify(calls[1]), /bifrost-messages-compaction-v1/);
 });
 
 const alternateSource = { id: 'employee-second-model', name: 'Employee second model', supportsToolCall: true,
