@@ -252,6 +252,16 @@ function translate(raw, instructionMarker, profile = {}) {
   const pendingInstructions = [];
   const pending = new Map(), seenCalls = new Set();
   const flush = () => { if (assistant) { upstream.messages.push({ role: 'assistant', content: assistant }); assistant = null; } };
+  const userBlocks = blocks => {
+    const last = upstream.messages.at(-1);
+    // A marked priority update and the following user input are one native
+    // turn. Splitting them adds an uncommitted prefix and defeats CLI resume.
+    // Keep tool-result turns separate: moving user input into a tool result
+    // would change its trust/permission semantics.
+    if (profile.stablePriorityPrefix && last?.role === 'user'
+      && !last.content.some(block => block.type === 'tool_result') && !blocks.some(block => block.type === 'tool_result')) last.content.push(...blocks);
+    else upstream.messages.push({ role: 'user', content: blocks });
+  };
   const assistantBlocks = blocks => {
     if (pending.size && assistant === null) fail('工具结果尚未完整返回。', 'input');
     assistant ??= []; assistant.push(...blocks); conversationStarted = true;
@@ -287,7 +297,7 @@ function translate(raw, instructionMarker, profile = {}) {
       } else if (item.role === 'assistant') assistantBlocks(blocks);
       else {
         if (pending.size) fail('工具结果须先于新的用户消息。', 'input');
-        flush(); upstream.messages.push({ role: 'user', content: blocks }); conversationStarted = true;
+        flush(); userBlocks(blocks); conversationStarted = true;
       }
     } else if (type === 'reasoning') {
       inputItemShape(item, ['type', 'id', 'summary', 'content', 'encrypted_content', 'status'], 'input.reasoning');
@@ -312,7 +322,7 @@ function translate(raw, instructionMarker, profile = {}) {
       if (pending.size) fail('工具结果须完整返回后才能压缩会话。', 'input.compaction_trigger');
       flush();
       if (!conversationStarted) fail('压缩请求缺少历史。', 'input.compaction_trigger');
-      upstream.messages.push({ role: 'user', content: [{ type: 'text', text: COMPACTION_PROMPT }] });
+      userBlocks([{ type: 'text', text: COMPACTION_PROMPT }]);
       compaction = true;
     } else if (type === 'compaction' || type === 'context_compaction') {
       inputItemShape(item, ['type', 'id', 'encrypted_content'], `input.${type}`);

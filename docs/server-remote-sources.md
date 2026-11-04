@@ -68,6 +68,8 @@ Codex 自动压缩会请求一次无工具的文本摘要。旧中继仅允许 `
 
 Messages 转换器的优先级标记由持久私有状态按调用者和模型派生，重建转换器时不随机改写同一段历史；标记说明从首轮就固定，后续首次出现优先级更新也不改变全局提示前缀。更换调用者或私有状态仍隔离。此修复位于运行 Responses→Messages 转换的网关：公司通过本地 Bifröst 接远端时，公司本地网关也需要更新并重启。
 
+优先级更新及随后相邻的普通用户内容归入同一个原生用户回合，不把新更新误算成已经提交的历史前缀。工具结果回合保持分开，不把普通用户指令降为工具输出；未完成工具接续仍按完整原始工具约定校验。
+
 Chat 历史索引将已完成回合的输出上限和 effort 与会话身份分开；调整生成参数仍能恢复已保存的原生块，再由 CLI 按新参数恢复会话。旧索引按原参数兼容读取，不改写用户历史；未完成工具回合仍保留原有参数匹配限制。来源余额不足等上游 HTTP 402 在无生成或实际用量证据时释放本次预留，不扣款、不自动重试；公网保留安全的 HTTP 402 提示，不改成 HTTP 503。若错误响应携带实际用量，仍按已有计费规则结算，未知用量继续保留待核销状态。
 
 Responses 转换接受 `include: null`，以及 `reasoning.encrypted_content`、`web_search_call.action.sources`、`web_search_call.results`、`file_search_call.results`、`code_interpreter_call.outputs`、`computer_call_output.output.image_url`、`message.input_image.image_url`，并兼容 Codex 的 `output.encrypted_content`。选择器只请求已有响应项的额外返回数据，公开部分参见 [OpenAI 的 include 定义](https://developers.openai.com/api/reference/typescript/resources/responses)。加密输出选择器保留本网关已有的思考接续，不为消息和工具参数伪造 OpenAI 密文。本路由不执行 OpenAI 托管搜索、代码解释器或计算机工具，不向 Messages 传递这些选择器；没有对应响应项时不伪造搜索结果、来源或图片回显。实际不支持的工具及历史、未知选择器和无法提供的 logprobs 仍明确拒绝。

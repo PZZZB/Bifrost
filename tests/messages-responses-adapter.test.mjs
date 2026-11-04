@@ -18,7 +18,7 @@ test('adapter reconstruction preserves scoped priority markers and exact native 
     { role: 'user', content: 'Continue with that update.' }] };
   const send = async (stateSecret, scope, input = body) => {
     const adapter = new MessagesResponsesAdapter({ stateSecret, requestMessages: async value => {
-      calls.push(structuredClone(value.body)); return reply([{ type: 'text', text: 'Updated answer.' }]);
+      calls.push(structuredClone(value.body)); return reply([{ type: 'text', text: 'Earlier answer.' }]);
     } });
     const response = await adapter.request({ body: input, scope });
     assert.equal(response.status, 200); await response.text();
@@ -26,6 +26,11 @@ test('adapter reconstruction preserves scoped priority markers and exact native 
   await send(secret, scope, { ...request, input: body.input.slice(0, 1) });
   await send(secret, scope); await send(secret, scope);
   assert.deepEqual(calls[1].system, calls[0].system, 'The first late priority update must not replace the global native prompt.');
+  assert.deepEqual(calls[1].messages.slice(0, -1), [...calls[0].messages,
+    { role: 'assistant', content: [{ type: 'text', text: 'Earlier answer.' }] }], 'The completed native prefix must not include a new, separate priority-update turn.');
+  assert.equal(calls[1].messages.at(-1).content.length, 2);
+  assert.match(calls[1].messages.at(-1).content[0].text, /role=developer/);
+  assert.equal(calls[1].messages.at(-1).content[1].text, 'Continue with that update.');
   assert.deepEqual(calls[2], calls[1], 'Recreating an adapter with persisted state must not rewrite native context.');
   await send(secret, 'different-caller'); await send(randomBytes(32).toString('base64url'), scope);
   assert.notDeepEqual(calls[3].system, calls[1].system, 'Other callers must have distinct private markers.');
