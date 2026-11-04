@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createClaudeGatewayServer, ChatHistoryStore, translateChatRequest } from '../src/openai-chat-gateway.mjs';
 import { ClaudeCliHub } from '../src/claude-cli-provider.mjs';
+import { meterClientResponse, getClientMeter } from '../src/client-meter.mjs';
 import http from 'node:http';
 import { Readable } from 'node:stream';
 
@@ -26,13 +27,13 @@ function reply(blocks = [{ type: 'text', text: '你好 🌍' }], reason = 'end_t
   { type: 'message_delta', delta: { stop_reason: reason }, usage: { output_tokens: 4 } }, { type: 'message_stop' }];
 }
 function response(events) { return new Response(encode(events), { headers: { 'content-type': 'text/event-stream' } }); }
-async function fixture(t, { request, history, provider } = {}) {
+async function fixture(t, { request, history, provider, onHistoryWarning } = {}) {
   const calls = [];
   const backend = provider ?? { status: async () => ({ ready: true, modelAvailable: true }), request: async value => {
     calls.push(value); return request ? request(value, calls.length) : response(reply());
   } };
   const server = createClaudeGatewayServer({ gatewayKey: key, allowedHosts: ['fixture'], allowedPeers: ['127.0.0.1'],
-    routes: [{ account: 'Claude', model: { id: model, name: 'Fixture', upstream: 'fixture-sonnet' }, provider: backend }] }, { history });
+    routes: [{ account: 'Claude', model: { id: model, name: 'Fixture', upstream: 'fixture-sonnet' }, provider: backend }] }, { history, onHistoryWarning });
   await new Promise(done => server.listen(0, '127.0.0.1', done));
   t.after(() => new Promise(done => { server.close(done); server.closeAllConnections(); }));
   const send = (body = { model, messages: [{ role: 'user', content: 'Hello' }] }, options = {}) => httpFetch(`http://127.0.0.1:${server.address().port}/v1/chat/completions`, {
@@ -51,6 +52,37 @@ test('JSON maps text, cache-inclusive usage and finish reason without invoking a
   assert.deepEqual(body.usage, { prompt_tokens: 15, completion_tokens: 4, total_tokens: 19, prompt_tokens_details: { cached_tokens: 3 } });
   assert.equal(f.calls[0].body.model, 'fixture-sonnet');
   assert.equal(f.calls[0].body.thinking.type, 'disabled');
+});
+
+for (const stream of [false, true]) test(`completed Chat replies retain actual usage after cache persistence failure (${stream ? 'SSE' : 'JSON'})`, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'bifrost-chat-cache-fault-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const history = new ChatHistoryStore({ path: join(root, 'missing-parent', 'history.json') }), warnings = [];
+  const canonical = [{ type: 'thinking', thinking: 'Readable fixture reasoning.', signature: 'PRIVATE_CACHE_SIGNATURE' },
+    { type: 'text', text: 'Completed fixture.' }];
+  const f = await fixture(t, { history, request: () => response(reply(canonical)), onHistoryWarning: value => warnings.push(value) });
+  const body = { model, stream, ...(stream ? { stream_options: { include_usage: true } } : {}), messages: [{ role: 'user', content: 'Private fixture input.' }] };
+  const result = await f.send(body); assert.equal(result.status, 200);
+  const settled = [], metered = meterClientResponse(result, { protocol: 'chat', onResult: value => settled.push(value) });
+  const wire = await metered.text();
+  assert.match(wire, /Completed fixture\./); assert.doesNotMatch(wire, /PRIVATE_CACHE_SIGNATURE|"error"/);
+  const completion = await getClientMeter(metered).finish;
+  assert.equal(completion.status, 'completed'); assert.equal(completion.usage.inputTokens, 15); assert.equal(completion.usage.outputTokens, 4);
+  assert.equal(settled.length, 1); assert.deepEqual(warnings, [{ code: 'chat_history_cache_unavailable' }]);
+  const next = await f.send({ model, messages: [...body.messages, { role: 'assistant', content: 'Completed fixture.' },
+    { role: 'user', content: 'Continue.' }] });
+  assert.equal(next.status, 200); await next.text();
+  assert.deepEqual(f.calls[1].body.messages[1].content, canonical, 'The in-memory signed continuation must remain available.');
+  assert.equal(f.calls.length, 2); assert.equal(warnings.length, 1, 'Persistent storage faults must not spam or leak raw errors.');
+});
+
+test('oversized history inputs fail before a model call and release the request reservation', async t => {
+  const history = new ChatHistoryStore({ maxBytes: 300 }), warnings = [];
+  const f = await fixture(t, { history, onHistoryWarning: value => warnings.push(value) });
+  const response = await f.send({ model, messages: [{ role: 'user', content: 'x'.repeat(1000) }] });
+  assert.equal(response.status, 413); const results = [];
+  const metered = meterClientResponse(response, { protocol: 'chat', onResult: result => results.push(result) }); await metered.text();
+  assert.deepEqual(results, [{ usage: null, status: 'rejected' }]); assert.equal(f.calls.length, 0); assert.equal(warnings.length, 0);
 });
 
 test('streaming survives split UTF-8 and emits usage followed by exactly one DONE', async t => {

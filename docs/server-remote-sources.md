@@ -72,6 +72,10 @@ Messages 转换器的优先级标记由持久私有状态按调用者和模型�
 
 Chat 历史索引将已完成回合的输出上限和 effort 与会话身份分开；调整生成参数仍能恢复已保存的原生块，再由 CLI 按新参数恢复会话。旧索引按原参数兼容读取，不改写用户历史；未完成工具回合仍保留原有参数匹配限制。来源余额不足等上游 HTTP 402 在无生成或实际用量证据时释放本次预留，不扣款、不自动重试；公网保留安全的 HTTP 402 提示，不改成 HTTP 503。若错误响应携带实际用量，仍按已有计费规则结算，未知用量继续保留待核销状态。
 
+新旧 Chat 索引并存时，优先选择匹配到的最长原生历史，长度相同时优先新索引。工具回复的空内容与 `-` 兼容形式共享同一份原生快照，持久化时只增加一个别名，不重复存储完整历史。旧的单键缓存仍可读；新记录的主键也保持旧格式可读。容量淘汰按完整快照处理，过大的新记录不会先清空其他有效缓存。
+
+历史缓存写入故障不再把已经完成的模型回答改成 API 失败：真实回答和用量照常返回，当前进程保留有界内存接续，并在中继私有日志中限频记录固定告警，不写入提示、签名或原始磁盘错误。进程重启后，未持久化的缓存可能丢失；无法恢复的未完成工具回合仍明确拒绝。已知输入本身超过缓存容量时，在调用模型前返回 HTTP 413；没有生成或用量证据的拒绝释放预留，有实际用量的错误仍按真实用量处理。
+
 Responses 转换接受 `include: null`，以及 `reasoning.encrypted_content`、`web_search_call.action.sources`、`web_search_call.results`、`file_search_call.results`、`code_interpreter_call.outputs`、`computer_call_output.output.image_url`、`message.input_image.image_url`，并兼容 Codex 的 `output.encrypted_content`。选择器只请求已有响应项的额外返回数据，公开部分参见 [OpenAI 的 include 定义](https://developers.openai.com/api/reference/typescript/resources/responses)。加密输出选择器保留本网关已有的思考接续，不为消息和工具参数伪造 OpenAI 密文。本路由不执行 OpenAI 托管搜索、代码解释器或计算机工具，不向 Messages 传递这些选择器；没有对应响应项时不伪造搜索结果、来源或图片回显。实际不支持的工具及历史、未知选择器和无法提供的 logprobs 仍明确拒绝。
 
 Codex v2 压缩使用同一个 `/responses` 接口，输入以唯一的 `compaction_trigger` 结束。转换器保留完整历史并请求上游仅生成工作摘要，禁止工具调用；只在完整的非空文本响应后生成一个网关自有的加密 `compaction` 检查点。后续按来源、用户、会话、模型与授权版本验证后恢复摘要，不尝试解密 OpenAI 的私有压缩内容。`configuration_update` 的最后一个有效 effort 控制当前推理，不混入对话文字。格式错误、未返回的工具结果、摘要截断或取消均不提交压缩成功。

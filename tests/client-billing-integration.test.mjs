@@ -181,6 +181,14 @@ test('Claude source HTTP 402 stays a safe payment-required error instead of a re
   assert.equal(f.billing.account(f.user.id).balanceMicros, 1000);
 });
 
+test('upstream HTTP 413 without generation releases its hold and never charges estimated usage', async t => {
+  const f = await fixture(t, { source: () => Response.json({ error: { message: 'History exceeds private cache capacity.' } }, { status: 413 }) });
+  const result = await f.send('/v1/responses', { model: MODEL, input: 'fixture' });
+  assert.equal(result.status, 413); assert.equal(f.calls.length, 1);
+  const account = f.billing.account(f.user.id);
+  assert.equal(account.reservedMicros, 0); assert.equal(account.balanceMicros, 1000); assert.equal(account.unresolvedCount, 0);
+});
+
 test('missing usage retains a reviewable hold; administrator release is idempotent', async t => {
   const f = await fixture(t, { source: () => Response.json(completion(false)) });
   assert.equal((await f.send('/v1/responses', { model: MODEL, input: 'test' })).status, 200);

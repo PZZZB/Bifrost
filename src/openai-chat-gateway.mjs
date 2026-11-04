@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { AnthropicGateway } from './anthropic-gateway.mjs';
 import { readBody } from './gateway.mjs';
 
@@ -93,6 +93,7 @@ function finishReason(reason) {
  * This also preserves text/tool block ordering across parallel tool rounds. */
 export class ChatHistoryStore {
   constructor({ path, maxBytes = 32 * 1024 * 1024, maxEntries = 256 } = {}) {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || !Number.isSafeInteger(maxEntries) || maxEntries < 1) throw new TypeError('Invalid private chat history limits.');
     this.path = path; this.maxBytes = maxBytes; this.maxEntries = maxEntries; this.records = new Map();
   }
   async load() {
@@ -101,8 +102,14 @@ export class ChatHistoryStore {
       const raw = await readFile(this.path);
       if (raw.length > this.maxBytes) throw new Error();
       const value = JSON.parse(raw);
-      if (!Array.isArray(value) || value.some(record => !/^[a-f0-9]{64}$/.test(record?.key) || !Array.isArray(record.messages))) throw new Error();
-      for (const record of value.slice(-this.maxEntries)) this.records.set(record.key, record.messages);
+      if (!Array.isArray(value) || value.some(record => typeof record?.key !== 'string' || !/^[a-f0-9]{64}$/.test(record.key) || !Array.isArray(record.messages)
+        || record.aliases !== undefined && (!Array.isArray(record.aliases) || record.aliases.length > 1
+          || record.aliases.some(key => typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key) || key === record.key)))) throw new Error();
+      const loaded = new Map();
+      for (const record of value.slice(-this.maxEntries)) for (const key of [record.key, ...(record.aliases ?? [])]) {
+        if (loaded.has(key)) throw new Error(); loaded.set(key, record.messages);
+      }
+      this.records = loaded;
     } catch (error) { if (error.code !== 'ENOENT') throw new Error('The private chat history index could not be loaded.'); }
   }
   keys(context, messages) {
@@ -115,19 +122,46 @@ export class ChatHistoryStore {
     }
     return { messages: [], rest: messages };
   }
-  async save(key, messages) {
-    this.records.delete(key); this.records.set(key, structuredClone(messages));
-    while (this.records.size > this.maxEntries) this.records.delete(this.records.keys().next().value);
-    let data = JSON.stringify([...this.records].map(([key, messages]) => ({ key, messages })));
-    while (Buffer.byteLength(data) > this.maxBytes && this.records.size > 1) {
-      this.records.delete(this.records.keys().next().value);
-      data = JSON.stringify([...this.records].map(([key, messages]) => ({ key, messages })));
+  snapshot(records) {
+    const groups = new Map();
+    for (const [key, messages] of records) {
+      const group = groups.get(messages);
+      if (group) (group.aliases ??= []).push(key);
+      else groups.set(messages, { key, messages });
     }
-    if (Buffer.byteLength(data) > this.maxBytes) { this.records.delete(key); throw new ChatError('Chat history exceeds the private index limit.', 413); }
+    return [...groups.values()];
+  }
+  assertInputFits(messages) {
+    if (Buffer.byteLength(JSON.stringify([{ key: '0'.repeat(64), messages }])) > this.maxBytes) {
+      throw new ChatError('Chat history exceeds the private index limit. Compact the conversation or reduce attachments before retrying.', 413);
+    }
+  }
+  save(key, messages) { return this.saveAliases([key], messages); }
+  async saveAliases(keys, messages) {
+    if (!Array.isArray(keys) || keys.length < 1 || keys.length > 2 || keys.some(key => typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key))
+      || !Array.isArray(messages)) throw new TypeError('Invalid private chat history snapshot.');
+    keys = [...new Set(keys)];
+    const saved = structuredClone(messages), candidate = new Map(this.records);
+    const replaced = new Set(keys.map(key => candidate.get(key)).filter(Boolean));
+    for (const [key, value] of candidate) if (replaced.has(value)) candidate.delete(key);
+    for (const key of keys) candidate.set(key, saved);
+    // Reject an oversized snapshot before evicting any valid cached history.
+    const own = this.snapshot(new Map(keys.map(key => [key, saved])));
+    if (Buffer.byteLength(JSON.stringify(own)) > this.maxBytes) throw new ChatError('Chat history exceeds the private index limit.', 413);
+    let groups = this.snapshot(candidate), data = JSON.stringify(groups);
+    while (groups.length > this.maxEntries || Buffer.byteLength(data) > this.maxBytes) {
+      const oldest = candidate.values().next().value;
+      for (const [key, value] of candidate) if (value === oldest) candidate.delete(key);
+      groups = this.snapshot(candidate); data = JSON.stringify(groups);
+    }
+    // Keep the bounded current snapshot in memory even if disk persistence
+    // fails. A cache write must not invalidate an already generated answer.
+    this.records = candidate;
     if (!this.path) return;
     const temporary = `${this.path}.${randomUUID()}.tmp`;
     this.saving = (this.saving ?? Promise.resolve()).catch(() => {}).then(async () => {
-      await writeFile(temporary, data, { mode: 0o600 }); await rename(temporary, this.path);
+      try { await writeFile(temporary, data, { mode: 0o600, flag: 'wx' }); await rename(temporary, this.path); }
+      finally { await rm(temporary, { force: true }).catch(() => {}); }
     });
     await this.saving;
   }
@@ -180,7 +214,8 @@ export function translateChatRequest(body, store, identity = null) {
   let restored = store.restore(keys, normalized);
   // Keep existing persisted conversations readable when their settings still
   // match. New snapshots use the generation-independent identity above.
-  if (!restored.messages.length) restored = store.restore(store.keys({ ...context, maxTokens, effort: effort ?? 'none' }, normalized), normalized);
+  const legacy = store.restore(store.keys({ ...context, maxTokens, effort: effort ?? 'none' }, normalized), normalized);
+  if (legacy.rest.length < restored.rest.length) restored = legacy;
   const messages = restored.messages;
   for (const message of restored.rest) {
     if (['system', 'developer'].includes(message.role)) continue;
@@ -229,7 +264,9 @@ async function* events(body, signal) {
 }
 
 export class OpenAIChatGateway {
-  constructor({ gateway, history = new ChatHistoryStore() }) { this.gateway = gateway; this.history = history; }
+  constructor({ gateway, history = new ChatHistoryStore(), onHistoryWarning = () => {} }) {
+    Object.assign(this, { gateway, history, onHistoryWarning, historyWarning: false });
+  }
   async handle(req, res) {
     const abort = new AbortController();
     const disconnect = () => { if (!res.writableEnded) abort.abort(new Error('Client disconnected.')); };
@@ -245,6 +282,7 @@ export class OpenAIChatGateway {
       if (!route) invalid('The requested model is not configured.');
       const identity = req.headers['x-session-id'] ?? req.headers['x-claude-code-session-id'] ?? req.headers['session_id'] ?? null;
       const translated = translateChatRequest(source, this.history, identity);
+      this.history.assertInputFits?.(translated.body.messages);
       const response = await route.provider.request({ path: '/v1/messages', body: { ...translated.body, model: route.model.upstream ?? route.model.id },
         headers: { ...(identity ? { 'x-session-id': identity } : {}) }, signal: abort.signal });
       if (!response.ok) {
@@ -320,7 +358,7 @@ export class OpenAIChatGateway {
       const assistant = publicAssistant(canonical);
       const keys = this.history.keys(translated.context, [...translated.normalized, normalizeMessage(assistant)]);
       const nativeHistory = [...translated.body.messages, { role: 'assistant', content: canonical }];
-      await this.history.save(keys.at(-1), nativeHistory);
+      const historyKeys = [keys.at(-1)];
       // Some Chat clients replay a tool-only assistant message with a "-" text
       // sentinel. Index that exact spelling only when we emitted no text. All
       // context, tool IDs and arguments still have to match, and the native
@@ -328,7 +366,17 @@ export class OpenAIChatGateway {
       if (assistant.content === null && assistant.tool_calls?.length) {
         const placeholderKeys = this.history.keys(translated.context,
           [...translated.normalized, normalizeMessage({ ...assistant, content: '-' })]);
-        await this.history.save(placeholderKeys.at(-1), nativeHistory);
+        historyKeys.push(placeholderKeys.at(-1));
+      }
+      try {
+        if (typeof this.history.saveAliases === 'function') await this.history.saveAliases(historyKeys, nativeHistory);
+        else for (const key of historyKeys) await this.history.save(key, nativeHistory);
+        this.historyWarning = false;
+      } catch {
+        if (!this.historyWarning) {
+          this.historyWarning = true;
+          try { Promise.resolve(this.onHistoryWarning({ code: 'chat_history_cache_unavailable' })).catch(() => {}); } catch {}
+        }
       }
       if (source.stream === true) {
         await write(chunk({}, reason));
@@ -346,8 +394,9 @@ export class OpenAIChatGateway {
   }
 }
 
-export function createClaudeGatewayServer(options, { history = new ChatHistoryStore() } = {}) {
-  const gateway = new AnthropicGateway(options), chat = new OpenAIChatGateway({ gateway, history });
+export function createClaudeGatewayServer(options, { history = new ChatHistoryStore(),
+  onHistoryWarning = () => { process.stderr.write('Claude chat history cache unavailable; completed output and actual usage were returned. Check private storage.\n'); } } = {}) {
+  const gateway = new AnthropicGateway(options), chat = new OpenAIChatGateway({ gateway, history, onHistoryWarning });
   const server = http.createServer((req, res) => {
     if (req.url === '/v1/chat/completions') void chat.handle(req, res);
     else void gateway.handle(req, res);
