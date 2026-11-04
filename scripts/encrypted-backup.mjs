@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
-import { backupKey, createEncryptedBackup, restoreEncryptedBackup, verifyEncryptedBackup, atomicPrivateFile } from '../src/encrypted-backup.mjs';
+import { assertBackupPlatform, backupKey, createEncryptedBackup, restoreEncryptedBackup, verifyEncryptedBackup, atomicPrivateFile } from '../src/encrypted-backup.mjs';
 
 const [command, configPath, archive, destination] = process.argv.slice(2);
 if (!['create', 'verify', 'restore'].includes(command) || !configPath) {
@@ -8,6 +8,7 @@ if (!['create', 'verify', 'restore'].includes(command) || !configPath) {
 }
 let config;
 try {
+  assertBackupPlatform();
   config = JSON.parse(await readFile(configPath, 'utf8'));
   if (command === 'create' && config.files.some(file => resolve(file.path) === resolve(config.keyFile)
     || resolve(file.path).startsWith(resolve(config.directory) + sep))) throw new Error('Recovery key and archives cannot be backup inputs.');
@@ -17,9 +18,12 @@ try {
     : await restoreEncryptedBackup({ path: archive, key, destination });
   if (command === 'create' && config.statusFile) await atomicPrivateFile(config.statusFile, JSON.stringify(result, null, 2) + '\n');
   console.log(JSON.stringify(result));
-} catch {
+} catch (error) {
   // No input filenames, contents, keys, or underlying filesystem error details in logs.
   if (command === 'create' && config?.statusFile) await atomicPrivateFile(config.statusFile,
     JSON.stringify({ ok: false, checkedAt: new Date().toISOString(), error: 'backup_failed', externalCopy: false }) + '\n').catch(() => {});
-  console.error('Encrypted backup operation failed; existing archives were preserved.'); process.exitCode = 1;
+  console.error(error.code === 'backup_platform_unsupported'
+    ? 'Encrypted backup commands require POSIX file permissions; Windows is not supported (backup_platform_unsupported).'
+    : 'Encrypted backup operation failed; existing archives were preserved.');
+  process.exitCode = 1;
 }

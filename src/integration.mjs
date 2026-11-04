@@ -4,6 +4,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 const STATE_VERSION = 2;
+const NATIVE_STATE_VERSION = 3;
 const HEADER_NAME = 'X-Account-Bridge-Key';
 const LEGACY_FIELDS = ['base_url', 'supports_websockets', `http_headers.${HEADER_NAME}`];
 const FIELDS = [...LEGACY_FIELDS, 'model_catalog_url'];
@@ -20,6 +21,17 @@ function samePath(left, right) {
   const a = path.resolve(left);
   const b = path.resolve(right);
   return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function sameBridgeEndpoint(left, right) {
+  if (left.origin === right.origin) return true;
+  const loopback = address => {
+    const host = address.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    return host === 'localhost' || host === '::1' || /^127\.(?:\d{1,3}\.){2}\d{1,3}$/.test(host)
+      || /^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(host);
+  };
+  const port = address => address.port || (address.protocol === 'https:' ? '443' : '80');
+  return left.protocol === right.protocol && port(left) === port(right) && loopback(left) && loopback(right);
 }
 
 function fieldAt(config, keyPath) {
@@ -50,7 +62,7 @@ function setField(config, keyPath, field) {
 }
 
 /**
- * Installs a gateway on an existing custom provider through Codex's native TOML editor.
+ * Installs saved custom and optional built-in provider routes through Codex's native TOML editor.
  * The recovery file contains only edited fields, never the entire config.
  */
 export class Integration {
@@ -59,9 +71,10 @@ export class Integration {
   #statePath;
   #baseUrl;
   #gatewayKey;
+  #nativeBaseUrl;
   #queue = Promise.resolve();
 
-  constructor({ rpc, configPath, statePath, baseUrl, gatewayKey }) {
+  constructor({ rpc, configPath, statePath, baseUrl, gatewayKey, nativeBaseUrl = null }) {
     if (!rpc || typeof rpc.request !== 'function') throw new TypeError('rpc.request is required.');
     if (!configPath || !statePath) throw new TypeError('configPath and statePath are required.');
     const address = new URL(baseUrl);
@@ -77,6 +90,14 @@ export class Integration {
     if (samePath(this.#configPath, this.#statePath)) throw new TypeError('statePath must differ from configPath.');
     this.#baseUrl = baseUrl.replace(/\/+$/, '');
     this.#gatewayKey = gatewayKey;
+    if (nativeBaseUrl !== null) {
+      const native = new URL(nativeBaseUrl);
+      if (!['http:', 'https:'].includes(native.protocol) || native.username || native.password || native.search || native.hash
+        || native.origin !== address.origin || native.pathname.replace(/\/+$/, '') === address.pathname.replace(/\/+$/, '')) {
+        throw new TypeError('nativeBaseUrl must be a distinct endpoint on the gateway origin without credentials, query, or fragment.');
+      }
+      this.#nativeBaseUrl = nativeBaseUrl.replace(/\/+$/, '');
+    } else this.#nativeBaseUrl = null;
   }
 
   inspect() {
@@ -86,8 +107,9 @@ export class Integration {
     });
   }
 
-  /** Selects the saved connection without changing provider settings or credentials. */
+  /** Selects the saved connection, restoring all v3 route fields in official mode. */
   switchMode(mode) {
+    if (this.#nativeBaseUrl) return this.#serial(() => this.#switchNative(mode));
     return this.#serial(async () => {
       if (!['official', 'gateway'].includes(mode)) {
         throw failure('INTEGRATION_CONFLICT', 'Select either the official or gateway connection.');
@@ -125,7 +147,7 @@ export class Integration {
       }
       const config = clone(current);
       if (state) {
-        for (const field of state.fields) {
+        for (const field of state.fields.filter(field => field.keyPath.startsWith(`model_providers.${providerId}.`))) {
           let effective = { exists: false };
           // App-server layers are ordered from highest to lowest priority.
           for (const layer of snapshot.layers) {
@@ -146,14 +168,28 @@ export class Integration {
       }
       let address;
       try { address = new URL(config.base_url); } catch {}
-      if (!address || !['http:', 'https:'].includes(address.protocol) || address.origin === new URL(this.#baseUrl).origin) {
+      if (!address || !['http:', 'https:'].includes(address.protocol) || sameBridgeEndpoint(address, new URL(this.#baseUrl))) {
         throw failure('INTEGRATION_ORIGINAL_PROVIDER_UNAVAILABLE', 'The original provider address is unavailable or would route back to this bridge.');
       }
       return { providerId, config };
     });
   }
 
+  /** Reconstruct the built-in provider's original route without following our private overlay. */
+  originalNativeProvider() {
+    return this.#serial(async () => {
+      if (!this.#nativeBaseUrl) throw failure('INTEGRATION_ORIGINAL_PROVIDER_UNAVAILABLE', 'Native gateway compatibility is not configured.');
+      const [snapshot, state] = await Promise.all([this.#readConfig(), this.#readState()]);
+      if (state && !this.#allMatch(snapshot, state, 'installed') && !this.#allMatch(snapshot, state, 'original')
+        && !this.#upgradeBaselineMatches(snapshot, state)) {
+        throw failure('INTEGRATION_CONFLICT', 'Provider fields were edited after installation. The original provider cannot be reconstructed safely.');
+      }
+      return { providerId: 'openai', config: { base_url: this.#originalNativeAddress(snapshot, state) } };
+    });
+  }
+
   install() {
+    if (this.#nativeBaseUrl) return this.#serial(() => this.#installNative());
     return this.#serial(async () => {
       let [snapshot, state] = await Promise.all([this.#readConfig(), this.#readState()]);
       const description = this.#describe(snapshot, state);
@@ -226,6 +262,7 @@ export class Integration {
       }
       if (!upgradeBaseline) {
         state.phase = 'restoring';
+        delete state.upgradeBaselineCount;
         await this.#writeState(state);
       }
       await this.#batchWrite(snapshot, state.fields.map(field => ({
@@ -262,11 +299,13 @@ export class Integration {
   }
 
   #desiredFields(providerId, version = STATE_VERSION) {
-    return [this.#baseUrl, false, this.#gatewayKey, `${this.#baseUrl}/models`]
+    const fields = [this.#baseUrl, false, this.#gatewayKey, `${this.#baseUrl}/models`]
       .slice(0, version === 1 ? LEGACY_FIELDS.length : FIELDS.length).map((value, index) => ({
       keyPath: `model_providers.${providerId}.${FIELDS[index]}`,
       installed: { exists: true, value },
     }));
+    if (version === NATIVE_STATE_VERSION) fields.push({ keyPath: 'openai_base_url', installed: { exists: true, value: this.#nativeBaseUrl } });
+    return fields;
   }
 
   #allMatch(snapshot, state, which) {
@@ -274,9 +313,199 @@ export class Integration {
   }
 
   #upgradeBaselineMatches(snapshot, state) {
+    if (state.version === NATIVE_STATE_VERSION) return state.phase === 'upgrading'
+      && [3, 4].includes(state.upgradeBaselineCount)
+      && state.fields.every((field, index) => matches(fieldAt(snapshot.layer.config, field.keyPath),
+        index < state.upgradeBaselineCount ? field.installed : field.original));
     return state.version === 2 && state.phase === 'upgrading'
       && state.fields.every((field, index) => matches(fieldAt(snapshot.layer.config, field.keyPath),
         index < LEGACY_FIELDS.length ? field.installed : field.original));
+  }
+
+  #effectiveOriginal(snapshot, keyPath, original) {
+    for (const layer of snapshot.layers) {
+      if (layer.disabledReason) continue;
+      const value = layer === snapshot.layer && original ? original : fieldAt(layer.config, keyPath);
+      if (value.exists) return clone(value);
+    }
+    return { exists: false };
+  }
+
+  #higherControls(snapshot, state) {
+    const fields = state?.fields ?? this.#desiredFields(snapshot.config.model_provider, NATIVE_STATE_VERSION);
+    return snapshot.layers.slice(0, snapshot.layers.indexOf(snapshot.layer)).some(layer => !layer.disabledReason
+      && ['model_provider', 'openai_base_url', ...fields.map(field => field.keyPath)].some(key => fieldAt(layer.config, key).exists));
+  }
+
+  #originalNativeAddress(snapshot, state) {
+    const owned = state?.fields.find(field => field.keyPath === 'openai_base_url');
+    const original = this.#effectiveOriginal(snapshot, 'openai_base_url', owned?.original);
+    const chatGPTBase = snapshot.config.chatgpt_base_url ?? 'https://chatgpt.com/backend-api';
+    const baseUrl = original.exists ? original.value : typeof chatGPTBase === 'string' ? `${chatGPTBase.replace(/\/+$/, '')}/codex` : null;
+    let address;
+    try { address = new URL(baseUrl); } catch {}
+    if (!address || !['http:', 'https:'].includes(address.protocol) || address.username || address.password
+      || sameBridgeEndpoint(address, new URL(this.#baseUrl))) {
+      throw failure('INTEGRATION_ORIGINAL_PROVIDER_UNAVAILABLE', 'The original native provider address is unavailable or would route back to this bridge.');
+    }
+    return baseUrl;
+  }
+
+  #originalCustomAddress(snapshot, state) {
+    const providerId = state?.providerId ?? snapshot.config.model_provider;
+    const keyPath = `model_providers.${providerId}.base_url`;
+    const owned = state?.fields.find(field => field.keyPath === keyPath);
+    const original = this.#effectiveOriginal(snapshot, keyPath, owned?.original);
+    let address;
+    try { address = new URL(original.value); } catch {}
+    if (!address || !['http:', 'https:'].includes(address.protocol) || sameBridgeEndpoint(address, new URL(this.#baseUrl))) {
+      throw failure('INTEGRATION_ORIGINAL_PROVIDER_UNAVAILABLE', 'The original custom provider address is unavailable or would route back to this bridge.');
+    }
+    return original.value;
+  }
+
+  #nativeCoherent(snapshot, state) {
+    return !state || this.#allMatch(snapshot, state, 'installed') || this.#allMatch(snapshot, state, 'original')
+      || this.#upgradeBaselineMatches(snapshot, state);
+  }
+
+  #nativeProviderReason(provider) {
+    if (!provider || typeof provider !== 'object' || provider.requires_openai_auth !== true) {
+      return 'The existing custom provider must use requires_openai_auth = true.';
+    }
+    if (provider.wire_api !== undefined && provider.wire_api !== 'responses') return 'The existing provider must use the Responses API.';
+    if (Object.keys(provider.http_headers || {}).some(key => key.toLowerCase() === HEADER_NAME.toLowerCase() && key !== HEADER_NAME)) {
+      return 'The provider contains the gateway header under a different letter case.';
+    }
+    return null;
+  }
+
+  #describeNative(snapshot, state) {
+    const providerId = snapshot.config.model_provider ?? 'openai';
+    const candidateId = state?.providerId ?? providerId;
+    const validCandidate = typeof candidateId === 'string' && /^[A-Za-z0-9_-]+$/.test(candidateId)
+      && !['openai', 'ollama', 'lmstudio'].includes(candidateId);
+    const coherent = this.#nativeCoherent(snapshot, state);
+    const higher = this.#higherControls(snapshot, state);
+    const expected = state && this.#desiredFields(state.providerId, state.version);
+    const matchingEndpoint = !state || state.fields.every((field, index) => matches(field.installed, expected[index].installed));
+    const providerReason = this.#nativeProviderReason(snapshot.config.model_providers?.[candidateId]);
+    let nativeReason = null;
+    try { this.#originalNativeAddress(snapshot, state); }
+    catch { nativeReason = '原生模型的原始地址无效或指回本网关，请先检查其原始路由。'; }
+    let customReason = null;
+    try { this.#originalCustomAddress(snapshot, state); }
+    catch { customReason = '自定义提供方的原始地址无效或指回本网关，请先检查其原始路由。'; }
+    let reason = !coherent ? 'Provider fields were edited after installation. Restore refused to overwrite those changes.'
+      : higher ? '更高优先级的配置固定了模型提供方或路由，请先解除覆盖。'
+        : !matchingEndpoint ? 'The gateway address or key changed. Restore the previous connection first.'
+          : !validCandidate ? 'Select an existing custom provider before connecting the gateway.' : providerReason || nativeReason || customReason;
+    const hasNative = state?.version === NATIVE_STATE_VERSION;
+    const allInstalled = hasNative && this.#allMatch(snapshot, state, 'installed');
+    const allOriginal = hasNative && this.#allMatch(snapshot, state, 'original');
+    const effectiveInstalled = allInstalled && state.fields.every(field => matches(fieldAt(snapshot.config, field.keyPath), field.installed));
+    const configured = hasNative && coherent && (allInstalled || allOriginal);
+    const needsUpgrade = !!state && (!hasNative || state.phase === 'upgrading' && !configured);
+    const official = snapshot.config.model_providers?.openai;
+    let chatGPTOverridden = false;
+    if (snapshot.config.chatgpt_base_url != null) {
+      try {
+        const address = new URL(snapshot.config.chatgpt_base_url);
+        chatGPTOverridden = address.protocol !== 'https:' || address.username !== '' || address.password !== ''
+          || !['https://chatgpt.com', 'https://chat.openai.com'].includes(address.origin);
+      } catch { chatGPTOverridden = true; }
+    }
+    const nativeOverridden = snapshot.config.openai_base_url != null || chatGPTOverridden
+      || ['base_url', 'model_catalog_url'].some(key => official?.[key] != null);
+    const nativeRestored = allOriginal && providerId === 'openai';
+    const mode = effectiveInstalled && matchingEndpoint && !providerReason && !nativeReason && !customReason && ['openai', candidateId].includes(providerId) ? 'gateway'
+      : providerId === 'openai' && !nativeOverridden && (!hasNative || allOriginal) ? 'official' : 'other';
+    const canManage = coherent && !higher && validCandidate;
+    const canGateway = !!state && canManage && matchingEndpoint && !providerReason && !nativeReason && !customReason;
+    const canOfficial = !higher && coherent && (hasNative ? !nativeRestored
+      : snapshot.config.openai_base_url == null && !chatGPTOverridden && !['base_url', 'model_catalog_url'].some(key => official?.[key] != null));
+    if (!reason && nativeRestored && nativeOverridden) reason = '原生设置已恢复；原有自定义地址仍然生效。';
+    return { installed: !!configured, configPath: this.#configPath, canInstall: canManage && matchingEndpoint && !providerReason && !nativeReason && !customReason
+      && (!state || ['openai', candidateId].includes(providerId)),
+      needsUpgrade, providerId,
+      ...(reason ? { reason } : {}),
+      routing: { supported: true, mode, providerId, gatewayProviderId: state?.providerId ?? null,
+        canSwitchOfficial: (mode !== 'official' || needsUpgrade) && canOfficial,
+        canSwitchGateway: canGateway && (mode !== 'gateway' || needsUpgrade),
+        nativeThreadsSupported: true, nativeThreadsCovered: effectiveInstalled === true && matchingEndpoint, nativeSettingsRestored: nativeRestored,
+        ...(reason ? { reason } : {}) } };
+  }
+
+  async #prepareNative(snapshot, state) {
+    if (state?.version === NATIVE_STATE_VERSION) return state;
+    const providerId = state?.providerId ?? snapshot.config.model_provider;
+    const desired = this.#desiredFields(providerId, NATIVE_STATE_VERSION);
+    const baselineCount = state && (this.#allMatch(snapshot, state, 'installed') ? state.fields.length
+      : this.#upgradeBaselineMatches(snapshot, state) ? LEGACY_FIELDS.length : 0);
+    const prepared = { version: NATIVE_STATE_VERSION, configPath: this.#configPath, providerId,
+      phase: baselineCount ? 'upgrading' : 'prepared',
+      ...(baselineCount ? { upgradeBaselineCount: baselineCount } : {}),
+      fields: desired.map((field, index) => state?.fields[index] ? clone(state.fields[index])
+        : { ...field, original: fieldAt(snapshot.layer.config, field.keyPath) }) };
+    await this.#writeState(prepared, !state);
+    return prepared;
+  }
+
+  async #finishNative(state) {
+    if (state.phase !== 'installed' || hasOwn(state, 'upgradeBaselineCount')) {
+      state.phase = 'installed'; delete state.upgradeBaselineCount;
+      await this.#writeState(state);
+    }
+  }
+
+  async #applyNative(snapshot, state, mode) {
+    const which = mode === 'gateway' ? 'installed' : 'original';
+    const providerId = mode === 'gateway' ? state.providerId : 'openai';
+    const edits = state.fields.map(field => ({ keyPath: field.keyPath,
+      value: field[which].exists ? field[which].value : null, mergeStrategy: 'replace' }));
+    edits.push({ keyPath: 'model_provider', value: providerId, mergeStrategy: 'replace' });
+    await this.#batchWrite(snapshot, edits);
+    const updated = await this.#readConfig();
+    if (!this.#allMatch(updated, state, which) || fieldAt(updated.layer.config, 'model_provider').value !== providerId
+      || updated.config.model_provider !== providerId || this.#higherControls(updated, state)
+      || which === 'installed' && !state.fields.every(field => matches(fieldAt(updated.config, field.keyPath), field.installed))) {
+      throw failure('INTEGRATION_CONFLICT', 'The selected provider or route is overridden or changed during the switch.');
+    }
+    await this.#finishNative(state);
+    return this.#describeNative(updated, state);
+  }
+
+  async #installNative() {
+    const [snapshot, originalState] = await Promise.all([this.#readConfig(), this.#readState()]);
+    const description = this.#describeNative(snapshot, originalState);
+    if (!description.canInstall) throw failure('INTEGRATION_CONFLICT', description.reason || 'The provider cannot be connected.');
+    if (description.routing.mode === 'gateway' && !description.needsUpgrade) {
+      await this.#finishNative(originalState); return description;
+    }
+    const state = await this.#prepareNative(snapshot, originalState);
+    return this.#applyNative(snapshot, state, 'gateway');
+  }
+
+  async #switchNative(mode) {
+    if (!['official', 'gateway'].includes(mode)) throw failure('INTEGRATION_CONFLICT', 'Select either the official or gateway connection.');
+    const [snapshot, originalState] = await Promise.all([this.#readConfig(), this.#readState()]);
+    const description = this.#describeNative(snapshot, originalState);
+    if (description.routing.mode === mode && !description.needsUpgrade) {
+      if (originalState?.version === NATIVE_STATE_VERSION) await this.#finishNative(originalState);
+      return description;
+    }
+    const available = mode === 'official' ? description.routing.canSwitchOfficial : description.routing.canSwitchGateway;
+    if (!available) throw failure('INTEGRATION_CONFLICT', description.routing.reason || 'The requested connection is unavailable.');
+    if (!originalState) {
+      await this.#batchWrite(snapshot, [{ keyPath: 'model_provider', value: 'openai', mergeStrategy: 'replace' }]);
+      const updated = await this.#readConfig();
+      if ((updated.config.model_provider ?? 'openai') !== 'openai' || this.#higherControls(updated, null)) {
+        throw failure('INTEGRATION_CONFLICT', 'The selected provider is overridden or changed during the switch.');
+      }
+      return this.#describeNative(updated, null);
+    }
+    const state = await this.#prepareNative(snapshot, originalState);
+    return this.#applyNative(snapshot, state, mode);
   }
 
   #routing(snapshot, state, description) {
@@ -308,6 +537,10 @@ export class Integration {
       || Object.keys(provider.http_headers || {}).some(key => key.toLowerCase() === HEADER_NAME.toLowerCase() && key !== HEADER_NAME)) {
       gatewayReason = '已保存的提供方不再符合本网关的认证或协议要求。';
     }
+    if (!gatewayReason) {
+      try { this.#originalCustomAddress(snapshot, state); }
+      catch { gatewayReason = '自定义提供方的原始地址无效或指回本网关，请先检查其原始路由。'; }
+    }
     const mode = providerId === 'openai' && !officialOverridden ? 'official'
       : providerId === gatewayProviderId && !gatewayReason ? 'gateway' : 'other';
     const officialReason = officialOverridden ? '官方提供方包含自定义地址，请先检查其地址配置。' : null;
@@ -321,6 +554,7 @@ export class Integration {
   }
 
   #describe(snapshot, state) {
+    if (this.#nativeBaseUrl) return this.#describeNative(snapshot, state);
     const providerId = snapshot.config?.model_provider;
     const installed = !!state && this.#allMatch(snapshot, state, 'installed');
     const needsUpgrade = !!state && (state.version === 1 || (state.phase === 'upgrading' && !installed));
@@ -342,6 +576,8 @@ export class Integration {
     if (Object.keys(provider.http_headers || {}).some(key => key.toLowerCase() === HEADER_NAME.toLowerCase() && key !== HEADER_NAME)) {
       return refuse('The provider contains the gateway header under a different letter case.');
     }
+    try { this.#originalCustomAddress(snapshot, state); }
+    catch { return refuse('The original custom provider address is unavailable or would route back to this bridge.'); }
     if (state) {
       if (providerId !== state.providerId) return refuse('The selected provider changed after installation. Restore the previous connection first.');
       const desired = this.#desiredFields(state.providerId, state.version);
@@ -384,8 +620,10 @@ export class Integration {
     const validId = typeof state?.providerId === 'string' && /^[A-Za-z0-9_-]+$/.test(state.providerId)
       && !['openai', 'ollama', 'lmstudio'].includes(state.providerId);
     const desired = validId ? this.#desiredFields(state.providerId, state.version) : [];
-    if (![1, STATE_VERSION].includes(state?.version) || typeof state.configPath !== 'string' || !samePath(state.configPath, this.#configPath)
-      || !validId || !['prepared', 'installed', 'restoring', ...(state.version === 2 ? ['upgrading'] : [])].includes(state.phase)
+    if (![1, STATE_VERSION, NATIVE_STATE_VERSION].includes(state?.version) || typeof state.configPath !== 'string' || !samePath(state.configPath, this.#configPath)
+      || !validId || !['prepared', 'installed', 'restoring', ...(state.version >= 2 ? ['upgrading'] : [])].includes(state.phase)
+      || state.version === NATIVE_STATE_VERSION && state.phase === 'upgrading' && ![3, 4].includes(state.upgradeBaselineCount)
+      || state.version === NATIVE_STATE_VERSION && state.phase !== 'upgrading' && hasOwn(state, 'upgradeBaselineCount')
       || !Array.isArray(state.fields) || state.fields.length !== desired.length
       || !state.fields.every((field, index) => field && typeof field === 'object'
         && field.keyPath === desired[index].keyPath

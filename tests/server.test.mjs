@@ -209,6 +209,21 @@ test('the authenticated model-settings GET discovers complete account directorie
   assert.equal(discoveryCalls, 1);
 });
 
+test('the B verification selector refreshes the complete directory with the current client version and exposes only public labels', async t => {
+  const calls = [], models = ['B-gpt-6-astra', 'B-gpt-6.1-sol', 'B-gpt-directory-extra'];
+  const { url, cookie } = await fixture(t, { clientVersion: '0.166.0-alpha.5.1', gateway: {
+    metrics: {}, async refreshBModels(options) {
+      calls.push(options);
+      return models.map(slug => ({ slug, display_name: `Public ${slug}`, base_instructions: 'PRIVATE B INSTRUCTIONS' }));
+    },
+  } });
+  assert.equal((await fetch(`${url}/api/models`)).status, 401); assert.deepEqual(calls, []);
+  const response = await fetch(`${url}/api/models`, { headers: { cookie } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { models: models.map(id => ({ id, name: `Public ${id}` })) });
+  assert.deepEqual(calls, [{ path: '/models?client_version=0.166.0', force: true }]);
+});
+
 test('local client controls use the administrator session and CSRF gate without exposing model credentials', async t => {
   const mutations = [];
   const snapshot = { version: 1, clients: [{ id: 'codebuddy', name: 'CodeBuddy', mode: 'native' }] };
@@ -247,7 +262,11 @@ test('quota API combines every bound provider without replacing the native accou
   let nativeReads = 0, externalReads = 0;
   const native = { A: { status: 'ok', windows: [{ remainingPercent: 25 }] }, B: { status: 'ok', windows: [{ remainingPercent: 90 }] } };
   const external = { CodeBuddy: { status: 'unknown', authenticated: true, identity: 'Employee', windows: [], credits: null },
-    Cursor: { status: 'unknown', authenticated: true, identity: 'Cursor user', windows: [], credits: null } };
+    Cursor: { status: 'unknown', authenticated: true, identity: 'Cursor user', windows: [], credits: null },
+    Bifrost: { status: 'partial', authenticated: true, sources: [
+      { id: 'home', status: 'ok', wallet: { currency: 'CNY', availableMicros: 9_000_000 } },
+      { id: 'office', status: 'unknown', wallet: null },
+    ] } };
   const { url, cookie } = await fixture(t, { accountQuotas: { snapshot: async () => { nativeReads++; return { timeZone: 'America/Los_Angeles', accounts: native }; } },
     providerQuotas: { snapshot: async () => { externalReads++; return { accounts: external }; } } });
   assert.equal((await fetch(`${url}/api/account-quotas`)).status, 401); assert.equal(nativeReads + externalReads, 0);
@@ -280,6 +299,41 @@ test('quota combination clears a changed B binding while awaiting a slower exter
   binding = 'new'; release(); const data = await (await pending).json();
   assert.equal(data.accounts.B.status, 'error'); assert.equal(data.accounts.B.identity, null); assert.deepEqual(data.accounts.B.windows, []);
   assert.equal(data.accounts.Cursor.identity, 'Current Cursor');
+});
+
+test('remote-only nodes expose read-only account quotas through the existing browser session without native integration', async t => {
+  let reads = 0;
+  const remote = { status: 'ok', authenticated: true, sources: [{ id: 'home', identity: 'remote.owner',
+    wallet: { currency: 'CNY', balanceMicros: 10_000_000, reservedMicros: 1_000_000, availableMicros: 9_000_000 } }] };
+  const accountPool = { capabilities: () => ({ clientIntegration: false, userManagement: false }), catalog: () => [],
+    snapshot: async () => ({ accounts: [{ id: 'registered-remote', kind: 'bifrost', enabled: true }], accountTypes: [] }),
+    rows: () => [{ id: 'registered-remote', kind: 'bifrost', enabled: true }] };
+  const { url, cookie } = await fixture(t, { backend: null, gateway: null, integration: null, accountPool,
+    providerQuotas: { snapshot: async () => { reads++; return { accounts: { Bifrost: remote } }; } } });
+  assert.equal((await fetch(`${url}/api/account-quotas`)).status, 401); assert.equal(reads, 0);
+  const response = await fetch(`${url}/api/account-quotas`, { headers: { cookie } });
+  assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('access-control-allow-origin'), null);
+  assert.deepEqual((await response.json()).accounts.Bifrost, remote); assert.equal(reads, 1);
+});
+
+test('quota combination clears old remote identities and wallets if their binding changes while native quotas wait', async t => {
+  let entered, release, binding = 'original';
+  const started = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const { url, cookie } = await fixture(t, {
+    accountQuotas: { snapshot: async () => { await gate; return { accounts: { A: { status: 'ok', windows: [{ remainingPercent: 25 }] } } }; } },
+    providerQuotas: { bindingKey: account => account === 'Bifrost' ? binding : undefined,
+      snapshot: async () => { entered(); return { accounts: { Bifrost: { status: 'ok', authenticated: true, sources: [
+        { id: 'home', identity: 'OLD_REMOTE_PRIVATE_IDENTITY', wallet: { currency: 'CNY', availableMicros: 9_999_999 } },
+      ] } } }; } },
+  });
+  const pending = fetch(`${url}/api/account-quotas`, { headers: { cookie } }); await started;
+  binding = 'replacement'; release();
+  const data = await (await pending).json();
+  assert.equal(data.accounts.Bifrost.status, 'error'); assert.equal(data.accounts.Bifrost.identity, null);
+  assert.deepEqual(data.accounts.Bifrost.sources, []); assert.equal(data.accounts.Bifrost.fetchedAt, null);
+  assert.doesNotMatch(JSON.stringify(data), /OLD_REMOTE_PRIVATE_IDENTITY|9999999/);
+  assert.deepEqual(data.accounts.A.windows, [{ remainingPercent: 25 }]);
 });
 
 test('a client disappearing before the restart acknowledgement cancels the prepared request', async t => {

@@ -23,7 +23,8 @@ test('empty migration preserves the exact invitation and disables the old writer
   const f = await fixture(t); assert.equal(JSON.parse((await f.migrate()).stdout).invitationPreserved, true);
   await assert.rejects(f.old.invite());
   const path = join(f.target, 'client-access.json'), original = await readFile(path);
-  assert.equal((await stat(path)).mode & 0o077, 0); assert.equal(original.includes(f.owner.inviteCode), false);
+  if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o077, 0);
+  assert.equal(original.includes(f.owner.inviteCode), false);
   await assert.rejects(f.migrate()); assert.deepEqual(await readFile(path), original);
   const access = await ClientAccess.open({ path }); t.after(() => access.close());
   const created = await access.register({ username: 'migrated@example.com', password: 'Offline migration password', inviteToken: f.owner.inviteCode });

@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -46,6 +46,7 @@ import { ClientControls } from './client-controls.mjs';
 import { createCodexClientControl } from './clients/codex-control.mjs';
 import { createFileModelControl } from './clients/file-model-control.mjs';
 import { createLocalApps } from './clients/local-apps.mjs';
+import { createCodexNativeEntry } from './codex-native-entry.mjs';
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serviceVersion = await createServiceVersion({ projectDir });
@@ -78,6 +79,7 @@ if (typeof state.gatewayKey !== 'string' || state.gatewayKey.length < 40) throw 
 const saveState = () => writeJson(statePath, state);
 if (!delegation) await saveState();
 const baseUrl = `http://127.0.0.1:${port}/backend-api/codex`;
+const codexNativeEntry = nativeIntegration ? createCodexNativeEntry({ baseUrl, gatewayKey: state.gatewayKey }) : null;
 let usageLedger = null;
 try { usageLedger = await UsageLedger.open({ path: join(stateDir, 'usage.jsonl'), timeZone: 'America/Los_Angeles' }); }
 catch (error) { console.error(`Token statistics unavailable: ${redact(error.message)}`); }
@@ -85,6 +87,7 @@ let backendRpc, configRpc, backend, integration, gateway, clientVersion, account
 let withService, cursorProvider, requestDiagnostics, clientAccess = null, clientService = null, clientAdmin = null, clientBilling = null;
 let paymentRuntime = null, paymentsFault = false, serverRemotes = null, accountPool = null;
 let ownerClientApi = null, clientControls = null;
+let bAuthorizationGeneration = 0;
 const seeds = [];
 const configured = async name => await readJson(join(stateDir, name), null);
 const userEntryConfiguration = await configured('client-gateway.json');
@@ -106,9 +109,17 @@ const sourceAllowed = (channel, model) => accountPool ? accountPool.allows(chann
 try { requestDiagnostics = await RequestDiagnostics.open({ path: join(stateDir, 'request-diagnostics.jsonl') }); }
 catch { console.error('Request diagnostics unavailable; model forwarding remains enabled.'); }
 function authorizationVersion(account) {
-  return account === 'CodeBuddy' ? codeBuddyService?.authorizationVersion : account === 'Cursor' ? cursorService?.authorizationVersion
+  return account === 'B' ? bAuthorizationVersion()
+    : account === 'CodeBuddy' ? codeBuddyService?.authorizationVersion : account === 'Cursor' ? cursorService?.authorizationVersion
     : account === 'Bifrost' ? serverRemotes?.generation ?? null : account === 'Claude' ? claudeAuthorizationVersion : null;
 }
+function bAuthorizationVersion() {
+  const pinned = state.pinnedAccount;
+  return state.enabled && pinned ? createHash('sha256').update(JSON.stringify([
+    pinned.accountId, pinned.userId, pinned.email, bAuthorizationGeneration,
+  ])).digest('hex') : null;
+}
+modelPolicy.setAuthorizationVersionGetter('B', bAuthorizationVersion);
 async function recordDiagnostic(record) {
   if (record.terminalVerified === true || ['failed', 'interrupted', 'incomplete'].includes(record.status)
       && ['upstream_request', 'upstream_response', 'stream', 'downstream'].includes(record.failureStage)) {
@@ -147,15 +158,18 @@ const codeBuddyService = !delegation && hasSlot('CodeBuddy') ? await startCodeBu
 const gatedCodeBuddy = gatedAccountService(codeBuddyService, () => sourceAllowed('CodeBuddy'));
 const gatedCursor = gatedAccountService(cursorService, () => sourceAllowed('Cursor'));
 const modelDiscovery = new ModelDiscovery({ modelPolicy, codeBuddyService: gatedCodeBuddy, cursorService: gatedCursor });
-const providerQuotas = nativeIntegration ? new ProviderQuotas({ codeBuddyService: gatedCodeBuddy, cursorService: gatedCursor }) : null;
+const providerQuotas = new ProviderQuotas({ codeBuddyService: gatedCodeBuddy, cursorService: gatedCursor, getServerRemotes: () => serverRemotes });
 const knownClientModels = () => modelPolicy.snapshot().models.filter(model => ['B', 'CodeBuddy', 'Cursor', 'Bifrost', ...(macClaude ? ['Claude'] : [])].includes(model.channel));
-const clientModels = () => knownClientModels().filter(model => accountStore?.snapshot().accounts.some(account => model.channel === 'Bifrost'
+const clientModels = () => {
+  const models = knownClientModels().filter(model => accountStore?.snapshot().accounts.some(account => model.channel === 'Bifrost'
     ? account.kind === 'bifrost' && model.id.startsWith(`remote/${account.binding.sourceId}/`) : account.binding.slot === model.channel))
-  .map(model => ({ id: model.id, name: model.name, channel: model.channel,
+  .map(model => ({ id: model.id, name: model.name, channel: model.channel, ...(Number.isInteger(model.priority) ? { priority: model.priority } : {}),
     enabled: model.enabled !== false && sourceAllowed(model.channel, model.id) && !modelPolicy.snapshot().disabledModels.includes(model.id), available: model.available,
     capabilities: model.capabilities,
     protocols: model.protocols ?? (model.channel === 'Claude' ? ['chat-completions', 'messages']
       : ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])]) }));
+  return accountPool ? accountPool.presentModels(models) : models;
+};
 if (userManagementRequested) try {
   clientAccess = await ClientAccess.open({ path: join(stateDir, 'client-access.json'), allowedModelIds: () => knownClientModels().map(model => model.id),
     ...(['darwin', 'win32'].includes(process.platform) ? { keyProtector: new ClientKeyProtector({ path: join(stateDir, 'client-key-protection.json') }) } : {}),
@@ -182,16 +196,21 @@ if (!delegation) {
     clientVersion = versionOutput.match(/codex-cli\s+(\S+)/)?.[1];
     if (!clientVersion) throw new Error('无法识别官方 Codex CLI 的版本。');
     backendRpc = hasSlot('B') ? new CodexRpc({ binary, home: bHome, cwd: bHome, isolated: true }) : null;
+    backendRpc?.on('notification', method => {
+      if (method === 'account/updated' || method === 'account/login/completed') bAuthorizationGeneration++;
+    });
+    backendRpc?.on('stopped', () => { bAuthorizationGeneration++; });
     configRpc = new CodexRpc({ binary, home: aHome, cwd: homedir() });
     backend = backendRpc ? new SubscriptionBackend({ rpc: backendRpc, state, saveState }) : null;
     accountQuotas = backendRpc ? new AccountQuotas({ accountARpc: configRpc, accountBRpc: backendRpc, state }) : null;
     integration = new Integration({ rpc: configRpc, configPath: join(aHome, 'config.toml'),
-      statePath: join(stateDir, 'integration.json'), baseUrl, gatewayKey: state.gatewayKey });
+      statePath: join(stateDir, 'integration.json'), baseUrl, gatewayKey: state.gatewayKey,
+      nativeBaseUrl: codexNativeEntry.baseUrl });
   }
   gateway = new Gateway({ backend, gatewayKey: state.gatewayKey,
-    getAProvider: () => {
+    getAProvider: ({ native = false } = {}) => {
       if (!integration) throw new BridgeError('当前网关未装配本机 Codex 官方连接。', 503, 'node_capability_unavailable');
-      return integration.originalProvider();
+      return native ? integration.originalNativeProvider() : integration.originalProvider();
     },
     codeBuddyProvider: codeBuddyService ? new CodeBuddyResponsesProvider({ provider: codeBuddyService.provider }) : null,
     codeBuddyEnabled: () => codeBuddyService?.enabled === true && sourceAllowed('CodeBuddy'),
@@ -201,6 +220,9 @@ if (!delegation) {
     cursorProvider, cursorEnabled: () => cursorService?.enabled === true && sourceAllowed('Cursor'), getCursorModels: () => cursorService?.getModels() ?? [],
     getCursorAuthorizationVersion: () => cursorService?.authorizationVersion,
     sourceEnabled: (channel, model) => channel === 'A' ? nativeIntegration && sourceAllowed(channel, model) : sourceAllowed(channel, model),
+    presentCatalog: data => accountPool ? accountPool.presentCodexCatalog(data) : data,
+    getBCatalogPath: () => clientVersion ? `/models?client_version=${encodeURIComponent(clientVersion.split('-')[0])}` : '/models',
+    getBAuthorizationVersion: bAuthorizationVersion,
     isDraining: () => serviceControl?.draining === true,
     onDiagnostic: recordDiagnostic, getAuthorizationVersion: authorizationVersion,
     onUsage: record => {
@@ -208,7 +230,7 @@ if (!delegation) {
       return usageLedger.record(record);
     } });
   // Prime B metadata without delaying A traffic or the local management page.
-  if (nativeIntegration) void gateway.readBCatalog(`/models?client_version=${encodeURIComponent(clientVersion)}`).catch(() => {});
+  if (nativeIntegration) void gateway.refreshBModels().catch(() => {});
 }
 const verificationPath = join(stateDir, 'verification.json');
 withService = nativeIntegration && ['With', 'CodeBuddy', 'Claude'].some(hasSlot) ? await startMessagesService({ stateDir, reservedPorts: [port],
@@ -247,7 +269,7 @@ if (accountStore) {
       if (macClaude) {
         await macClaude.refresh();
       }
-      const [discovered] = await Promise.all([modelDiscovery.refresh(), serverRemotes?.refresh()]); await gateway?.observeRemotes();
+      const discovered = await refreshLocalModels({ forceB: true });
       return { discovery: { ...Object.fromEntries(Object.entries(discovered.discovery ?? {}).filter(([kind]) => hasSlot(kind))),
         ...(macClaude ? { Claude: { state: !sourceAllowed('Claude') ? 'disabled' : macClaude.status().available ? 'ready' : 'error', count: macClaude.models().length } } : {}) } };
     },
@@ -270,9 +292,12 @@ const localModels = () => {
       available: allowed.available === true && model.available === true && (model.channel !== 'B' || state.enabled === true && Boolean(state.pinnedAccount)) }] : [];
   });
 };
-async function refreshLocalModels() {
-  await Promise.all([modelDiscovery.refresh(), serverRemotes?.refresh()]);
+async function refreshLocalModels({ forceB = false } = {}) {
+  const [discovered] = await Promise.all([modelDiscovery.refresh(), serverRemotes?.refresh(),
+    nativeIntegration ? gateway?.refreshBModels({ force: forceB }).catch(() => {}) : null]);
   await gateway?.observeRemotes();
+  return { discovery: { ...discovered.discovery,
+    ...(nativeIntegration && gateway ? { B: structuredClone(gateway.bModelDiscovery) } : {}) } };
 }
 if (nativeIntegration) {
   ownerClientApi = createOwnerClientApi({ gatewayKey: state.gatewayKey, getModels: localModels,
@@ -290,7 +315,8 @@ if (nativeIntegration) {
       { id: 'claude', name: 'Claude', inspect: async () => ({ mode: 'manual', reason: '远端虚拟机的 Claude 需在所在电脑管理；此入口不修改虚拟机配置。' }) },
     ];
     clientControls = await ClientControls.open({ path: join(stateDir, 'client-controls.json'), apps: createLocalApps(),
-      adapters: [createCodexClientControl({ integration }), ...modelControls, ...manual], getModels: localModels, refreshModels: refreshLocalModels });
+      adapters: [createCodexClientControl({ integration }), ...modelControls, ...manual], getModels: localModels,
+      refreshModels: () => refreshLocalModels({ forceB: true }) });
   } catch { console.error('Local client controls unavailable; existing model routing remains enabled. Check the private client management state.'); }
 }
 const sourceCatalogTimer = delegation ? null : setInterval(() => {
@@ -307,7 +333,7 @@ serviceControl = createServiceControl({ stateDir, projectDir, version: serviceVe
 const server = delegation ? createMagpieDelegationServer({ gatewayKey: state.gatewayKey, baseUrl }) :
   createBridgeServer({ backend, gateway, integration, state, baseUrl,
   usageLedger, accountQuotas, providerQuotas, requestDiagnostics, serviceControl, modelPolicy, modelDiscovery, cursorService, cursorProvider, clientAdmin, accountPool,
-  ownerClientApi, clientControls,
+  ownerClientApi, clientControls, codexNativeEntry,
   getWithStatus: () => withService?.status(),
   codeBuddyService,
   publicDir: join(projectDir, 'public'),

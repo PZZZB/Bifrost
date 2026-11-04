@@ -98,7 +98,8 @@ export class ClientStateCodec {
     };
     tools(copy.tools);
     if (Array.isArray(copy.input)) for (const item of copy.input) {
-      if (!['message', 'reasoning', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', undefined].includes(item?.type)
+      if (!['message', 'reasoning', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output',
+        'compaction', 'context_compaction', 'compaction_trigger', 'configuration_update', undefined].includes(item?.type)
         || item?.type === undefined && !['system', 'developer', 'user', 'assistant'].includes(item?.role)) {
         throw new BridgeError('此入口不支持上游消息、文件或容器资源引用。', 400, 'client_resource_reference_unsupported');
       }

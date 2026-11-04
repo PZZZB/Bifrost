@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rename, rm, stat, utimes, writeFile, access }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ModelPolicy } from '../src/model-policy.mjs';
+import { appendCursorModels } from '../src/models.mjs';
 import { BridgeError } from '../src/storage.mjs';
 
 const A = 'gpt-original-fixture', B = 'B-gpt-6-astra', CB = 'claude-codebuddy-opus-5-5';
@@ -343,6 +344,20 @@ test('client alias summaries and later name-only observations cannot replace aut
   const row = policy.snapshot().models[0];
   assert.equal(row.capabilities.images.support, true); assert.equal(row.capabilities.contextWindow.tokens, 500000);
   assert.equal(row.compatibility.mode, 'project-rules');
+});
+
+test('allowing unknown Cursor image inputs never turns compatibility defaults into a model declaration or verification', async t => {
+  const { policy } = await fixture(t), source = { id: 'grok-4.7', displayName: 'Grok 4.7', parameters: [], variants: [] };
+  const id = 'Cursor-grok-4.7';
+  policy.setAuthorizationVersionGetter('Cursor', () => 1);
+  await policy.observe({ models: [{ ...source, id, name: source.displayName, available: true }] },
+    'Cursor', { authorizationVersion: 1, promptMode: 'project-rules' });
+  const catalog = appendCursorModels({ models: [] }, [source]);
+  assert.equal(Object.hasOwn(catalog.models[0], 'input_modalities'), false);
+  await policy.observe(catalog);
+  const row = policy.snapshot().models.find(model => model.id === id);
+  assert.equal(row.capabilities.images.support, null); assert.equal(row.capabilities.images.source, 'unknown');
+  assert.equal(row.verification.state, 'unverified'); assert.equal(row.enabled, true);
 });
 
 test('Claude call observations follow the authenticated account, accumulate features and clear stale context', async t => {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtemp, readFile, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -205,12 +205,29 @@ test('global login limits bound platform exchanges, including failed registratio
   assert.equal(response.status, 429); assert.equal(response.headers['retry-after'], '60'); assert.equal(exchanges, 30);
 });
 
-test('private store permission errors fail closed for registered API keys', async t => {
+test('private store corruption and POSIX permission errors fail closed for registered API keys', async t => {
   const { store, login, send } = await fixture(t);
   const alice = (await login('alice-code-123', (await store.invite()).inviteCode)).data;
-  await chmod(store.path, 0o644);
-  const response = await send('/v1/models', { token: alice.apiKey });
-  assert.equal(response.status, 503);
-  assert.ok(!JSON.stringify(response.data).includes(store.directory));
-  await chmod(store.path, 0o600);
+  if (process.platform !== 'win32') {
+    try {
+      await chmod(store.path, 0o644);
+      const response = await send('/v1/models', { token: alice.apiKey });
+      assert.equal(response.status, 503);
+      assert.ok(!JSON.stringify(response.data).includes(store.directory));
+      assert.ok(!JSON.stringify(response.data).includes(JSON.stringify(store.directory).slice(1, -1)));
+    } finally { await chmod(store.path, 0o600); }
+  }
+  const original = await readFile(store.path);
+  try {
+    for (const invalid of ['{broken', JSON.stringify({ version: 999, accounts: [], invites: [] })]) {
+      await writeFile(store.path, invalid, { mode: 0o600 });
+      const response = await send('/v1/models', { token: alice.apiKey });
+      assert.equal(response.status, 503);
+      for (const value of [store.directory, alice.apiKey, alice.sessionToken]) {
+        assert.ok(!JSON.stringify(response.data).includes(value));
+        assert.ok(!JSON.stringify(response.data).includes(JSON.stringify(value).slice(1, -1)));
+      }
+    }
+  } finally { await writeFile(store.path, original, { mode: 0o600 }); }
+  assert.equal((await send('/v1/models', { token: alice.apiKey })).status, 200);
 });

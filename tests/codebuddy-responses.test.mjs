@@ -8,6 +8,8 @@ const model = CODEBUDDY_MODEL.id;
 const actualModel = 'employee-opus-55';
 const base = { model, stream: true, store: false, input: [{ role: 'user', content: '检查项目。' }],
   reasoning: { effort: 'high', summary: 'auto' }, include: ['reasoning.encrypted_content'] };
+const optionalIncludes = ['reasoning.encrypted_content', 'output.encrypted_content', 'web_search_call.action.sources', 'web_search_call.results',
+  'code_interpreter_call.outputs', 'computer_call_output.output.image_url', 'file_search_call.results', 'message.input_image.image_url'];
 const realUsage = { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
   prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 5 }, completion_tokens_details: { reasoning_tokens: 7 } };
 const fn = { type: 'function', name: 'read_file', description: 'Read a client file.', strict: false,
@@ -96,14 +98,83 @@ test('JSON response preserves actual thinking through provider restart and full-
   assert.equal((await second.json()).output.at(-1).content[0].text, '第二回合');
 });
 
+for (const stream of [false, true]) for (const include of [null, ['output.encrypted_content'], optionalIncludes]) {
+  test(`CodeBuddy ${stream ? 'SSE' : 'JSON'} accepts ${include === null ? 'null' : include.length === 1 ? 'encrypted output selector' : 'optional selectors'} without losing images or a client tool turn`, async () => {
+    const { client, request } = fixture();
+    client.respond = ({ body }) => source([chunk({ reasoning_content: 'PRIVATE_INCLUDE_TOOL_STATE', extra_fields: { checkpoint: 'include-turn' } }),
+      chunk({ tool_calls: [{ index: 0, id: 'include_tool_call', type: 'function',
+        function: { name: body.tools[0].function.name, arguments: '{"path":"fixture.txt"}' } }] }),
+      chunk({}, 'tool_calls'), { choices: [], usage: realUsage }, '[DONE]']);
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'Read the file and this image.' },
+      { type: 'input_image', image_url: `data:image/png;base64,${png}` }] }];
+    const body = { ...base, stream, include, tools: [fn], input }, before = structuredClone(body);
+    const firstResponse = await request(body); assert.equal(firstResponse.status, 200);
+    const first = stream ? completion(await events(firstResponse)).response : await firstResponse.json();
+    const call = first.output.find(item => item.type === 'function_call');
+    assert.equal(call.name, fn.name); assert.equal(call.call_id, 'include_tool_call');
+    assert.deepEqual(JSON.parse(call.arguments), { path: 'fixture.txt' });
+    assert.deepEqual(first.tools, [fn]);
+    assert.ok(first.output.every(item => ['reasoning', 'function_call'].includes(item.type)), 'Selectors must not fabricate hosted outputs.');
+    assert.equal(client.calls[0].body.include, undefined);
+    const firstUser = client.calls[0].body.messages.find(message => message.role === 'user');
+    assert.deepEqual(firstUser.content.map(part => part.type), ['text', 'image_url']);
+    assert.equal(firstUser.content[0].text, 'Read the file and this image.');
+    assert.equal(firstUser.content[1].image_url.url, `data:image/png;base64,${png}`);
+    assert.deepEqual(body, before, 'Optional selector handling must not mutate the original input.');
+
+    client.respond = () => answer('Tool result accepted.');
+    const followResponse = await request({ ...body, input: [...input, ...first.output,
+      { type: 'function_call_output', call_id: call.call_id, output: [{ type: 'input_text', text: 'EXACT_CLIENT_FILE_OUTPUT' },
+        { type: 'input_image', image_url: `data:image/png;base64,${png}` }] }] });
+    assert.equal(followResponse.status, 200);
+    const follow = stream ? completion(await events(followResponse)).response : await followResponse.json();
+    assert.equal(follow.status, 'completed');
+    assert.equal(follow.output.findLast(item => item.type === 'message').content[0].text, 'Tool result accepted.');
+    assert.equal(client.calls.length, 2); assert.equal(client.calls[1].body.include, undefined);
+    const replay = client.calls[1].body.messages.find(message => message.role === 'assistant');
+    assert.equal(replay.reasoning, 'PRIVATE_INCLUDE_TOOL_STATE');
+    assert.deepEqual(replay.extra_fields, { checkpoint: 'include-turn' });
+    const tool = client.calls[1].body.messages.find(message => message.role === 'tool');
+    assert.equal(tool.tool_call_id, call.call_id); assert.equal(tool.content[0].text, 'EXACT_CLIENT_FILE_OUTPUT');
+    assert.equal(tool.content[1].image_url.url, `data:image/png;base64,${png}`);
+    assert.equal(follow.usage.total_tokens, realUsage.total_tokens);
+    const serialized = JSON.stringify(follow);
+    assert.doesNotMatch(serialized, /PRIVATE_INCLUDE_TOOL_STATE|"sources"\s*:/);
+    for (const part of follow.output.flatMap(item => item.content ?? [])) {
+      if (part.logprobs !== undefined && part.logprobs !== null) assert.deepEqual(part.logprobs, [], 'The schema may contain an empty list, never fabricated token scores.');
+    }
+  });
+}
+
+test('invalid CodeBuddy include types and private unknown values fail before account metadata or transport', async () => {
+  const { client, request } = fixture();
+  for (const include of [17, {}, 'reasoning.encrypted_content', [null], [true], [{ token: 'PRIVATE_INCLUDE_VALUE' }],
+    ['PRIVATE_INCLUDE_VALUE'], ['reasoning.encrypted_content', 'PRIVATE_INCLUDE_VALUE']]) {
+    const response = await request({ ...base, include }); assert.equal(response.status, 400);
+    const body = await response.json(); assert.equal(body.error.param, 'include');
+    assert.doesNotMatch(JSON.stringify(body), /PRIVATE_INCLUDE_VALUE/);
+  }
+  assert.equal(client.reads, 0); assert.equal(client.calls.length, 0);
+});
+
+test('CodeBuddy rejects requested logprobs with a specific explanation before account metadata or transport', async () => {
+  const { client, request } = fixture();
+  const response = await request({ ...base, include: ['message.output_text.logprobs'] });
+  assert.equal(response.status, 400); const body = await response.json();
+  assert.equal(body.error.param, 'include'); assert.match(body.error.message, /logprobs/);
+  assert.notEqual(body.error.message, '不支持请求的 include 字段。');
+  assert.equal(client.reads, 0); assert.equal(client.calls.length, 0);
+});
+
 test('Responses generic models use dynamic account effort metadata and never invent default reasoning controls', async () => {
   const { client, request } = fixture();
   client.modelCatalog = async () => [{ id: 'gpt-6-astra', name: 'GPT-6-Astra', supportsToolCall: true, supportsImages: false,
     supportsReasoning: true, reasoning: { supportedEfforts: ['low', 'max'], summary: 'auto' } }];
-  const body = { model: 'CodeBuddy-gpt-6-astra', stream: false, input: 'Hello.' };
+  const body = { model: 'CodeBuddy-gpt-6-astra', stream: false, input: 'Hello.', include: optionalIncludes };
   const response = await request(body), json = await response.json();
   assert.equal(response.status, 200); assert.equal(json.model, body.model); assert.deepEqual(json.reasoning, {});
   assert.equal(response.bridgeModel, 'gpt-6-astra'); assert.equal(client.calls[0].body.model, 'gpt-6-astra');
+  assert.equal(Object.hasOwn(client.calls[0].body, 'include'), false);
   assert.equal(Object.hasOwn(client.calls[0].body, 'reasoning_effort'), false); assert.equal(Object.hasOwn(client.calls[0].body, 'reasoning_summary'), false);
   const explicit = await request({ ...body, reasoning: { effort: 'max', summary: 'none' } });
   assert.equal(explicit.status, 200); await explicit.json(); assert.equal(client.calls[1].body.reasoning_effort, 'max');

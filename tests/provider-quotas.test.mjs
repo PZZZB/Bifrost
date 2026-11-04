@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ProviderQuotas } from '../src/provider-quotas.mjs';
+import { normalizeRemoteAccount, remoteQuotaCard, bifrostQuotaSnapshot } from '../src/bifrost-quotas.mjs';
 
 const epoch = Date.UTC(2026, 9, 23, 0, 0);
 const codeBuddy = () => ({ provider: { authenticated: true, username: 'employee.user',
@@ -26,7 +27,7 @@ test('bound provider cards retain authentication and labels without inventing ba
   assert.equal(snapshot.accounts.CodeBuddy.identity, 'employee.user');
   assert.equal(snapshot.accounts.Cursor.identity, 'person@example.test');
   assert.equal(snapshot.accounts.Cursor.planType, 'Teams（未核实）');
-  for (const card of Object.values(snapshot.accounts)) {
+  for (const card of ['CodeBuddy', 'Cursor'].map(account => snapshot.accounts[account])) {
     assert.equal(card.status, 'unknown'); assert.equal(card.authenticated, true);
     assert.deepEqual(card.windows, []); assert.equal(card.credits, null); assert.equal(card.spendControlReached, null);
     assert.equal(card.fetchedAt, new Date(epoch).toISOString()); assert.equal(card.error, null);
@@ -34,6 +35,8 @@ test('bound provider cards retain authentication and labels without inventing ba
     assert.equal(url.username, ''); assert.equal(url.password, ''); assert.ok(card.notice);
   }
   assert.equal(snapshot.accounts.CodeBuddy.planType, null);
+  assert.equal(snapshot.accounts.Bifrost.status, 'not_connected'); assert.equal(snapshot.accounts.Bifrost.authenticated, false);
+  assert.deepEqual(snapshot.accounts.Bifrost.sources, []);
   assert.deepEqual(f.calls, { CodeBuddy: 1, Cursor: 1 });
   await f.quotas.close();
 });
@@ -42,12 +45,14 @@ test('unbound, missing and malformed accounts stay unknown or error rather than 
   const f = fixture({ codeBuddyStatus: async () => ({ provider: { authenticated: false, username: 'old user' } }),
     cursorStatus: async () => ({ authReady: false, profile: { email: 'old@example.test' }, plan: { declared: 'Teams' } }) });
   const snapshot = await f.quotas.snapshot();
-  for (const card of Object.values(snapshot.accounts)) {
+  for (const card of ['CodeBuddy', 'Cursor'].map(account => snapshot.accounts[account])) {
     assert.equal(card.authenticated, false); assert.equal(card.identity, null); assert.equal(card.planType, null);
     assert.equal(card.status, 'unknown'); assert.deepEqual(card.windows, []); assert.equal(card.credits, null);
   }
+  assert.equal(snapshot.accounts.Bifrost.status, 'not_connected'); assert.deepEqual(snapshot.accounts.Bifrost.sources, []);
   const empty = new ProviderQuotas(), missing = await empty.snapshot();
-  assert.ok(Object.values(missing.accounts).every(card => card.authenticated === false && card.status === 'unknown'));
+  assert.ok(['CodeBuddy', 'Cursor'].every(account => missing.accounts[account].authenticated === false && missing.accounts[account].status === 'unknown'));
+  assert.equal(missing.accounts.Bifrost.status, 'not_connected'); assert.equal(missing.accounts.Bifrost.authenticated, false);
   const broken = fixture({ cursorStatus: async () => ({}) });
   assert.equal((await broken.quotas.snapshot()).accounts.Cursor.status, 'error');
   await Promise.all([f.quotas.close(), empty.close(), broken.quotas.close()]);
@@ -121,4 +126,108 @@ test('close cancels bounded reads and ignores later metadata without starting an
   waiting.resolve(cursor());
   const closed = await f.quotas.snapshot(); assert.equal(closed.accounts.Cursor.status, 'error');
   assert.deepEqual(f.calls, { CodeBuddy: 1, Cursor: 1 });
+});
+
+function remoteCard(identity = 'remote.owner', id = 'home') {
+  return normalizeRemoteAccount({ object: 'account', account: { id: '91111111-1111-4111-8111-111111111111', username: identity },
+    key: { id: '92222222-2222-4222-8222-222222222222', expiresAt: null },
+    billing: { currency: 'CNY', enforceBalance: true, balanceMicros: 25_000_000, reservedMicros: 2_000_000, availableMicros: 23_000_000,
+      tokenLimit: 1000, usedTokens: 100, reservedTokens: 50, remainingTokens: 850 } }, { id, fetchedAt: new Date(epoch).toISOString() });
+}
+
+test('manual Bifrost balance reads coalesce and cache detached source cards without a scheduled refresh', async () => {
+  const waiting = deferred(); let reads = 0;
+  const remote = { generation: 'one', accountQuotas: async () => { reads++; return waiting.promise; } };
+  const f = fixture({ serverRemotes: remote });
+  try {
+    const first = f.quotas.snapshot(), second = f.quotas.snapshot();
+    waiting.resolve(bifrostQuotaSnapshot([remoteCard()]));
+    const [a, b] = await Promise.all([first, second]);
+    assert.equal(reads, 1); assert.equal(a.accounts.Bifrost.status, 'ok');
+    assert.equal(a.accounts.Bifrost.sources[0].wallet.availableMicros, 23_000_000);
+    a.accounts.Bifrost.sources[0].wallet.availableMicros = 0;
+    assert.equal(b.accounts.Bifrost.sources[0].wallet.availableMicros, 23_000_000);
+    f.advance(29_999); const cached = await f.quotas.snapshot();
+    assert.equal(reads, 1); assert.equal(cached.accounts.Bifrost.sources[0].wallet.availableMicros, 23_000_000);
+    f.advance(1); await new Promise(resolve => setImmediate(resolve)); assert.equal(reads, 1);
+    await f.quotas.snapshot(); assert.equal(reads, 2);
+    f.advance(3_600_000); await new Promise(resolve => setImmediate(resolve)); assert.equal(reads, 2);
+  } finally { await f.quotas.close(); }
+});
+
+test('a partial Bifrost source result keeps its valid wallet separate from unsupported sources and existing providers', async () => {
+  const remote = { generation: 'one', accountQuotas: async () => ({
+    sources: [remoteCard(), remoteQuotaCard('office', { code: 'unsupported', fetchedAt: new Date(epoch).toISOString() })],
+    apiKey: 'PRIVATE_REMOTE_KEY', error: 'PRIVATE_REMOTE_ERROR', wallet: { balanceMicros: 999_999_999 },
+  }) };
+  const f = fixture({ serverRemotes: remote });
+  try {
+    const snapshot = await f.quotas.snapshot(), remoteSnapshot = snapshot.accounts.Bifrost;
+    assert.equal(remoteSnapshot.status, 'partial'); assert.equal(remoteSnapshot.sources.length, 2);
+    assert.equal(remoteSnapshot.sources.find(source => source.id === 'home').wallet.availableMicros, 23_000_000);
+    assert.equal(remoteSnapshot.sources.find(source => source.id === 'office').wallet, null);
+    assert.equal(Object.hasOwn(remoteSnapshot, 'wallet'), false); assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_/);
+    assert.equal(snapshot.accounts.Cursor.identity, 'person@example.test'); assert.equal(snapshot.accounts.CodeBuddy.identity, 'employee.user');
+  } finally { await f.quotas.close(); }
+});
+
+test('late results from a replaced Bifrost authorization cannot repopulate the new wallet cache', async () => {
+  const waiting = deferred(), started = deferred(); let oldReads = 0, newReads = 0;
+  let remote = { generation: 'old-key', accountQuotas: async () => { oldReads++; started.resolve(); return waiting.promise; } };
+  const f = fixture({ getServerRemotes: () => remote });
+  try {
+    const old = f.quotas.snapshot(); await started.promise;
+    remote = { generation: 'new-key', accountQuotas: async () => { newReads++; return { sources: [remoteCard('new.owner')] }; } };
+    const fresh = await f.quotas.snapshot();
+    assert.equal(fresh.accounts.Bifrost.sources[0].identity, 'new.owner');
+    waiting.resolve({ sources: [remoteCard('OLD_PRIVATE_OWNER')] });
+    const stale = await old;
+    assert.equal(stale.accounts.Bifrost.status, 'error'); assert.deepEqual(stale.accounts.Bifrost.sources, []);
+    assert.doesNotMatch(JSON.stringify(stale), /OLD_PRIVATE_OWNER|25000000|23000000/);
+    assert.equal((await f.quotas.snapshot()).accounts.Bifrost.sources[0].identity, 'new.owner');
+    assert.equal(oldReads, 1); assert.equal(newReads, 1);
+  } finally { waiting.resolve({ sources: [] }); await f.quotas.close(); }
+});
+
+test('a Bifrost binding closing while another provider waits removes already-read source balances', async () => {
+  const waiting = deferred(), read = deferred(); let binding = 'enabled';
+  const remote = { quotaBindingKey: () => binding, accountQuotas: async () => { read.resolve(); return { sources: [remoteCard('OLD_REMOTE_OWNER')] }; } };
+  const f = fixture({ serverRemotes: remote, cursorStatus: () => waiting.promise });
+  try {
+    const pending = f.quotas.snapshot(); await read.promise; await new Promise(resolve => setImmediate(resolve));
+    binding = 'closed'; waiting.resolve(cursor());
+    const snapshot = await pending;
+    assert.equal(snapshot.accounts.Bifrost.status, 'error'); assert.deepEqual(snapshot.accounts.Bifrost.sources, []);
+    assert.doesNotMatch(JSON.stringify(snapshot), /OLD_REMOTE_OWNER|25000000|23000000/);
+    assert.equal(snapshot.accounts.Cursor.identity, 'person@example.test');
+  } finally { waiting.resolve(cursor()); await f.quotas.close(); }
+});
+
+test('remote timeout, malformed metadata and rejection retain other providers without publishing stale or raw financial values', async () => {
+  for (const operation of [() => new Promise(() => {}), async () => { throw new Error('PRIVATE_REMOTE_EXCEPTION'); },
+    async () => ({ sources: [{ ...remoteCard(), wallet: { ...remoteCard().wallet, availableMicros: 99 } }] }), async () => ({})]) {
+    let signal;
+    const remote = { generation: 'one', accountQuotas: async options => { signal = options.signal; return operation(); } };
+    const f = fixture({ serverRemotes: remote, timeoutMs: 10 });
+    try {
+      const snapshot = await f.quotas.snapshot();
+      assert.equal(snapshot.accounts.Bifrost.status, 'error'); assert.deepEqual(snapshot.accounts.Bifrost.sources, []);
+      assert.equal(snapshot.accounts.Cursor.authenticated, true); assert.equal(snapshot.accounts.CodeBuddy.authenticated, true);
+      assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_REMOTE_EXCEPTION|25000000|23000000|remote\.owner/);
+      assert.ok(signal instanceof AbortSignal);
+    } finally { await f.quotas.close(); }
+  }
+});
+
+test('close aborts a pending remote balance read and late completion never returns its identity or money', async () => {
+  const waiting = deferred(), started = deferred(); let reads = 0, signal;
+  const remote = { generation: 'one', accountQuotas: async options => { signal = options.signal; reads++; started.resolve(); return waiting.promise; } };
+  const f = fixture({ serverRemotes: remote });
+  const pending = f.quotas.snapshot(); await started.promise; await f.quotas.close();
+  assert.equal(signal.aborted, true);
+  waiting.resolve({ sources: [remoteCard('OLD_REMOTE_OWNER')] });
+  const snapshot = await pending;
+  assert.equal(snapshot.accounts.Bifrost.status, 'error'); assert.deepEqual(snapshot.accounts.Bifrost.sources, []);
+  assert.doesNotMatch(JSON.stringify(snapshot), /OLD_REMOTE_OWNER|25000000|23000000/);
+  assert.equal((await f.quotas.snapshot()).accounts.Bifrost.status, 'error'); assert.equal(reads, 1);
 });

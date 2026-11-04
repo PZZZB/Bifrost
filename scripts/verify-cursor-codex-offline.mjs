@@ -13,6 +13,7 @@ import { Gateway } from '../src/gateway.mjs';
 import { CursorResponsesProvider, CURSOR_RESPONSES_STATE_PREFIX } from '../src/cursor-responses.mjs';
 import { CURSOR_MODELS, resolveCursorModel } from '../src/cursor-service.mjs';
 import { appendCursorModels } from '../src/models.mjs';
+import { CodexRpc } from '../src/rpc.mjs';
 import { redact } from '../src/storage.mjs';
 
 // Only the native Codex executable is real. The SDK, account, models, run and
@@ -29,6 +30,7 @@ const argument = (flag, fallback) => {
 const binary = argument('--binary', process.env.CODEX_BINARY || 'codex');
 const requestedModel = argument('--model', CURSOR_MODELS[0].id);
 const syntheticInternalMetadata = process.argv.includes('--internal-metadata');
+const withImage = process.argv.includes('--with-image');
 const promptMode = argument('--prompt-mode', 'project-rules');
 if (!['project-rules', 'system'].includes(promptMode)) throw new Error('--prompt-mode must be project-rules or system.');
 const selectedModel = resolveCursorModel(requestedModel);
@@ -41,10 +43,32 @@ await mkdir(codexHome, { recursive: true, mode: 0o700 });
 const expected = `bifrost-cursor-offline-tool-${randomBytes(16).toString('hex')}`;
 const proofPath = join(work, 'bridge-proof.txt');
 await writeFile(proofPath, expected + '\n', { mode: 0o600 });
+const imagePath = join(work, 'fixture-image.png');
+function pngChunk(type, bytes) {
+  const content = Buffer.concat([Buffer.from(type, 'ascii'), bytes]);
+  let crc = 0xffffffff;
+  for (const byte of content) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  const size = Buffer.alloc(4), checksum = Buffer.alloc(4);
+  size.writeUInt32BE(bytes.length); checksum.writeUInt32BE((crc ^ 0xffffffff) >>> 0);
+  return Buffer.concat([size, content, checksum]);
+}
+function fixturePng() {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0); header.writeUInt32BE(1, 4); header[8] = 8; header[9] = 6;
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), pngChunk('IHDR', header),
+    pngChunk('IDAT', zlib.deflateSync(Buffer.from([0, 0x33, 0xaa, 0xee, 0xff]))), pngChunk('IEND', Buffer.alloc(0))]);
+}
+const imageBytes = withImage ? fixturePng() : null;
+if (withImage) await writeFile(imagePath, imageBytes, { mode: 0o600 });
 const sdkModels = CURSOR_MODELS.map(model => ({ id: model.upstream, displayName: model.name }));
 if (!sdkModels.some(model => model.id === selectedModel.upstream)) {
   sdkModels.push({ id: selectedModel.upstream, displayName: selectedModel.name });
 }
+const textOnlyModelId = 'bifrost-offline-text-only';
+if (withImage) sdkModels.push({ id: textOnlyModelId, displayName: 'Explicit text-only fixture', supportsImages: false });
 const catalog = appendCursorModels({ models: [] }, sdkModels);
 assert.ok(catalog.models.some(model => model.slug === selectedModel.id), 'The selected account-advertised model must be published to native Codex.');
 assert.ok(catalog.models.every(model => model.supports_parallel_tool_calls === false));
@@ -64,10 +88,20 @@ const metadataFixturePrefix = 'bifrost-cursor-offline-synthetic-internal-meta-ht
 const metadataInputTypes = new Set(['message', 'reasoning', 'function_call', 'custom_tool_call', 'tool_search_call',
   'function_call_output', 'custom_tool_call_output', 'tool_search_output']);
 const internalMetadataInjections = [], sdkMetadataLeakChecks = [];
+const sdkImageEvidence = [];
+let catalogImageEvidence = null;
 let nativeCodexInstructionTexts = [];
-let child, timer, nativeVersion = null, exitCode = null, selectedTool = null, callbackReturned = false;
+let child, timer, catalogRpc = null, nativeVersion = null, exitCode = null, selectedTool = null, callbackReturned = false, nativeStderr = '';
 let adapterCalls = 0, originalInferenceCalls = 0, externalEndpointAttempts = 0;
 const hash = value => createHash('sha256').update(value).digest('hex');
+const imageFixtureEvidence = withImage ? { width: 1, height: 1, mimeType: 'image/png', byteLength: imageBytes.length, sha256: hash(imageBytes) } : null;
+
+function summarizeImageUrl(value) {
+  const embedded = typeof value === 'string' && /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/.exec(value);
+  if (!embedded) return { transport: 'url', sha256: hash(String(value)) };
+  const bytes = Buffer.from(embedded[2], 'base64');
+  return { transport: 'base64', mimeType: embedded[1], byteLength: bytes.length, sha256: hash(bytes) };
+}
 
 function summarize(body) {
   return { fields: Object.keys(body).sort(), model: body.model, parallelToolCalls: body.parallel_tool_calls,
@@ -76,6 +110,8 @@ function summarize(body) {
       namespaceTools: tool.tools?.map(child => ({ type: child.type, name: child.name })) })),
     input: (Array.isArray(body.input) ? body.input : []).map(item => ({ type: item.type ?? 'message', role: item.role ?? null,
       id: item.id ?? null, phase: item.phase ?? null, callId: item.call_id ?? null,
+      ...(withImage && Array.isArray(item.content) ? { images: item.content.filter(block => block.type === 'input_image')
+        .map(block => summarizeImageUrl(block.image_url)) } : {}),
       encryptedPrefixMatches: item.encrypted_content?.startsWith(CURSOR_RESPONSES_STATE_PREFIX) === true,
       encryptedHash: typeof item.encrypted_content === 'string' ? hash(item.encrypted_content) : null })) };
 }
@@ -209,6 +245,16 @@ const fakeSdk = {
       assert.equal(sdkSends.length, 0, 'The original SDK Run must resume; a second send is not allowed.');
       assert.deepEqual(sendOptions.model, { id: selectedModel.upstream });
       assert.deepEqual(sendOptions.mcpServers, {});
+      if (withImage) {
+        assert.equal(message.images?.length, 1, 'The selected Cursor SDK run must receive the native client image.');
+        const image = message.images[0];
+        assert.equal(image.mimeType, 'image/png');
+        assert.equal(typeof image.data, 'string');
+        const bytes = Buffer.from(image.data, 'base64');
+        const evidence = { mimeType: image.mimeType, byteLength: bytes.length, sha256: hash(bytes) };
+        assert.equal(evidence.sha256, imageFixtureEvidence.sha256, 'The SDK must receive the generated PNG without image-byte changes.');
+        sdkImageEvidence.push(evidence);
+      }
       sdkSends.push({ runId: sdkRunId, model: sendOptions.model, messageType: typeof message.text });
       const events = new Messages(); let finish;
       const done = new Promise(resolveDone => { finish = resolveDone; });
@@ -311,7 +357,11 @@ const server = http.createServer((req, res) => {
   });
   httpTasks.push(task);
 });
-server.on('connect', (req, socket) => { recordBlockedNetwork(req, 'CONNECT'); socket.end('HTTP/1.1 502 Offline fixture blocks external endpoints\r\n\r\n'); });
+server.on('connect', (req, socket) => {
+  // The isolated client can reset a deliberately rejected background tunnel.
+  socket.on('error', () => {});
+  recordBlockedNetwork(req, 'CONNECT'); socket.end('HTTP/1.1 502 Offline fixture blocks external endpoints\r\n\r\n');
+});
 server.listen(0, '127.0.0.1'); await once(server, 'listening');
 fixtureOrigin = `http://127.0.0.1:${server.address().port}`;
 const env = { CODEX_HOME: codexHome, BIFROST_CURSOR_OFFLINE_KEY: 'offline-fixture-client-key',
@@ -330,28 +380,55 @@ const config = { model_provider: 'bifrost_cursor_offline', model_catalog_json: c
   'model_providers.bifrost_cursor_offline.http_headers': { 'X-Account-Bridge-Key': gatewayKey } };
 const serialize = value => typeof value === 'object' && value !== null
   ? '{' + Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}=${JSON.stringify(item)}`).join(',') + '}' : JSON.stringify(value);
+const configArguments = Object.entries(config).flatMap(([key, value]) => ['-c', `${key}=${serialize(value)}`]);
 try {
   nativeVersion = (await promisify(execFile)(binary, ['--version'], { env, cwd: work, windowsHide: true, timeout: 10000 })).stdout.trim();
   console.log(JSON.stringify({ phase: 'fixture-start', nativeVersion, model: selectedModel.id, dynamicModelFixture,
+    withImage,
     evidencePath: join(work, 'result.json') }));
+  if (withImage) {
+    assert.equal(Object.hasOwn(catalog.models.find(model => model.slug === selectedModel.id), 'input_modalities'), false,
+      'Unknown Cursor image capability must remain absent from the raw Codex catalog.');
+    assert.deepEqual(catalog.models.find(model => model.slug === `Cursor-${textOnlyModelId}`).input_modalities, ['text']);
+    catalogRpc = new CodexRpc({ binary, home: codexHome, cwd: work, isolated: true,
+      spawnImpl: (file, args, options) => spawn(file, [...args, ...configArguments], { ...options, env, cwd: work, windowsHide: true }) });
+    const list = await catalogRpc.request('model/list', { includeHidden: false });
+    const selected = list.data.find(model => model.model === selectedModel.id);
+    const textOnly = list.data.find(model => model.model === `Cursor-${textOnlyModelId}`);
+    assert.ok(selected && textOnly, 'The real Codex model/list must include both capability fixtures.');
+    assert.deepEqual(selected.inputModalities, ['text', 'image'], 'Unknown Cursor image capability must retain the native multimodal default.');
+    assert.deepEqual(textOnly.inputModalities, ['text'], 'Explicit text-only metadata must keep the native image block.');
+    catalogImageEvidence = { selected: { model: selected.model, rawInputModalitiesAbsent: true, inputModalities: selected.inputModalities },
+      explicitTextOnly: { model: textOnly.model, inputModalities: textOnly.inputModalities } };
+    await catalogRpc.close(); catalogRpc = null;
+    assert.equal(sdkCreated.length, 0, 'Read-only model/list must not create a Cursor agent.');
+    assert.equal(adapterCalls, 0, 'Read-only model/list must not submit inference.');
+  }
   const args = ['exec', '--ephemeral', '--json', '--skip-git-repo-check', '--sandbox', 'danger-full-access', '-C', work,
-    '--model', selectedModel.id, ...Object.entries(config).flatMap(([key, value]) => ['-c', `${key}=${serialize(value)}`]),
+    '--model', selectedModel.id, ...configArguments, ...(withImage ? ['--image', imagePath, '--'] : []),
     'Read bridge-proof.txt using the provided local shell tool. Reply with exactly the file contents. Do not access the network or any other file.'];
   child = spawn(binary, args, { env, cwd: work, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   lines.on('line', line => { try { clientEvents.push(JSON.parse(line)); }
     catch { errors.push({ phase: 'client-json', message: 'Native Codex emitted a non-JSON output line.' }); } });
-  child.stderr.on('data', () => {});
+  child.stderr.on('data', chunk => { nativeStderr = (nativeStderr + chunk.toString('utf8')).slice(-4000); });
   timer = setTimeout(() => { errors.push({ phase: 'timeout', message: 'Offline Cursor/Codex tool round timed out.' }); child.kill(); }, 60000);
   exitCode = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit); });
   lines.close(); await Promise.allSettled(httpTasks); await Promise.all(responseReads);
   const commands = clientEvents.filter(event => event.type === 'item.completed' && ['command_execution', 'commandExecution'].includes(event.item?.type));
   const replies = clientEvents.filter(event => event.type === 'item.completed' && ['agent_message', 'agentMessage'].includes(event.item?.type));
-  assert.equal(exitCode, 0); assert.ok(clientEvents.some(event => event.type === 'turn.completed'));
+  assert.equal(exitCode, 0, redact(nativeStderr.replace(/data:image\/[^;,\s]+;base64,[A-Za-z0-9+/=]+/g, '[fixture-image]')) || 'The offline native client must exit successfully.');
+  assert.ok(clientEvents.some(event => event.type === 'turn.completed'));
   assert.ok(commands.some(event => event.item.exit_code === 0 || event.item.exitCode === 0));
   assert.equal(replies.at(-1)?.item.text?.trim(), expected); assert.equal(callbackReturned, true);
   assert.equal(requests.length, 3); assert.equal(adapterCalls, 3); assert.equal(sdkCreated.length, 1);
   assert.equal(sdkSends.length, 1); assert.equal(sdkCallbacks.length, 2); assert.equal(sdkCancellations.length, 0);
+  if (withImage) {
+    assert.equal(sdkImageEvidence.length, 1);
+    const nativeImages = requests[0].input.flatMap(item => item.images ?? []);
+    assert.equal(nativeImages.length, 1, 'Native Codex must submit the image on the original request.');
+    assert.equal(nativeImages[0].sha256, imageFixtureEvidence.sha256);
+  }
   assert.ok(requests.every(request => request.model === selectedModel.id));
   if (syntheticInternalMetadata) {
     assert.equal(internalMetadataInjections.length, requests.length);
@@ -393,6 +470,7 @@ try {
   assert.equal(runUsage.length, 1); assert.equal(runUsage[0].httpAttribution, 'unknown'); assert.equal(runUsage[0].usage.total_tokens, 80);
   const proof = { passed: true, nativeVersion, realInference: false, existingAuthLoaded: false, model: selectedModel.id,
     dynamicModelFixture, publishedCatalogModels: catalog.models.map(model => model.slug),
+    withImage, imageFixture: imageFixtureEvidence, catalogImageEvidence, sdkImageCount: sdkImageEvidence.length, sdkImageEvidence,
     promptMode, preservesSystemPromptPriority: promptMode === 'system',
     syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     internalMetadataInjections, sdkMetadataLeakChecks,
@@ -407,6 +485,7 @@ try {
   await writeFile(join(work, 'result.json'), JSON.stringify(proof, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify({ passed: true, nativeVersion, model: selectedModel.id, realInference: false, existingAuthLoaded: false,
     dynamicModelFixture,
+    withImage, catalogImageEvidence, sdkImageCount: sdkImageEvidence.length,
     promptMode, preservesSystemPromptPriority: promptMode === 'system',
     syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     localToolCalls: commands.length, sameSdkRunResumed: true, sdkSends: 1, httpUsageUnknown: true,
@@ -414,6 +493,7 @@ try {
 } catch (error) {
   const proof = { passed: false, nativeVersion, realInference: false, existingAuthLoaded: false, model: selectedModel.id,
     dynamicModelFixture, publishedCatalogModels: catalog.models.map(model => model.slug),
+    withImage, imageFixture: imageFixtureEvidence, catalogImageEvidence, sdkImageCount: sdkImageEvidence.length, sdkImageEvidence,
     promptMode, preservesSystemPromptPriority: promptMode === 'system',
     syntheticInternalMetadata, syntheticInternalMetadataItemsInjected: internalMetadataInjections.reduce((sum, item) => sum + item.count, 0),
     internalMetadataInjections, sdkMetadataLeakChecks,
@@ -426,5 +506,6 @@ try {
   process.exitCode = 1;
 } finally {
   clearTimeout(timer); if (child && child.exitCode === null && !child.killed) child.kill();
+  await catalogRpc?.close();
   await responses.close(); server.closeAllConnections(); await new Promise(resolveClose => server.close(resolveClose));
 }

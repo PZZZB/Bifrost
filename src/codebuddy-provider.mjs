@@ -94,7 +94,8 @@ function textBlocks(value, onHint = () => {}) {
   }).join('');
 }
 
-function translate(body, upstreamModel, readThinking = thinkingText) {
+function translate(body, upstreamModel, readThinking = thinkingText,
+  readCompaction = () => invalid('CodeBuddy 历史摘要状态未提供解封方式。')) {
   if (typeof body === 'string' || body instanceof Uint8Array) {
     try { body = JSON.parse(Buffer.from(body).toString('utf8')); } catch { invalid('请求不是有效 JSON。'); }
   }
@@ -219,6 +220,11 @@ function translate(body, upstreamModel, readThinking = thinkingText) {
         if (['text', 'image', 'document'].includes(block?.type)) {
           if (pending.size) invalid('工具结果须先于新的用户文本返回。');
           userParts.push(...parts([block]));
+        } else if (block?.type === 'bifrost_compaction') {
+          keys(block, ['type', 'encrypted_content']);
+          if (pending.size) invalid('工具结果须先于历史摘要返回。');
+          const summary = readCompaction(block.encrypted_content);
+          userParts.push({ type: 'text', text: `[Bifrost conversation summary]\n${summary}\n[/Bifrost conversation summary]` });
         } else if (block?.type === 'tool_result') {
           keys(block, ['type', 'tool_use_id', 'content', 'is_error', 'cache_control']);
           cacheHint(block.cache_control, onHint);
@@ -612,6 +618,38 @@ export class CodeBuddyProvider {
         billing: { verified: false, employeeTokenMultiplier: null, sourceCredits: null, sourcePromotion: null } };
     }
   }
+  async openCompactionForHandoff(token, { clientScope = null, signal } = {}) {
+    clientScope = validateClientScope(clientScope);
+    if (aborted(signal)) throw new AdapterError('CodeBuddy 请求已取消。', 499);
+    const thinkingState = await this.#state(), saved = thinkingState.openCompaction(token);
+    if (typeof this.client.status !== 'function') throw new AdapterError('无法核对 CodeBuddy 历史摘要的原账号。', 503);
+    const status = await this.client.status({ signal });
+    if (aborted(signal)) throw new AdapterError('CodeBuddy 请求已取消。', 499);
+    if (status?.authenticated !== true) throw new AdapterError('CodeBuddy 员工账号尚未登录。', 401);
+    if (saved.identity !== status.identity?.uid || (saved.client_scope ?? null) !== clientScope) {
+      throw new AdapterError('历史摘要状态与当前 CodeBuddy 账号或接入用户不匹配，请使用原账号或新建会话。', 403);
+    }
+    // The source model is authenticated inside this purpose-specific packet.
+    // A handoff transfers readable summary context, never hidden model reasoning.
+    return saved.summary;
+  }
+  async continuationModelMatches(blocks, modelId, { clientScope = null, signal } = {}) {
+    clientScope = validateClientScope(clientScope);
+    if (aborted(signal)) throw new AdapterError('CodeBuddy 请求已取消。', 499);
+    const alias = resolveCodeBuddyAlias(modelId);
+    if (!alias || !Array.isArray(blocks)) invalid('CodeBuddy 思考接续或目标模型无效。');
+    if (!blocks.length) return [];
+    const thinkingState = await this.#state(), saved = [];
+    for (let index = 0; index < blocks.length; index++) saved.push(thinkingState.open(blocks[index]));
+    const metadata = await this.#metadata(signal);
+    const selected = metadata.models.find(model => model.descriptor.id === alias.id);
+    if (!selected?.descriptor.available) throw new AdapterError(selected?.descriptor.reason || '当前 CodeBuddy 账号目录未提供可用的所选模型。', 503);
+    if (saved.some(state => state.identity !== metadata.identity?.uid || (state.client_scope ?? null) !== clientScope)) {
+      throw new AdapterError('思考接续状态与当前 CodeBuddy 账号或接入用户不匹配，请使用原账号或新建会话。', 403);
+    }
+    // Only expose the comparison. Source reasoning and opaque metadata stay private.
+    return saved.map(state => state.model === selected.source.id);
+  }
   async request({ path, body, headers: _headers, signal, clientScope = null } = {}) {
     let parsedPath;
     try {
@@ -624,13 +662,15 @@ export class CodeBuddyProvider {
     try {
       clientScope = validateClientScope(clientScope);
       thinkingState = await this.#state();
-      const scopes = [];
+      const scopes = [], compactionScopes = [];
       // Validate client content before any authenticated catalog or model request.
       request = translate(body, 'pending-catalog-validation', block => {
         if (typeof block.signature === 'string' && block.signature.startsWith(CODEBUDDY_STATE_PREFIX)) {
           const state = thinkingState.open(block); scopes.push(state); return state;
         }
         return thinkingText(block);
+      }, token => {
+        const state = thinkingState.openCompaction(token); compactionScopes.push(state); return state.summary;
       });
       const metadata = await this.#metadata(signal);
       const selected = metadata.models.find(model => model.descriptor.id === request.alias.id);
@@ -646,8 +686,12 @@ export class CodeBuddyProvider {
       if (scopes.some(state => state.identity !== identity || state.model !== model.id || (state.client_scope ?? null) !== clientScope)) {
         throw new AdapterError('思考接续状态与当前 CodeBuddy 账号或模型不匹配，请使用原账号或新建会话。', 403);
       }
+      if (compactionScopes.some(state => state.identity !== identity || state.model !== model.id || (state.client_scope ?? null) !== clientScope)) {
+        throw new AdapterError('历史摘要状态与当前 CodeBuddy 账号、模型或接入用户不匹配，请使用原账号或新建会话。', 403);
+      }
     } catch (error) { return errorResponse(aborted(signal) ? new AdapterError('CodeBuddy 请求已取消。', 499) : error); }
     const abort = new AbortController();
+    const compactionModel = model.id;
     const onAbort = () => abort.abort();
     signal?.addEventListener('abort', onAbort, { once: true }); if (aborted(signal)) abort.abort();
     const state = new Completion(request, (reasoning, extraFields) => {
@@ -661,6 +705,14 @@ export class CodeBuddyProvider {
     const bridgeUsage = new Promise(resolve => { settleUsage = () => resolve(structuredClone(state.usage)); });
     const decorate = response => {
       response.bridgeUsage = bridgeUsage; response.bridgeModel = model.id;
+      if (response.ok) response.bridgeSealCompaction = summary => {
+        if (abort.signal.aborted || !state.done || state.stopReason !== 'end_turn' || state.calls.size
+            || typeof summary !== 'string' || summary !== state.blocks.filter(block => block.type === 'text').map(block => block.text).join('')) {
+          protocol('CodeBuddy 未完整返回可验证的文本摘要，不能生成历史摘要状态。');
+        }
+        return thinkingState.sealCompaction({ summary, identity, model: compactionModel,
+          ...(clientScope !== null ? { client_scope: clientScope } : {}) });
+      };
       // These hints do not map to a verified CodeBuddy parameter. Never promise a cache hit.
       response.bridgeCacheControl = { ignoredHints: request.ignoredCacheHints, usage: 'upstream_reported_only' };
       return response;

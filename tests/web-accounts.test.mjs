@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtemp, readFile, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
@@ -150,7 +150,8 @@ test('a single invitation cannot create two accounts under concurrent requests',
   const results = await Promise.allSettled(['alice@example.test', 'bobby@example.test'].map(email => store.register({ email, password: PASSWORD,
     inviteCode, privacyAccepted: true })));
   assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
-  assert.equal(results.find(result => result.status === 'rejected').reason.code, 'registration_rejected');
+  const rejected = results.find(result => result.status === 'rejected').reason;
+  assert.equal(rejected.code, 'registration_rejected', rejected.stack);
   assert.equal((await store.read()).accounts.length, 1); assert.equal((await store.read()).invites.length, 0);
 });
 
@@ -206,9 +207,24 @@ test('registration policy, expiry, corrupt storage and local password recovery f
   assert.equal((await store.clients()).length, 0);
   assert.equal((await alice.login('alice@example.test')).status, 401);
   assert.equal((await alice.login('alice@example.test', recovery.password)).status, 200);
-  await chmod(store.path, 0o644);
-  assert.equal((await alice.session()).status, 503);
-  await chmod(store.path, 0o600);
+  // chmod cannot make a file publicly readable on Windows; it uses ACLs.
+  if (process.platform !== 'win32') {
+    try {
+      await chmod(store.path, 0o644);
+      assert.equal((await alice.session()).status, 503);
+    } finally { await chmod(store.path, 0o600); }
+  }
+  const original = await readFile(store.path);
+  try {
+    await writeFile(store.path, '{broken', { mode: 0o600 });
+    const response = await alice.session();
+    assert.equal(response.status, 503);
+    for (const value of [store.directory, recovery.password]) {
+      assert.ok(!response.text.includes(value));
+      assert.ok(!response.text.includes(JSON.stringify(value).slice(1, -1)));
+    }
+  } finally { await writeFile(store.path, original, { mode: 0o600 }); }
+  assert.equal((await alice.session()).data.authenticated, true);
 });
 
 test('login attempts are bounded per login identifier and duplicate browser cookies cannot select identities', async t => {

@@ -3,6 +3,7 @@ import { BridgeError } from '../storage.mjs';
 import { modelId, PROTOCOL_PATHS } from '../routing/model-router.mjs';
 import { MessagesResponsesAdapter } from '../protocols/messages-responses-adapter.mjs';
 import { modelCapabilities } from '../routing/model-capabilities.mjs';
+import { normalizeRemoteAccount, remoteQuotaCard } from '../bifrost-quotas.mjs';
 
 const fail = (status = 503, code = 'desktop_remote_unavailable') => new BridgeError('远端 Bifrost 暂不可用，请检查网络、用户 Key 或模型权限。', status, code);
 export function validateBifrostUrl(value) {
@@ -41,6 +42,25 @@ export class BifrostRemote {
       protocols: [...new Set([...model.protocols, ...(this.#responses && model.protocols.includes('messages') ? ['responses'] : [])])] }));
   }
   status() { return { state: this.#state, available: this.#state === 'ready', modelCount: this.#models.length, billingAuthority: 'remote-bifrost' }; }
+  async accountQuota({ signal } = {}) {
+    const stamp = () => new Date().toISOString();
+    if (this.#abort.signal.aborted) return remoteQuotaCard(this.id, { code: 'disabled', fetchedAt: stamp() });
+    let received = false;
+    try {
+      const response = await this.#fetch(`${this.#url}/account`, { method: 'GET', redirect: 'manual',
+        headers: { authorization: `Bearer ${this.#key}` },
+        signal: AbortSignal.any([this.#abort.signal, AbortSignal.timeout(6000), ...(signal ? [signal] : [])]) });
+      if (!response.ok) {
+        await response.body?.cancel();
+        return remoteQuotaCard(this.id, { fetchedAt: stamp(), code: [404, 405, 501].includes(response.status) ? 'unsupported'
+          : [401, 403].includes(response.status) ? 'unauthorized' : 'unavailable' });
+      }
+      received = true;
+      const value = await boundedJson(response, 32 * 1024);
+      if (signal?.aborted || this.#abort.signal.aborted) return remoteQuotaCard(this.id, { fetchedAt: stamp(), code: 'unavailable' });
+      return normalizeRemoteAccount(value, { id: this.id, fetchedAt: stamp() });
+    } catch { return remoteQuotaCard(this.id, { fetchedAt: stamp(), code: received ? 'invalid_response' : 'unavailable' }); }
+  }
   refreshCatalog(signal) {
     if (this.#pending) return this.#pending;
     this.#pending = (async () => {
@@ -73,6 +93,14 @@ export class BifrostRemote {
       return this.#responses.request({ body, scope, session, signal, capabilities: native.capabilities });
     }
     return this.#requestNative(protocol, { body, scope, session, signal });
+  }
+  async openCompactionForHandoff(token, { scope, model, signal } = {}) {
+    if (signal?.aborted || this.#abort.signal.aborted) throw fail(signal?.aborted ? 499 : 503);
+    if (!this.#models.some(entry => entry.id === model && entry.available && entry.protocols.includes('messages'))
+        || typeof this.#responses?.openCompactionForHandoff !== 'function') {
+      throw new BridgeError('当前远端来源不能恢复此模型的历史摘要，请先使用原模型继续。', 409, 'remote_compaction_unavailable');
+    }
+    return this.#responses.openCompactionForHandoff(token, { scope, model, signal });
   }
   async #requestNative(protocol, { body, scope, session, signal } = {}) {
     if (this.#abort.signal.aborted || !this.#models.some(model => model.id === body.model && model.available && model.protocols.includes(protocol))) throw fail();

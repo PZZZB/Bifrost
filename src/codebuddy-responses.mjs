@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { clientScope as validateClientScope } from './client-scope.mjs';
 import { CODEBUDDY_MODEL } from './codebuddy-provider.mjs';
-import { CODEBUDDY_STATE_PREFIX } from './codebuddy-thinking-state.mjs';
+import { CODEBUDDY_STATE_PREFIX, CODEBUDDY_COMPACTION_STATE_PREFIX } from './codebuddy-thinking-state.mjs';
 import { resolveCodeBuddyAlias } from './codebuddy-models.mjs';
 import { translateResponses as translate, ResponsesConversion as Conversion, encodeResponsesEvent as sse,
   AdapterError, errorData, errorResponse, MessagesSseParser as SseParser, messagesJsonEvents as jsonEvents } from './protocols/responses-messages.mjs';
@@ -11,7 +11,7 @@ import { translateResponses as translate, ResponsesConversion as Conversion, enc
 export const CODEBUDDY_RESPONSES_STATE_PREFIX = 'bifrost-codebuddy-responses-v1:';
 export const CODEBUDDY_RESPONSES_CAPABILITIES = Object.freeze({
   hostedWebSearch: false, clientTools: true, images: true, reasoningSummaries: false,
-  continuation: 'bridge-owned-opaque-encrypted-state', previousResponseId: false,
+  continuation: 'bridge-owned-opaque-encrypted-state', previousResponseId: false, remoteCompaction: 'v2',
 });
 export { sse as encodeResponsesEvent };
 const LIMIT = 64 * 1024 * 1024;
@@ -57,7 +57,16 @@ function openEnvelope(value) {
 
 const legacyProfile = { model: CODEBUDDY_MODEL.id, label: 'CodeBuddy', allowedEfforts: ['low', 'medium', 'high', 'xhigh'],
   idPrefix: 'bifrost_cb', reasoningIdPrefix: 'rs_bifrost_cb_', defaultReasoning: { effort: 'high', summary: 'auto' },
-  defaultThinking: { type: 'adaptive', display: 'omitted' }, openState: openEnvelope, sealState: envelope };
+  defaultThinking: { type: 'adaptive', display: 'omitted' }, openState: openEnvelope, sealState: envelope,
+  openCompaction: value => {
+    if (typeof value !== 'string' || !value.startsWith(CODEBUDDY_COMPACTION_STATE_PREFIX) || value.length > LIMIT) {
+      fail('此压缩历史不属于 CodeBuddy，不能跨渠道解码 OpenAI 的压缩密文。', 'input.compaction');
+    }
+    // Identity, actual upstream model and client scope are checked by the
+    // existing native provider before this private block becomes model text.
+    return [{ type: 'bifrost_compaction', encrypted_content: value }];
+  },
+  sealCompaction: () => protocol('CodeBuddy 历史摘要状态尚未就绪。') };
 
 // Preserve the established public helper defaults while the shared engine stays source-neutral.
 export function translateResponses(body, marker, profile = {}) { return translate(body, marker, { ...legacyProfile, ...profile }); }
@@ -73,6 +82,49 @@ export class CodeBuddyResponsesProvider {
     this.instructionMarker = `bifrost-priority-${randomUUID()}`;
   }
   async status() { return { ...await this.provider.status(), responsesCapabilities: CODEBUDDY_RESPONSES_CAPABILITIES }; }
+  async openCompactionForHandoff(value, options) {
+    if (typeof this.provider.openCompactionForHandoff !== 'function') throw new AdapterError('当前 CodeBuddy 来源不能恢复历史摘要。', 409);
+    try { return await this.provider.openCompactionForHandoff(value, options); }
+    catch (error) { throw new AdapterError('CodeBuddy 历史摘要无效、授权不匹配或来源暂不可用。',
+      [400, 401, 403, 409, 499, 503].includes(error?.status) ? error.status : 503, 'input.compaction'); }
+  }
+  async prepareHistoryForModel(body, { clientScope = null, signal } = {}) {
+    if (!Array.isArray(body?.input)) return body;
+    const packets = [], indices = [];
+    for (const [index, item] of body.input.entries()) {
+      if (item?.type !== 'reasoning' || !item.encrypted_content?.startsWith?.(CODEBUDDY_RESPONSES_STATE_PREFIX)) continue;
+      const blocks = openEnvelope(item.encrypted_content);
+      indices.push({ index, count: blocks.length }); packets.push(...blocks);
+    }
+    let matches = packets.map(() => true);
+    if (packets.length && typeof this.provider.continuationModelMatches === 'function') {
+      try { matches = await this.provider.continuationModelMatches(packets, body.model, { clientScope, signal }); }
+      catch (error) { throw new AdapterError('CodeBuddy 思考接续状态无效、授权不匹配或来源暂不可用。',
+        [400, 401, 403, 409, 499, 503].includes(error?.status) ? error.status : 503, 'input.reasoning'); }
+    }
+    let at = 0, changed = false;
+    const remove = new Set();
+    for (const row of indices) {
+      if (matches.slice(at, at + row.count).some(value => !value)) {
+        const item = body.input[row.index];
+        if (item.summary != null && (!Array.isArray(item.summary) || item.summary.length) ||
+            item.content != null && (!Array.isArray(item.content) || item.content.length)) fail('跨模型接续不能丢弃额外明文思考内容。', 'input.reasoning');
+        remove.add(row.index); changed = true;
+      }
+      at += row.count;
+    }
+    const input = [];
+    for (const [index, item] of body.input.entries()) {
+      if (remove.has(index)) continue;
+      if (['compaction', 'context_compaction'].includes(item?.type) &&
+          item.encrypted_content?.startsWith?.(CODEBUDDY_COMPACTION_STATE_PREFIX)) {
+        const summary = await this.openCompactionForHandoff(item.encrypted_content, { clientScope, signal });
+        input.push({ type: 'message', role: 'user', content: [{ type: 'input_text',
+          text: `[Bifrost conversation summary]\n${summary}\n[/Bifrost conversation summary]` }] }); changed = true;
+      } else input.push(item);
+    }
+    return changed ? { ...body, input } : body;
+  }
   async request({ path, body, headers: _headers, signal, clientScope = null } = {}) {
     let request, profile = this.profile;
     try {
@@ -95,9 +147,11 @@ export class CodeBuddyResponsesProvider {
         // Reject malformed content and foreign continuation envelopes before
         // reading account metadata, including on the original Opus route.
         const preliminary = { ...this.profile, model: alias.id, ...(alias.upstream !== null ? {
-          allowedEfforts: typeof parsed.reasoning?.effort === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(parsed.reasoning.effort) ? [parsed.reasoning.effort] : [],
+          allowedEfforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent'],
         } : {}) };
         request = translate(parsed, this.instructionMarker, preliminary);
+        const prepared = await this.prepareHistoryForModel(parsed, { clientScope, signal });
+        if (prepared !== parsed) request = translate(prepared, this.instructionMarker, preliminary);
         const models = await this.provider.getModels({ signal });
         const model = Array.isArray(models) && models.find(model => model.id === alias.id);
         if (!model?.available) throw new AdapterError(model?.reason || '当前 CodeBuddy 账号目录未提供可用的所选模型。', 503);
@@ -141,6 +195,10 @@ export class CodeBuddyResponsesProvider {
         cleanup(); return denied;
       }
       if (!upstream.body) throw new AdapterError('CodeBuddy 上游缺少响应内容。', 502);
+      if (request.compaction) {
+        if (typeof upstream.bridgeSealCompaction !== 'function') throw new AdapterError('当前 CodeBuddy 来源尚未提供历史摘要密封能力。', 501);
+        profile = { ...profile, sealCompaction: summary => upstream.bridgeSealCompaction(summary) };
+      }
     } catch (error) { cleanup(); return errorResponse(abort.signal.aborted ? new AdapterError('CodeBuddy 请求已取消。', 499) : error); }
     const conversion = new Conversion(request, profile), reader = upstream.body.getReader();
     const cancelRead = () => { void reader.cancel().catch(() => {}); };
@@ -179,7 +237,7 @@ export class CodeBuddyResponsesProvider {
         }
         checkAbort();
         const usage = await (upstream.bridgeUsage ?? null); checkAbort();
-        yield conversion.finish(usage);
+        for (const event of conversion.finishEvents(usage)) { checkAbort(); yield event; }
       } finally {
         await dispose();
       }

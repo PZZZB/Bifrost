@@ -40,6 +40,18 @@ test('native sync never creates state or client files, and native mode leaves un
   await assert.rejects(fs.stat(f.statePath), e => e.code === 'ENOENT');
 });
 
+test('client model names use the configured source prefix once and prefix updates keep model IDs stable', async t => {
+  const f = await fixture(t, { models: [], availableModels: ['built-in'] });
+  const model = { id: 'remote/home/Claude-opus', name: 'Bifröst · Claude Opus' };
+  await f.control.setMode('gateway', { models: [model] });
+  assert.equal((await f.read()).models[0].name, model.name);
+  await f.control.sync([{ ...model, name: 'Home · Claude Opus' }]);
+  const after = await f.read();
+  assert.equal(after.models[0].name, 'Home · Claude Opus'); assert.equal(after.models[0].id, model.id);
+  assert.deepEqual(after.availableModels, ['built-in', model.id]);
+  assert.equal(after.models[0].vendor, 'Bifröst');
+});
+
 test('sync updates and removes only owned models, respects explicit negative capabilities and is idempotent', async t => {
   const f = await fixture(t, { models: [{ id: 'foreign', apiKey: 'PRIVATE' }], availableModels: [] });
   await f.control.setMode('gateway', { models });

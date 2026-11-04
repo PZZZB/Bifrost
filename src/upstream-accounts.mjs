@@ -5,6 +5,7 @@ import { BifrostRemote } from './providers/bifrost-remote.mjs';
 import { configureServerRemote } from './runtime/server-remotes-config.mjs';
 import { validatedClaudeUsage, unavailableClaudeUsage } from './claude-subscription-usage.mjs';
 import { sourceCredential, sourceRoutes } from './source-profiles.mjs';
+import { modelPresentationFor, presentModels } from './model-presentation.mjs';
 
 const TYPES = Object.freeze({
   'codex-client': { label: 'Codex 当前客户端', authorization: '本次调用者的 OpenAI 登录认证', maxAccounts: 1, system: true },
@@ -46,15 +47,30 @@ export class UpstreamAccounts {
     return account ? account.enabled === true : channel === 'A';
   }
   sourceId(channel, model) { return this.accountFor(channel, model)?.id ?? null; }
+  presentationAccountFor(channel, model) {
+    if (channel !== 'Bifrost') return this.accountFor(channel, model);
+    // Catalog labels belong to the saved binding even while a remote is offline.
+    // This lookup is never an availability or authorization check.
+    return typeof model === 'string' ? this.rows().find(account => account.kind === 'bifrost'
+      && model.startsWith(`remote/${account.binding.sourceId}/`)) ?? null : null;
+  }
+  presentModels(models) {
+    return presentModels(models, { accounts: this.rows(), accountFor: (channel, id) => this.presentationAccountFor(channel, id) });
+  }
+  presentCodexCatalog(data) {
+    const channels = new Map(this.getModels().map(model => [model.id, model.channel]));
+    return { ...data, models: presentModels(data.models, { accounts: this.rows(), codex: true,
+      accountFor: (channel, id) => this.presentationAccountFor(channel, id), channelFor: model => channels.get(model.slug ?? model.id) ?? 'A' }) };
+  }
   catalog() {
-    return this.getModels().flatMap(model => {
-      const account = this.accountFor(model.channel, model.id), allowed = this.allows(model.channel, model.id);
+    return this.presentModels(this.getModels().flatMap(model => {
+      const account = this.presentationAccountFor(model.channel, model.id), allowed = this.allows(model.channel, model.id);
       if (!account && model.channel !== 'A') return [];
       return { ...model, enabled: model.enabled !== false, available: model.available !== false && allowed,
         ...(!allowed ? { reason: '所属上游账号已停用或尚未就绪。' } : {}),
         sourceAccountId: account?.id ?? null, sourceAccountName: account?.name ?? (model.channel === 'A' ? '当前客户端' : '来源未就绪'),
         sourceKind: account?.kind ?? 'codex-client', sourceCredential: sourceCredential(account?.kind ?? 'codex-client') };
-    });
+    }));
   }
   async modelSettings() {
     const refreshed = await this.refreshModels();
@@ -62,6 +78,7 @@ export class UpstreamAccounts {
     return { ...snapshot, models: this.catalog(), discovery: refreshed?.discovery ?? {} };
   }
   async snapshot() {
+    const revision = this.store.snapshot().revision;
     const models = this.catalog(), remotes = this.getRemotes(), capabilities = this.capabilities();
     const accounts = await Promise.all(this.rows().map(async row => {
       let metadata = {};
@@ -77,7 +94,7 @@ export class UpstreamAccounts {
       const caller = row.kind === 'codex-client';
       return { id: row.id, kind: row.kind, name: row.name, enabled: row.enabled, typeName: TYPES[row.kind].label,
         authorization: TYPES[row.kind].authorization, editor: TYPES[row.kind].editor ?? null, managed: TYPES[row.kind].managed === true,
-        system: TYPES[row.kind].system === true, credential: sourceCredential(row.kind),
+        system: TYPES[row.kind].system === true, credential: sourceCredential(row.kind), modelPresentation: modelPresentationFor(row),
         routes: sourceRoutes(row, { metadata, usable: ready, capabilities }),
         state: !row.enabled ? 'disabled' : (row.kind === 'bifrost' ? !metadata?.state || metadata.state === 'closed' : metadata == null || metadata.configured === false) ? 'activation_required'
           : caller ? ready ? 'caller_required' : 'not_ready' : ready ? 'ready' : connected ? 'not_ready' : 'authorization_required',
@@ -88,7 +105,7 @@ export class UpstreamAccounts {
         restartRequired: row.enabled && (row.kind === 'bifrost' ? !metadata?.state || metadata.state === 'closed' : metadata == null || metadata.configured === false),
         ...(row.kind === 'bifrost' ? { endpoint: row.binding.baseUrl } : {}) };
     }));
-    return { version: 1, revision: this.store.snapshot().revision, capabilities,
+    return { version: 1, revision, capabilities: { ...capabilities, modelPresentation: true },
       accountTypes: this.kinds.map(kind => {
         const type = TYPES[kind], count = accounts.filter(a => a.kind === kind).length;
         const canAdd = type.managed !== true && type.system !== true && count < type.maxAccounts;

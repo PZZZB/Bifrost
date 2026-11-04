@@ -4,7 +4,7 @@ import { mkdtemp, realpath, readFile, writeFile, rm, mkdir } from 'node:fs/promi
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { UpstreamAccountStore, readUpstreamAccounts, validateUpstreamAccounts } from '../src/upstream-account-store.mjs';
+import { UpstreamAccountStore, readUpstreamAccounts, validateUpstreamAccounts, validateModelPresentation } from '../src/upstream-account-store.mjs';
 import { UpstreamAccounts } from '../src/upstream-accounts.mjs';
 import { loadServerRemotesConfig } from '../src/runtime/server-remotes-config.mjs';
 import { ModelPolicy } from '../src/model-policy.mjs';
@@ -63,6 +63,96 @@ test('types and metadata cannot carry credentials, arbitrary bindings, duplicate
     const value = structuredClone(original); change(value); assert.throws(() => validateUpstreamAccounts(value));
   }
   assert.deepEqual(store.snapshot(), original);
+});
+
+test('model presentation validates complete bounded metadata and counts Unicode codepoints', () => {
+  assert.deepEqual(validateModelPresentation({ prefix: '  Codex B ·  ', order: 9999 }), { prefix: 'Codex B ·', order: 9999 });
+  assert.deepEqual(validateModelPresentation({ prefix: '   ', order: 0 }), { prefix: '', order: 0 });
+  assert.deepEqual(validateModelPresentation({ prefix: '🌈'.repeat(48), order: 5 }), { prefix: '🌈'.repeat(48), order: 5 });
+  const invalid = [null, [], {}, { prefix: '' }, { order: 1 }, { prefix: '', order: 1, extra: true },
+    { prefix: 5, order: 1 }, { prefix: 'B', order: '1' }, { prefix: 'B', order: -1 }, { prefix: 'B', order: 10000 },
+    { prefix: 'B', order: 0.5 }, { prefix: 'B', order: NaN }, { prefix: 'B', order: Infinity },
+    { prefix: 'x'.repeat(49), order: 1 }, { prefix: '🌈'.repeat(49), order: 1 }];
+  const unsafePrefixes = ['B\n', '\tB', 'B\u0000', 'B\u0085', 'B\u2028', 'B\u2029', 'B\u202e', 'B\u200b', 'B\ud800',
+    'Bearer', 'bearer secret', 'B-BEARER:secret', 'Bearer.private', 'bfk_private', 'bfs_private', 'bfi_private', 'bfn_private',
+    'Account-BFN_private', 'B-sk-private', 'rt_private', 'oat_private', 'oaistb_private', 'eyJprivate'];
+  invalid.push(...unsafePrefixes.map(prefix => ({ prefix, order: 1 })));
+  for (const value of invalid) assert.throws(() => validateModelPresentation(value), e => e.status === 400 && e.code === 'upstream_model_presentation_invalid');
+});
+
+test('legacy accounts remain byte-for-byte unchanged on read or reopen without presentation defaults', async t => {
+  const stateDir = await directory(t);
+  const store = await UpstreamAccountStore.open({ stateDir, seeds: [{ kind: 'codex', name: 'Existing B' }, { kind: 'codebuddy', name: 'Existing CodeBuddy' }] });
+  const path = join(stateDir, 'upstream-accounts.json'), before = await readFile(path, 'utf8');
+  let writes = 0;
+  const reopened = await UpstreamAccountStore.open({ stateDir, seeds: [{ kind: 'codex', name: 'Ignored default' }], write: async () => { writes++; } });
+  assert.deepEqual(reopened.snapshot(), store.snapshot());
+  assert.deepEqual(await readUpstreamAccounts(stateDir), store.snapshot());
+  await reopened.reload();
+  assert.equal(writes, 0);
+  assert.equal(await readFile(path, 'utf8'), before);
+  assert.ok(reopened.snapshot().accounts.every(account => !Object.hasOwn(account, 'modelPresentation')));
+});
+
+test('presentation updates persist canonical values while retaining identities, bindings and sibling accounts', async t => {
+  const stateDir = await directory(t), store = await UpstreamAccountStore.open({ stateDir,
+    seeds: [{ kind: 'codex-client', name: 'Caller A' }, { kind: 'codex', name: 'Managed B' }] });
+  await store.setRemote(remote('preserved'), 'Other server');
+  const original = store.snapshot(), target = original.accounts.find(account => account.kind === 'codex');
+  const updated = await store.update(target.id, { revision: original.revision, name: 'Renamed B', enabled: false,
+    modelPresentation: { prefix: '  B account · ', order: 8 } });
+  assert.equal(updated.revision, original.revision + 1);
+  const current = updated.accounts.find(account => account.id === target.id);
+  assert.deepEqual(current, { ...target, name: 'Renamed B', enabled: false, modelPresentation: { prefix: 'B account ·', order: 8 } });
+  assert.deepEqual(updated.accounts.filter(account => account.id !== target.id), original.accounts.filter(account => account.id !== target.id));
+  const reopened = await UpstreamAccountStore.open({ stateDir });
+  assert.deepEqual(reopened.snapshot(), updated);
+  const beforeNoop = await readFile(join(stateDir, 'upstream-accounts.json'), 'utf8');
+  await reopened.update(target.id, { revision: updated.revision, modelPresentation: { prefix: 'B account ·', order: 8 } });
+  assert.equal(reopened.snapshot().revision, updated.revision);
+  assert.equal(await readFile(join(stateDir, 'upstream-accounts.json'), 'utf8'), beforeNoop);
+  current.modelPresentation.prefix = 'modified snapshot';
+  assert.equal(store.snapshot().accounts.find(account => account.id === target.id).modelPresentation.prefix, 'B account ·');
+  const empty = await reopened.update(target.id, { revision: updated.revision, modelPresentation: { prefix: '', order: 0 } });
+  assert.deepEqual(empty.accounts.find(account => account.id === target.id).modelPresentation, { prefix: '', order: 0 });
+});
+
+test('presentation writes retain revision conflicts and disk failures without publishing partial metadata', async t => {
+  const stateDir = await directory(t), store = await UpstreamAccountStore.open({ stateDir, seeds: [{ kind: 'cursor', name: 'Cursor' }] });
+  const before = store.snapshot(), id = before.accounts[0].id;
+  const writes = await Promise.allSettled([
+    store.update(id, { revision: before.revision, modelPresentation: { prefix: 'First', order: 1 } }),
+    store.update(id, { revision: before.revision, modelPresentation: { prefix: 'Second', order: 2 } }),
+  ]);
+  assert.deepEqual(writes.map(result => result.status), ['fulfilled', 'rejected']);
+  assert.equal(writes[1].reason.code, 'upstream_accounts_conflict');
+  const saved = store.snapshot();
+  assert.deepEqual(saved.accounts[0].modelPresentation, { prefix: 'First', order: 1 });
+  store.write = async () => { throw new Error('disk full'); };
+  await assert.rejects(store.update(id, { revision: saved.revision, modelPresentation: { prefix: 'Not saved', order: 3 } }));
+  assert.deepEqual(store.snapshot(), saved);
+  assert.deepEqual(await readUpstreamAccounts(stateDir), saved);
+});
+
+test('invalid presentation patches and stored metadata fail closed without changing existing files', async t => {
+  const stateDir = await directory(t), store = await UpstreamAccountStore.open({ stateDir, seeds: [{ kind: 'claude', name: 'Claude' }] });
+  const before = store.snapshot(), id = before.accounts[0].id, path = join(stateDir, 'upstream-accounts.json');
+  const originalText = await readFile(path, 'utf8');
+  const invalid = [undefined, null, {}, { prefix: 'B' }, { prefix: 'B', order: 10000 }, { prefix: 'B', order: 2, credential: 'PRIVATE' },
+    { prefix: 'B\n', order: 2 }, { prefix: 'Bearer PRIVATE', order: 2 }, { prefix: 'x'.repeat(49), order: 2 }];
+  for (const modelPresentation of invalid) {
+    await assert.rejects(store.update(id, { revision: before.revision, modelPresentation }), e => e.code === 'upstream_model_presentation_invalid');
+    assert.deepEqual(store.snapshot(), before);
+    assert.equal(await readFile(path, 'utf8'), originalText);
+  }
+  for (const modelPresentation of [...invalid, { prefix: '  B  ', order: 1 }]) {
+    const corrupted = structuredClone(before); corrupted.accounts[0].modelPresentation = modelPresentation;
+    assert.throws(() => validateUpstreamAccounts(corrupted), e => e.code === 'upstream_accounts_invalid');
+    if (modelPresentation === undefined) continue; // JSON omits absent optional properties.
+    const text = JSON.stringify(corrupted); await writeFile(path, text, { mode: 0o600 });
+    await assert.rejects(UpstreamAccountStore.open({ stateDir }), e => e.code === 'upstream_accounts_invalid');
+    assert.equal(await readFile(path, 'utf8'), text);
+  }
 });
 
 async function fixture(t, { kinds = ['claude'], readers = {}, seeds = [{ kind: 'claude', name: 'Managed Claude' }] } = {}) {

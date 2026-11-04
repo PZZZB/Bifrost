@@ -19,6 +19,10 @@ flowchart LR
 
 在当前网关“账号池”点击“添加账号”，选择 Bifröst 用户账号。Mac 使用当前用户 Keychain 的密钥保护 AES-GCM 凭据文件；Windows 继续用 DPAPI。保存后通过原服务空闲重启加载，不另开第二个用户服务进程。模型是否开放以节点保存的选择为准，用户／Key 权限继续独立校验。
 
+管理页的“账号剩余额度”按远端来源分别显示可用余额、总余额、预留金额、Token 配额与当前 Key 有效期。数据来自该用户的远端账本，不是 Claude 等模型厂商的订阅余额。页面打开、授权变化或点击“刷新额度”时查询，不添加定时轮询。
+
+远端用户服务新增只读 `GET /v1/account`，使用当前用户 Key，返回自身账号、当前 Key 的有效截止和计费字段；没有计费服务时 `billing` 为 null。金额为 CNY 的整数微元，不返回其他 Key、账单历史或凭证。旧服务没有该接口时显示“未提供”，不推算余额。因此需要把本机与 Mac mini 的项目代码一起更新，分别重启 Bifröst 服务；无需重启计算机或客户端。
+
 ## Windows 配置
 
 在原有网关仓库目录执行：
@@ -46,9 +50,13 @@ git pull --ff-only
 - 每次远端推理仅发送一次。认证失败、余额不足、限流和断线均返回该来源的错误，不切换其他模型，也不重试产生额外消费。余额不足保留 HTTP 402 和明确的额度提示。
 - Mac 是远端用户的权限和余额账本。公司网关只记录实际用量和诊断，不再扣第二份余额。缺失用量不估算。
 - Responses 在本机转换为 Messages。工具由客户端的权限与沙箱控制，Claude 服务端不获得公司电脑的直接执行权限。服务端压缩及不支持的查询参数明确拒绝。
-- 思考状态绑定用户、会话、来源、模型和授权版本。带有远端状态的历史不能转给本地来源；更换模型或 Key 时新建聊天。
+- 思考状态绑定用户、会话、来源、模型和授权版本。同会话切换模型时，经过校验的来源专用思考状态不跨来源转发，明文消息、公开摘要和工具历史保留。网关自有压缩摘要验证原来源和授权后转为标注的用户上下文；无法解封的旧密文仍明确拒绝。更换 Key 不允许复用此前授权的密文。
 
 工具选择默认允许并行时不附加冗余的禁用参数；显式要求单工具时保留限制，由上游明确支持或拒绝，依据 [Anthropic 并行工具说明](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use)。官方 CLI 目前只接受自动工具选择，不把其他限制静默改成自动模式。
+
+Responses 转换接受 `include: null`，以及 `reasoning.encrypted_content`、`web_search_call.action.sources`、`web_search_call.results`、`file_search_call.results`、`code_interpreter_call.outputs`、`computer_call_output.output.image_url`、`message.input_image.image_url`，并兼容 Codex 的 `output.encrypted_content`。选择器只请求已有响应项的额外返回数据，公开部分参见 [OpenAI 的 include 定义](https://developers.openai.com/api/reference/typescript/resources/responses)。加密输出选择器保留本网关已有的思考接续，不为消息和工具参数伪造 OpenAI 密文。本路由不执行 OpenAI 托管搜索、代码解释器或计算机工具，不向 Messages 传递这些选择器；没有对应响应项时不伪造搜索结果、来源或图片回显。实际不支持的工具及历史、未知选择器和无法提供的 logprobs 仍明确拒绝。
+
+Codex v2 压缩使用同一个 `/responses` 接口，输入以唯一的 `compaction_trigger` 结束。转换器保留完整历史并请求上游仅生成工作摘要，禁止工具调用；只在完整的非空文本响应后生成一个网关自有的加密 `compaction` 检查点。后续按来源、用户、会话、模型与授权版本验证后恢复摘要，不尝试解密 OpenAI 的私有压缩内容。`configuration_update` 的最后一个有效 effort 控制当前推理，不混入对话文字。格式错误、未返回的工具结果、摘要截断或取消均不提交压缩成功。
 
 上游返回的 `caller: {type: 'direct'}` 不存在对应的 Responses 字段。适配器只为已观察到的调用保存作用域内的精确匹配摘要，重放时恢复这个注记；工具 ID、名称、参数必须相符。最多保留 4096 条、6 小时，不保存明文工具参数，不写磁盘。不支持的 caller 注记直接拒绝。网关重启或记录过期后，未完成的工具回合可能需要新建聊天。
 

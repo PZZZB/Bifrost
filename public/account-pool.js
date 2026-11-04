@@ -3,6 +3,7 @@
   const byId = id => document.getElementById(id);
   let snapshot = null, selected = '', busy = false, pending = null, token = '', formKind = '', previewProtocol = 'responses', previewAccount = '';
   const routeExpanded = new Map();
+  const presentationDrafts = new Map();
   const labels = { ready: '就绪', disabled: '已停用', not_ready: '待确认', authorization_required: '待授权', activation_required: '待重启加载', caller_required: '随客户端身份' };
   const protocolLabels = { responses: 'Responses', 'chat-completions': 'Chat Completions', messages: 'Messages',
     cli: 'Claude CLI', 'claude-cli': 'Claude CLI', 'official-claude-sdk': 'Claude CLI', 'cursor-sdk': 'Cursor SDK' };
@@ -81,6 +82,66 @@
     }
     detail.append(section);
   }
+  function renderModelPresentation(account, detail) {
+    const section = element('section', undefined, 'pool-model-presentation');
+    section.append(element('h4', '模型名称与排序'));
+    const settings = account.modelPresentation;
+    if (snapshot.capabilities.modelPresentation !== true || account.readOnly === true || !settings
+      || typeof settings.prefix !== 'string' || !Number.isInteger(settings.order)) {
+      section.append(element('p', '当前服务尚未支持模型名称与排序。请空闲重启网关加载新版后设置。', 'panel-copy'));
+      detail.append(section); return;
+    }
+    const form = element('form', undefined, 'pool-model-presentation-form'); form.id = 'pool-model-presentation-form';
+    const fields = element('div', undefined, 'pool-fields');
+    const prefixLabel = element('label', '模型前缀'), prefix = element('input');
+    prefix.id = 'pool-model-prefix'; prefix.type = 'text'; prefix.maxLength = 96;
+    prefix.value = presentationDrafts.get(account.id)?.prefix ?? settings.prefix;
+    prefix.placeholder = '留空则显示原模型名称'; prefix.disabled = busy;
+    prefix.setAttribute('aria-describedby', 'pool-model-prefix-help'); prefixLabel.append(prefix);
+    const orderLabel = element('label', '来源排序'), order = element('input');
+    order.id = 'pool-model-order'; order.type = 'number'; order.min = '0'; order.max = '9999'; order.step = '1'; order.required = true;
+    order.value = presentationDrafts.get(account.id)?.order ?? String(settings.order);
+    order.disabled = busy || account.kind === 'codex-client';
+    order.setAttribute('aria-describedby', 'pool-model-order-help'); orderLabel.append(order);
+    fields.append(prefixLabel, orderLabel); form.append(fields);
+    const prefixHelp = element('p', '前缀可留空，最多 48 个字符。显示格式为「前缀 · 原模型名」；留空只显示原模型名。', 'footnote'); prefixHelp.id = 'pool-model-prefix-help';
+    const orderHelp = element('p', account.kind === 'codex-client'
+      ? '当前客户端（A）固定排在首组，可单独设置前缀。其他来源按排序值从小到大排列，同一来源的模型连续显示。'
+      : '排序值越小越靠前，范围为 0–9999。同一来源的模型连续显示；当前客户端（A）固定排在首组。', 'footnote');
+    orderHelp.id = 'pool-model-order-help'; form.append(prefixHelp, orderHelp);
+    const previews = element('ul', undefined, 'pool-model-previews'); previews.setAttribute('aria-live', 'polite'); previews.setAttribute('aria-label', '模型名称预览');
+    const channel = { 'codex-client': 'A', codex: 'B', codebuddy: 'CodeBuddy', cursor: 'Cursor', claude: 'Claude', with: 'With' }[account.kind];
+    const owned = snapshot.models.filter(model => model.sourceAccountId === account.id
+      || !model.sourceAccountId && channel && model.channel === channel).slice(0, 2);
+    const examples = owned.map(model => ({ id: model.id, name: model.originalName || model.name || model.display_name || model.id }));
+    while (examples.length < 2) examples.push({ id: null, name: examples.length ? '其他原模型名' : '原模型名' });
+    const updatePreviews = () => {
+      previews.replaceChildren(); const value = prefix.value.trim();
+      for (const example of examples) {
+        const row = element('li');
+        const fullName = value ? `${value} · ${example.name}` : example.name;
+        const displayName = fullName.length <= 256 ? fullName : fullName.slice(0, 255).replace(/[\uD800-\uDBFF]$/u, '') + '…';
+        row.append(element('strong', displayName),
+          element('small', example.id ? `模型 ID：${example.id}` : '命名格式示例；读取目录后显示真实模型。'));
+        previews.append(row);
+      }
+    };
+    const draft = (field, value) => presentationDrafts.set(account.id, { ...presentationDrafts.get(account.id), [field]: value });
+    prefix.addEventListener('input', () => { draft('prefix', prefix.value); updatePreviews(); });
+    order.addEventListener('input', () => { draft('order', order.value); });
+    updatePreviews(); form.append(element('p', '名称预览', 'pool-model-preview-label'), previews,
+      element('p', '仅调整显示名称和目录顺序。模型 ID、请求路由和已保存的模型选择保持不变。客户端重新读取或同步目录后生效。', 'footnote'));
+    const save = element('button', '保存前缀与排序', 'button secondary'); save.type = 'submit'; save.disabled = busy;
+    form.append(save);
+    form.addEventListener('submit', event => {
+      event.preventDefault(); const value = prefix.value.trim(), position = Number(order.value);
+      if ([...value].length > 48 || !order.value.trim() || !Number.isInteger(position) || position < 0 || position > 9999) {
+        failure(new Error('模型前缀最多 48 个字符；来源排序须为 0–9999 的整数。')); return;
+      }
+      void mutate(account.id, { modelPresentation: { prefix: value, order: position } });
+    });
+    section.append(form); detail.append(section);
+  }
   async function request(path, body) {
     const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', redirect: 'error',
       ...(body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json', 'x-bridge-csrf': token }, body: JSON.stringify(body) }) });
@@ -94,6 +155,9 @@
       try {
         const value = await request('/api/upstream-accounts');
         if (!Array.isArray(value.accounts) || !Array.isArray(value.accountTypes) || !value.capabilities) throw new Error('当前网关未返回完整账号池。');
+        // A poll already in flight must not replace the form while the user types.
+        if (busy || byId('pool-detail').contains(document.activeElement)
+          || Number.isSafeInteger(snapshot?.revision) && value.revision < snapshot.revision) return;
         snapshot = normalize(value); token = value.csrfToken || token;
         if (!snapshot.accounts.some(a => a.id === selected)) selected = snapshot.accounts[0]?.id || '';
         byId('pool-error').hidden = true; render();
@@ -152,6 +216,7 @@
     if (account.credential?.description) detail.append(element('p', account.credential.description, 'pool-identity-note'));
     if (account.credential?.mode === 'caller') detail.append(element('p', '仅持有网关 Key 的其他客户端不能复用此身份；要使用同一账号额度，需另行完成独立授权。', 'footnote'));
     renderRoutes(account, detail);
+    renderModelPresentation(account, detail);
     if (account.quota.kind === 'subscription') {
       const quota = account.quota, windows = element('section', undefined, 'pool-usage');
       const plans = { pro: 'Claude Pro', max: 'Claude Max', ultra: 'Claude Ultra', team: 'Claude Team', enterprise: 'Claude Enterprise' };
@@ -195,7 +260,10 @@
     try {
       const result = await request(`/api/upstream-accounts/${encodeURIComponent(id)}`, { revision: snapshot.revision, ...patch });
       snapshot = normalize(result);
-      message(result.restartRequired ? '启用已保存，请在概览中空闲重启服务。' : '账号设置已保存。新请求按当前账号状态执行。');
+      if (patch.modelPresentation) {
+        presentationDrafts.delete(id);
+        message('模型前缀与排序已保存。客户端重新读取或同步模型目录后生效。');
+      } else message(result.restartRequired ? '启用已保存，请在概览中空闲重启服务。' : '账号设置已保存。新请求按当前账号状态执行。');
     } catch (error) { failure(error); }
     finally { busy = false; hideEditors(); render(); }
   }

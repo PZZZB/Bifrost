@@ -478,6 +478,20 @@ test('base64 and URL images use public SDKImage structures and invalid image dat
   assert.match((await invalid.json()).error.message, /图片/);
 });
 
+test('Grok images without catalog capability flags reach the selected SDK model without inventing verified vision support', async t => {
+  const f = await fixture(t, async context => { context.text('Offline image result.'); context.finish(); });
+  const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
+  f.setCatalog([{ id: 'grok-4.7', displayName: 'Grok 4.7', variants: [{ isDefault: true, params: [] }] }]);
+  const response = await f.request({ ...base, model: 'Cursor-grok-4.7', input: [{ role: 'user', content: [
+    { type: 'input_text', text: 'Describe this picture.' }, { type: 'input_image', image_url: `data:image/png;base64,${png}` },
+  ] }] });
+  assert.equal(response.status, 200); assert.equal((await response.json()).status, 'completed');
+  assert.deepEqual(f.created[0].model, { id: 'grok-4.7' });
+  assert.deepEqual(f.sends[0].message.images, [{ data: png, mimeType: 'image/png' }]);
+  assert.equal(response.bridgeModel, 'grok-4.7');
+  assert.equal(Object.hasOwn((await f.service.getModels())[0], 'supportsImages'), false);
+});
+
 test('explicit unavailable or negative Cursor capabilities reject requests before SDK creation', async t => {
   const f = await fixture(t, async context => { context.text('Unexpected.'); context.finish(); });
   for (const source of [{ id: upstream, available: false }, { id: upstream, supportsTools: false },

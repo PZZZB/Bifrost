@@ -89,6 +89,8 @@
     actions.append(control(client, '启动', 'launch', {}, 'button primary'),
       control(client, client.mode === 'gateway' ? '恢复原生' : '启用网关', 'mode', { mode: client.mode === 'gateway' ? 'native' : 'gateway' }),
       control(client, '立即同步', 'sync', {})); card.append(actions);
+    if (client.modeUpdateRequired === true) actions.append(control(client, client.mode === 'native' ? '更新原生连接' : '更新网关连接',
+      'mode', { mode: client.mode === 'native' ? 'native' : 'gateway' }));
     const auto = element('label', undefined, 'client-control-auto'), checkbox = element('input'); checkbox.type = 'checkbox';
     checkbox.checked = client.autoSync === true || client.autoSync === undefined && snapshot.autoSyncDefault === true;
     checkbox.disabled = busy || readFailed || !supported(client, 'settings'); checkbox.setAttribute('data-client-action', 'settings');

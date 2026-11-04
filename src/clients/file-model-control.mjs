@@ -27,7 +27,7 @@ function desiredModels(models, gatewayUrl, gatewayKey) {
     const name = typeof model.name === 'string' && model.name.trim() ? model.name.trim() : model.id;
     if (name.length > 256 || /[\x00-\x1f\x7f]/.test(name)) throw fail('模型名称无效，未写入客户端。', 'client_models_invalid', 400);
     const capabilities = object(model.capabilities) ? model.capabilities : {};
-    return { id: model.id, name: `Bifröst · ${name}`, vendor: 'Bifröst', url: gatewayUrl, apiKey: gatewayKey,
+    return { id: model.id, name, vendor: 'Bifröst', url: gatewayUrl, apiKey: gatewayKey,
       supportsToolCall: knownFlag(model.supportsToolCall, capabilities.toolCalls, capabilities.tools?.support,
         capabilities.tools?.adapterSupport, model.adapterCapabilities?.tools),
       supportsImages: knownFlag(model.supportsImages, capabilities.images?.support,

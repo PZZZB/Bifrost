@@ -52,6 +52,20 @@ test('automatic sync runs only in gateway mode and tracks changes without switch
   assert.equal((await restored.snapshot()).clients[0].syncState, 'current');
 });
 
+test('changing display names or source order synchronizes the same IDs without switching modes or launching clients', async t => {
+  const f = await fixture(t); f.modes.codebuddy = 'gateway'; await f.controls.autoSync();
+  f.calls.length = 0;
+  const reordered = [models()[2], models()[1]].map(model => ({ ...model, name: model.channel === 'B' ? 'Team · Sol' : 'Home · Opus' }));
+  f.catalog = reordered;
+  await f.controls.autoSync();
+  assert.deepEqual(f.calls, [['sync', 'codex', ['remote/work/Claude-opus', 'B-gpt-6.1-sol']],
+    ['sync', 'codebuddy', ['remote/work/Claude-opus', 'B-gpt-6.1-sol']]]);
+  f.calls.length = 0; await f.controls.autoSync(); assert.deepEqual(f.calls, []);
+  f.catalog = reordered.map(model => ({ ...model, name: model.name.replace(' · ', ' Renamed · ') }));
+  await f.controls.autoSync(); assert.equal(f.calls.length, 2);
+  assert.ok(f.calls.every(call => call[0] === 'sync'));
+});
+
 test('manual sync remains usable with auto sync off and native mode never receives automatic model writes', async t => {
   const f = await fixture(t);
   await f.controls.mutate('codebuddy', 'mode', { mode: 'gateway' });
@@ -115,4 +129,15 @@ test('Codex mode control reuses the native editor and sync never rewrites authen
   await adapter.setMode('gateway'); await adapter.sync();
   assert.deepEqual(calls, ['gateway']);
   await adapter.setMode('native'); assert.deepEqual(calls, ['gateway', 'official']);
+});
+
+test('Codex client status exposes a required old-thread connection upgrade without changing routing on reads', async () => {
+  const adapter = createCodexClientControl({ integration: {
+    inspect: async () => ({ installed: true, needsUpgrade: true, routing: { mode: 'gateway', nativeThreadsSupported: true, nativeThreadsCovered: false } }),
+    switchMode: async () => assert.fail('Reading must not write configuration.'),
+  } });
+  const state = await adapter.inspect();
+  assert.equal(state.mode, 'gateway'); assert.equal(state.modeUpdateRequired, true);
+  assert.match(state.reloadNote, /更新网关连接.*原生旧会话/);
+  await assert.rejects(adapter.sync(), error => error.code === 'client_codex_catalog_unavailable');
 });

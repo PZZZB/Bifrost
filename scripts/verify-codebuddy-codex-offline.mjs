@@ -22,6 +22,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const binaryIndex = process.argv.indexOf('--binary');
 const binary = binaryIndex < 0 ? process.env.CODEX_BINARY || 'codex' : process.argv[binaryIndex + 1];
 if (!binary || binary.startsWith('--')) throw new Error('--binary requires a Codex executable.');
+const includeIndex = process.argv.indexOf('--include-mode');
+const includeMode = includeIndex < 0 ? 'native' : process.argv[includeIndex + 1];
+if (!['native', 'selectors', 'null'].includes(includeMode)) throw new Error('--include-mode must be native, selectors or null.');
+const optionalIncludes = ['reasoning.encrypted_content', 'output.encrypted_content', 'web_search_call.action.sources', 'web_search_call.results',
+  'file_search_call.results', 'code_interpreter_call.outputs', 'computer_call_output.output.image_url', 'message.input_image.image_url'];
+const adapterIncludeEvidence = [];
 const work = join(root, '.state', `codebuddy-codex-offline-${Date.now()}-${randomBytes(3).toString('hex')}`);
 const codexHome = join(work, 'home');
 await mkdir(codexHome, { recursive: true, mode: 0o700 });
@@ -41,7 +47,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 
 function summarize(body) {
   return { fields: Object.keys(body).sort(), model: body.model,
-    reasoningFields: Object.keys(body.reasoning ?? {}).sort(), include: body.include ?? [],
+    reasoningFields: Object.keys(body.reasoning ?? {}).sort(), includePresent: Object.hasOwn(body, 'include'), include: body.include ?? null,
     tools: (body.tools ?? []).map(tool => ({ type: tool.type, name: tool.name ?? null,
       strict: tool.strict ?? null, namespaceTools: Array.isArray(tool.tools) ? tool.tools.map(item => ({ type: item.type, name: item.name })) : undefined })),
     input: (Array.isArray(body.input) ? body.input : []).map(item => ({ type: item.type ?? 'message', role: item.role ?? null,
@@ -129,6 +135,14 @@ const native = new CodeBuddyProvider({ loadThinkingState: () => new CodeBuddyThi
 const responses = new CodeBuddyResponsesProvider({ provider: native });
 const requestResponses = responses.request.bind(responses);
 responses.request = async options => {
+  if (includeMode !== 'native') {
+    // Inject only at the simulated adapter boundary. Raw native HTTP captures
+    // below retain the exact client include values and are labelled separately.
+    const body = JSON.parse(Buffer.from(options.body).toString('utf8'));
+    body.include = includeMode === 'null' ? null : [...optionalIncludes];
+    adapterIncludeEvidence.push(body.include);
+    options = { ...options, body: Buffer.from(JSON.stringify(body)) };
+  }
   const response = await requestResponses(options);
   responseReads.push(response.clone().text().then(body => {
     if (!response.ok) { errors.push({ phase: 'adapter', status: response.status, message: redact(body) }); return; }
@@ -207,7 +221,12 @@ try {
   assert.equal(sawReasoning && sawExtraFields && sawLocalOutput, true);
   assert.ok(requests.at(-1).input.some(item => item.encryptedPrefixMatches));
   assert.ok(requests.every(request => !request.reasoningFields.includes('summary')));
-  assert.ok(requests.every(request => request.include.includes('reasoning.encrypted_content')));
+  assert.ok(requests.every(request => Array.isArray(request.include) && request.include.includes('reasoning.encrypted_content')));
+  if (includeMode !== 'native') {
+    assert.equal(adapterIncludeEvidence.length, requests.length);
+    for (const include of adapterIncludeEvidence) assert.deepEqual(include, includeMode === 'null' ? null : optionalIncludes);
+    assert.ok(upstreamRequests.every(request => !request.fields.includes('include')), 'Response selectors must not leak to CodeBuddy Chat.');
+  }
   const replayedReasoning = requests.at(-1).input.filter(item => item.encryptedPresent);
   const emittedReasoning = responseItems.filter(item => item.encryptedHash);
   assert.ok(emittedReasoning.length > 0);
@@ -218,16 +237,19 @@ try {
     exactLocalToolOutput: true, finalReplyMatched: true, reasoningPreserved: sawReasoning, extraFieldsPreserved: sawExtraFields,
     opaqueReasoningReplayedUnchanged: true, userQuestionToolDeclared: true, defaultHostedWebDeclared,
     unsupportedSummaryPreferenceOmitted: true, encryptedReasoningRequested: true,
+    includeMode, syntheticIncludes: includeMode !== 'native', adapterIncludeEvidence,
     gateway: { accounts: gateway.metrics.accounts, originalInferenceCalls }, selectedTool, requests, responseItems, upstreamRequests,
     localToolCalls: commands.length, usageRecords: usageEvents.length, errors };
   await writeFile(join(work, 'result.json'), JSON.stringify(proof, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify({ passed: true, nativeVersion, realInference: false, existingAuthLoaded: false,
     localToolCalls: commands.length, reasoningPreserved: sawReasoning, extraFieldsPreserved: sawExtraFields,
+    includeMode, syntheticIncludes: includeMode !== 'native',
     opaqueReasoningReplayedUnchanged: true, userQuestionToolDeclared: true, defaultHostedWebDeclared,
     evidencePath: join(work, 'result.json') }, null, 2));
 } catch (error) {
   const proof = { passed: false, nativeVersion, realInference: false, existingAuthLoaded: false, exitCode,
     failure: redact(error.message), selectedTool, requests, responseItems, upstreamRequests,
+    includeMode, syntheticIncludes: includeMode !== 'native', adapterIncludeEvidence,
     clientEvents: clientEvents.map(event => ({ type: event.type, message: event.type === 'error' ? redact(event.message) : undefined,
       itemType: event.item?.type, commandExitCode: event.item?.exit_code })), errors };
   await writeFile(join(work, 'result.json'), JSON.stringify(proof, null, 2) + '\n', { mode: 0o600 });

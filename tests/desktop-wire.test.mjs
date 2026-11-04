@@ -67,3 +67,58 @@ test('canceling a transformed stream cancels its upstream, and incomplete signat
   await assert.rejects(unfinished.text(), error => error.code === 'desktop_upstream_protocol');
   await assert.rejects(wire.response(new Response('<html>provider error</html>', { status: 503 }), context), error => error.status === 502);
 });
+
+test('self-describing Responses state authenticates public routing hints and its item kind for reasoning and compaction', async () => {
+  const prefix = 'wire-remote-state:', described = new DesktopWire({ secret: 'wire-test-private-secret-'.repeat(3), prefix, selfDescribingState: true });
+  const ctx = { ...context, protocol: 'responses' }, input = [
+    { type: 'reasoning', id: 'rs_test', summary: [], encrypted_content: 'PRIVATE_INNER_THINKING_TOKEN' },
+    { type: 'compaction', id: 'cmp_test', encrypted_content: 'PRIVATE_INNER_COMPACTION_TOKEN' },
+  ];
+  const data = await (await described.response(Response.json({ output: input }), ctx)).json();
+  const original = structuredClone(data);
+  for (const [index, item] of data.output.entries()) {
+    assert.ok(item.encrypted_content.startsWith(prefix + 'v2.'));
+    assert.deepEqual(described.stateHint(item.encrypted_content), { version: 2, model: ctx.id, protocol: 'responses', kind: item.type });
+    assert.equal(described.openState(item.encrypted_content, ctx, { kind: item.type }), input[index].encrypted_content);
+    const packet = JSON.parse(Buffer.from(item.encrypted_content.slice((prefix + 'v2.').length), 'base64url'));
+    assert.deepEqual(Object.keys(packet).sort(), ['kind', 'model', 'protocol', 'state', 'version']);
+    assert.doesNotMatch(JSON.stringify(packet), /PRIVATE_INNER/);
+    for (const changes of [{ model: 'remote/bifrost/Claude-opus' }, { protocol: 'messages' },
+      { kind: item.type === 'reasoning' ? 'compaction' : 'reasoning' }, { version: 3 }, { unknown: true }]) {
+      const edited = prefix + 'v2.' + Buffer.from(JSON.stringify({ ...packet, ...changes })).toString('base64url');
+      assert.throws(() => described.openState(edited, { ...ctx, id: changes.model ?? ctx.id }, { kind: changes.kind ?? item.type }), error => error.status === 409);
+    }
+    assert.throws(() => described.openState(item.encrypted_content, { ...ctx, scope: '43b5525b-42f5-4e58-bc6e-6ed094b55bc2' }, { kind: item.type }), error => error.status === 409);
+  }
+  assert.deepEqual(described.input({ input: data.output }, ctx).input, input);
+  assert.deepEqual(data, original);
+  assert.throws(() => described.input({ input: [{ ...data.output[0], type: 'compaction' }] }, ctx), error => error.status === 409);
+});
+
+test('new wire still opens a legacy anonymous state only in its exact original context', async () => {
+  const secret = 'wire-test-private-secret-'.repeat(3), prefix = 'wire-remote-state:';
+  const legacy = new DesktopWire({ secret, prefix }), described = new DesktopWire({ secret, prefix, selfDescribingState: true });
+  const ctx = { ...context, protocol: 'responses' };
+  const data = await (await legacy.response(Response.json({ output: [{ type: 'reasoning', encrypted_content: 'PRIVATE_LEGACY_STATE' }] }), ctx)).json();
+  const token = data.output[0].encrypted_content;
+  assert.equal(described.stateHint(token), null);
+  assert.equal(described.openState(token, ctx, { kind: 'reasoning' }), 'PRIVATE_LEGACY_STATE');
+  assert.throws(() => described.openState(token, { ...ctx, id: 'remote/bifrost/Claude-opus' }, { kind: 'reasoning' }), error => error.status === 409);
+});
+
+test('split compaction SSE gets a bound envelope in every output position without leaking its inner checkpoint', async () => {
+  const described = new DesktopWire({ secret: 'wire-test-private-secret-'.repeat(3), prefix: 'wire-remote-state:', selfDescribingState: true });
+  const ctx = { ...context, protocol: 'responses' }, item = { type: 'compaction', id: 'cmp_fixture', encrypted_content: 'PRIVATE_COMPACTION_CHECKPOINT' };
+  const response = await described.response(streaming([
+    { type: 'response.output_item.added', output_index: 0, item },
+    { type: 'response.output_item.done', output_index: 0, item },
+    { type: 'response.completed', response: { model: 'Claude-sonnet', output: [item], usage: { input_tokens: 40, output_tokens: 6 } } },
+  ]), ctx);
+  const text = await response.text(); assert.doesNotMatch(text, /PRIVATE_COMPACTION_CHECKPOINT/);
+  const events = text.trim().split('\n\n').map(frame => JSON.parse(frame.split('\n').find(line => line.startsWith('data:')).slice(5)));
+  for (const event of events) {
+    const saved = event.item ?? event.response.output[0];
+    assert.equal(described.openState(saved.encrypted_content, ctx, { kind: 'compaction' }), item.encrypted_content);
+  }
+  assert.deepEqual(events.at(-1).response.usage, { input_tokens: 40, output_tokens: 6 });
+});

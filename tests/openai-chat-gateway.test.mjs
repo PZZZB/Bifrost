@@ -82,7 +82,8 @@ test('parallel tool results restore exact interleaved native blocks and signed t
   assert.equal(first.choices[0].finish_reason, 'tool_calls');
   assert.equal(first.choices[0].message.tool_calls.length, 2);
   assert.ok(!JSON.stringify(first).includes('PRIVATE_SIGNATURE'));
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  // Windows stat.mode does not describe the file's ACL.
+  if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600);
   const restored = new ChatHistoryStore({ path }); await restored.load();
   const request = translateChatRequest({ ...original, messages: [...original.messages, first.choices[0].message,
     { role: 'tool', tool_call_id: 'call_a', content: 'A content' }, { role: 'tool', tool_call_id: 'call_b', content: 'B content' }] }, restored);
@@ -126,7 +127,7 @@ test('tool-only dash placeholders restore persisted native blocks only for the e
   assert.deepEqual(translated.body.messages[1].content, canonical);
   assert.equal(translated.body.messages[2].content[0].tool_use_id, 'call_read');
   assert.equal(wire.messages[2].content, '-');
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600);
 
   const differentText = structuredClone(wire); differentText.messages[2].content = 'Additional assistant instructions';
   const differentArgs = structuredClone(wire); differentArgs.messages[2].tool_calls[0].function.arguments = '{"path":"other.txt"}';

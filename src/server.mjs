@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { BridgeError, redact } from './storage.mjs';
 import { backendPath, keyMatches, readBody, SseInspector } from './gateway.mjs';
-import { B_MODELS, resolveBModel } from './models.mjs';
+import { bCatalogModels, resolveBModel } from './models.mjs';
 
 const STATIC_FILES = { '/': ['index.html', 'text/html; charset=utf-8'],
   '/account-pool.js': ['account-pool.js', 'text/javascript; charset=utf-8'],
@@ -22,7 +22,7 @@ function json(res, status, data) {
 export function createBridgeServer({ backend, gateway, integration, state, publicDir, baseUrl,
   usageLedger = null, accountQuotas = null, providerQuotas = null, requestDiagnostics = null, clientAdmin = null, accountPool = null,
   codeBuddyService = null, serviceControl = null, modelPolicy = null, modelDiscovery = null, cursorService = null, cursorProvider = null,
-  ownerClientApi = null, clientControls = null,
+  ownerClientApi = null, clientControls = null, codexNativeEntry = null,
   getWithStatus = async () => ({ configured: false, running: false,
     model: { id: 'claude-opus-5-5', name: 'With · Opus 5.5' },
     gateway: { baseUrl: 'http://192.168.168.1:43157' },
@@ -71,9 +71,10 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
   }
 
   async function models() {
-    const data = await gateway.readBCatalog(`/models?client_version=${encodeURIComponent(clientVersion)}`);
-    return { models: B_MODELS.filter(alias => data.models?.some(model => model.slug === alias.upstream))
-      .map(({ id, name }) => ({ id, name })) };
+    const path = clientVersion ? `/models?client_version=${encodeURIComponent(clientVersion.split('-')[0])}` : '/models';
+    const models = typeof gateway.refreshBModels === 'function' ? await gateway.refreshBModels({ path, force: true })
+      : bCatalogModels(await gateway.readBCatalog(path));
+    return { models: models.map(model => ({ id: model.slug, name: model.display_name })) };
   }
 
   async function verify(model) {
@@ -129,6 +130,11 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       if (!allowedHosts.has(req.headers.host)) throw new BridgeError('Host 不允许。', 403);
       const url = new URL(req.url, base);
       if (url.origin !== base.origin) throw new BridgeError('请求目标不允许。', 403);
+      if (codexNativeEntry?.handles(url.pathname)) {
+        if (!gateway) throw new BridgeError('当前网关未启用 Codex 接入。', 404);
+        const upstreamUrl = codexNativeEntry.authorize(req, url);
+        await gateway.proxy(req, res, upstreamUrl, { nativeCaller: true }); return;
+      }
       if (backendPath(url.pathname)) { if (!gateway) throw new BridgeError('当前网关未启用此协议入口。', 404); await gateway.proxy(req, res, url); return; }
       if (ownerClientApi?.handles(url.pathname)) { await ownerClientApi.handle(req, res); return; }
       if (url.pathname === '/health' && req.method === 'GET') { json(res, 200, { ok: true, version: '0.1.0' }); return; }
@@ -142,7 +148,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
       checkBrowser(req);
       const sourceManagement = accountPool?.rows?.().some(a => a.enabled && (a.kind === 'cursor' && cursorService && /^\/api\/cursor(?:\/|$)/.test(url.pathname)
         || a.kind === 'codebuddy' && codeBuddyService && /^\/api\/codebuddy(?:\/|$)/.test(url.pathname)));
-      if (accountPool && !accountPool.capabilities().clientIntegration && !sourceManagement && !/^\/api\/(?:status$|node$|upstream-account-types$|upstream-accounts(?:\/|$)|client-admin(?:\/|$)|service\/|model-settings$|request-diagnostics(?:\/|$)|token-usage$)/.test(url.pathname)) {
+      if (accountPool && !accountPool.capabilities().clientIntegration && !sourceManagement && !/^\/api\/(?:status$|node$|upstream-account-types$|upstream-accounts(?:\/|$)|client-admin(?:\/|$)|service\/|model-settings$|request-diagnostics(?:\/|$)|token-usage$|account-quotas$)/.test(url.pathname)) {
         throw new BridgeError('当前网关未启用此管理能力。', 404, 'node_capability_unavailable');
       }
       if (req.method === 'GET') {
@@ -232,6 +238,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
           if (!accountQuotas && !providerQuotas) throw new BridgeError('账号额度查询暂不可用。', 503);
           const codeBuddyVersion = codeBuddyService?.authorizationVersion, cursorVersion = cursorService?.authorizationVersion;
           const bVersion = typeof accountQuotas?.bindingKey === 'function' ? accountQuotas.bindingKey() : null;
+          const bifrostVersion = providerQuotas?.bindingKey?.('Bifrost');
           const [native, external] = await Promise.all([accountQuotas?.snapshot(), providerQuotas?.snapshot()]);
           const accounts = { ...native?.accounts, ...external?.accounts };
           const staleCard = (account) => ({ ...accounts[account], status: 'error', authenticated: null, identity: null,
@@ -240,6 +247,7 @@ export function createBridgeServer({ backend, gateway, integration, state, publi
           if (codeBuddyVersion !== codeBuddyService?.authorizationVersion) accounts.CodeBuddy = staleCard('CodeBuddy');
           if (cursorVersion !== cursorService?.authorizationVersion) accounts.Cursor = staleCard('Cursor');
           if (typeof accountQuotas?.bindingKey === 'function' && bVersion !== accountQuotas.bindingKey()) accounts.B = staleCard('B');
+          if (bifrostVersion !== providerQuotas?.bindingKey?.('Bifrost')) accounts.Bifrost = { ...staleCard('Bifrost'), sources: [] };
           json(res, 200, { timeZone: native?.timeZone ?? external?.timeZone ?? 'America/Los_Angeles',
             accounts }); return;
         }

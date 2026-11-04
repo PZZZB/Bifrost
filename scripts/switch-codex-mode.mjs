@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { Integration } from '../src/integration.mjs';
 import { CodexRpc } from '../src/rpc.mjs';
 import { readJson, redact } from '../src/storage.mjs';
+import { createCodexNativeEntry } from '../src/codex-native-entry.mjs';
 
 function failure(code, message) {
   const error = new Error(message);
@@ -80,8 +81,10 @@ async function officialWithoutService(settings, stateDir, rpcFactory) {
   }
   const rpc = rpcFactory({ binary: settings.binary, home: settings.home, cwd: homedir() });
   try {
+    const baseUrl = `${settings.origin}/backend-api/codex`;
     const integration = new Integration({ rpc, configPath: join(settings.home, 'config.toml'),
-      statePath: join(stateDir, 'integration.json'), baseUrl: `${settings.origin}/backend-api/codex`,
+      statePath: join(stateDir, 'integration.json'), baseUrl,
+      nativeBaseUrl: createCodexNativeEntry({ baseUrl, gatewayKey: state.gatewayKey }).baseUrl,
       gatewayKey: state.gatewayKey });
     const before = await integration.inspect();
     await integration.switchMode('official');

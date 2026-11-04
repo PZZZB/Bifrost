@@ -5,6 +5,7 @@ import { translateResponses, ResponsesConversion, MessagesSseParser, messagesJso
   encodeResponsesEvent, AdapterError, errorData, errorResponse } from './responses-messages.mjs';
 
 const MAX = 64 * 1024 * 1024;
+const COMPACTION_PREFIX = 'bifrost-messages-compaction-v1:';
 const EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
 const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
@@ -17,12 +18,22 @@ function thinkingBlock(value) {
 
 /** Responses ↔ Messages. Independent of Codex, source identity, URLs and billing. */
 export class MessagesResponsesAdapter {
-  #request; #codec; #marker = `bifrost-priority-${randomUUID()}`;
+  #request; #codec; #compactionCodec; #marker = `bifrost-priority-${randomUUID()}`;
   #toolMetadata = new Map(); #digest;
   constructor({ requestMessages, stateSecret } = {}) {
     if (typeof requestMessages !== 'function') throw new TypeError('A scoped Messages transport is required.');
     this.#request = requestMessages; this.#codec = new ClientStateCodec({ secret: stateSecret });
+    this.#compactionCodec = new ClientStateCodec({ secret: createHmac('sha256', stateSecret).update('bifrost-messages-compaction-v1').digest('hex') });
     this.#digest = value => createHmac('sha256', stateSecret).update(JSON.stringify(stable(value))).digest('hex');
+  }
+  openCompactionForHandoff(value, { scope, model, signal } = {}) {
+    if (signal?.aborted) throw new AdapterError('请求已取消。', 499);
+    try {
+      if (typeof value !== 'string' || !value.startsWith(COMPACTION_PREFIX)) throw new Error();
+      const saved = JSON.parse(this.#compactionCodec.open(value.slice(COMPACTION_PREFIX.length), scope, model));
+      if (!saved || saved.version !== 1 || Object.keys(saved).length !== 2 || typeof saved.summary !== 'string' || !saved.summary.trim()) throw new Error();
+      return saved.summary;
+    } catch { throw new AdapterError('历史摘要不属于当前来源、模型、接入用户或授权。', 409, 'input.compaction'); }
   }
   async request({ body, scope, session, signal, capabilities = {} } = {}) {
     const abort = new AbortController(), linked = AbortSignal.any([abort.signal, ...(signal ? [signal] : [])]);
@@ -34,7 +45,12 @@ export class MessagesResponsesAdapter {
         try { block = JSON.parse(this.#codec.open(value, scope, body.model)); } catch { throw new AdapterError('思考接续状态不属于当前来源、会话或授权。', 409); }
         return [thinkingBlock(block)];
       },
-      sealState: block => this.#codec.seal(JSON.stringify(thinkingBlock(block)), scope, body.model) };
+      sealState: block => this.#codec.seal(JSON.stringify(thinkingBlock(block)), scope, body.model),
+      openCompaction: value => {
+        const summary = this.openCompactionForHandoff(value, { scope, model: body.model, signal: linked });
+        return [{ type: 'text', text: `[Bifrost conversation summary]\n${summary}\n[/Bifrost conversation summary]` }];
+      },
+      sealCompaction: summary => COMPACTION_PREFIX + this.#compactionCodec.seal(JSON.stringify({ version: 1, summary }), scope, body.model) };
     // Responses has no field for Anthropic's direct-caller annotation. Keep only
     // that observed annotation in a bounded, scoped exact-replay map. IDs, names
     // and arguments must still match; no defaults or invented tool results.
@@ -114,7 +130,7 @@ export class MessagesResponsesAdapter {
         const wireUsage = usage ? { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens, total_tokens: usage.totalTokens,
           input_tokens_details: { cached_tokens: usage.cachedInputTokens, cache_write_tokens: usage.cacheWriteTokens },
           output_tokens_details: { reasoning_tokens: usage.reasoningTokens } } : null;
-        yield conversion.finish(wireUsage);
+        for (const event of conversion.finishEvents(wireUsage)) { check(); yield event; }
       } finally { await dispose(); }
     };
     const iterator = events();

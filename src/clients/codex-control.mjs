@@ -7,7 +7,13 @@ export function createCodexClientControl({ integration }) {
       const state = await integration.inspect();
       return { mode: state.routing?.mode === 'official' ? 'native' : state.routing?.mode === 'gateway' ? 'gateway' : 'unknown',
         configured: state.installed === true, reason: state.routing?.reason ?? null,
-        reloadNote: '模式配置通过 Codex 官方接口保存。完全退出后重开以切换；目录同步不保证当前模型菜单即时刷新。' };
+        modeUpdateRequired: state.routing?.nativeThreadsSupported === true && state.needsUpgrade === true,
+        reloadNote: state.routing?.nativeThreadsSupported === true
+          ? state.needsUpgrade ? state.routing?.mode === 'official'
+            ? '请更新原生连接以恢复旧会话原始路由，再完全退出并重开 Codex。'
+            : '请先更新网关连接，补齐原生旧会话接入，再完全退出并重开 Codex。'
+            : '模式连接配置已保存。完全退出并重开 Codex 后原会话生效，历史保留；原生模式请选择普通 GPT 模型。'
+          : '模式配置通过 Codex 官方接口保存。完全退出后重开以切换；目录同步不保证当前模型菜单即时刷新。' };
     },
     async setMode(mode) {
       try { await integration.switchMode(mode === 'native' ? 'official' : 'gateway'); }

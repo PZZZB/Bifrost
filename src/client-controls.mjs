@@ -94,7 +94,7 @@ export class ClientControls {
         : mode !== 'gateway' || !supported ? 'unavailable' : saved.lastError ? 'conflict'
           : saved.lastRevision === revision(models) ? 'current' : 'pending';
       return { id: adapter.id, name: adapter.name, protocol: adapter.protocol ?? null,
-        installed: app?.installed === true, mode, modeLabel,
+        installed: app?.installed === true, mode, modeLabel, modeUpdateRequired: current.modeUpdateRequired === true,
         supports: { launch: app?.installed === true && app.launchSupported !== false,
           mode: typeof adapter.setMode === 'function', sync: supported, autoSync: supported },
         autoSync: saved.autoSync, modelCount: supported ? current.modelCount ?? current.managedModelCount ?? saved.modelCount : null,

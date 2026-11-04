@@ -64,15 +64,15 @@ export class ModelRouter {
     const value = bytes.toString('hex');
     return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
   }
-  resolve(protocol, { body, owner = 'desktop-owner', session = '' } = {}) {
+  resolve(protocol, { body, owner = 'desktop-owner', session = '', trackSession = true } = {}) {
     const route = this.#routes().get(body?.model);
     if (!route) throw fail('所选模型未就绪或未登记，请检查来源状态。', 503, 'desktop_model_unavailable');
     if (!route.public.protocols.includes(protocol)) throw fail('所选模型尚未支持此协议，请选择该模型支持的接口。', 501, 'desktop_protocol_unsupported');
-    if (typeof owner !== 'string' || !owner || owner.length > 128 || typeof session !== 'string' || session.length > 1024 || /[\x00-\x1f\x7f]/.test(session)) {
+    if (typeof trackSession !== 'boolean' || typeof owner !== 'string' || !owner || owner.length > 128 || typeof session !== 'string' || session.length > 1024 || /[\x00-\x1f\x7f]/.test(session)) {
       throw fail('会话标识无效。', 400, 'desktop_session_invalid');
     }
     const scope = this.#binding(route, owner, session);
-    if (session) {
+    if (session && trackSession) {
       const at = this.#now();
       for (const [key, row] of this.#sessions) if (row.expires <= at) this.#sessions.delete(key);
       const key = createHmac('sha256', this.#secret).update(JSON.stringify([owner, session])).digest('hex');

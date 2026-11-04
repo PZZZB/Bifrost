@@ -140,7 +140,7 @@ async function settle() { for (let index = 0; index < 12; index++) await new Pro
 function integrationFixture(mode = 'gateway', overrides = {}) {
   return { installed: true, providerId: mode === 'official' ? 'openai' : 'custom',
     routing: { supported: true, mode, providerId: mode === 'official' ? 'openai' : 'custom', gatewayProviderId: 'custom',
-      canSwitchOfficial: true, canSwitchGateway: true }, ...overrides };
+      canSwitchOfficial: true, canSwitchGateway: true, nativeThreadsSupported: true, nativeThreadsCovered: mode === 'gateway' }, ...overrides };
 }
 
 const boundBackend = () => ({ running: true, account: { email: 'bound@example.test' }, pinnedAccount: { email: 'bound@example.test' } });
@@ -206,14 +206,57 @@ test('Codex mode buttons submit explicit directions with CSRF and refresh the sa
   page.elements.get('integration-official-button').trigger('click'); await settle();
   assert.equal(page.elements.get('integration-mode-value').textContent, '官方直连');
   assert.equal(page.elements.get('integration-gateway-button').disabled, false);
-  assert.match(page.elements.get('notice').textContent, /完全退出并重新打开 Codex.*选择该模式可用的模型/);
+  assert.match(page.elements.get('notice').textContent, /完全退出并重开 Codex.*普通 GPT 模型/);
   page.elements.get('integration-gateway-button').trigger('click'); await settle();
   assert.equal(page.elements.get('integration-mode-value').textContent, 'Bifröst 网关');
   assert.equal(page.elements.get('integration-official-button').disabled, false);
   assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+  assert.match(page.elements.get('notice').textContent, /已保存网关配置并覆盖原生旧会话.*完全退出并重开 Codex/);
   assert.deepEqual(page.calls.filter(call => call.method === 'POST').map(call => [call.path, call.body]), [
     ['/api/integration/mode', { mode: 'official' }], ['/api/integration/mode', { mode: 'gateway' }],
   ]);
+});
+
+test('an existing gateway selection can explicitly upgrade old native threads without migrating conversation history', async () => {
+  const old = integrationFixture(); old.needsUpgrade = true; old.routing.nativeThreadsCovered = false;
+  const page = harness({ integration: old, backend: boundBackend(), verification: { status: 'passed' },
+    fetch(call, api) { if (call.path === '/api/integration/mode') {
+      assert.deepEqual(call.body, { mode: 'gateway' }); api.integration = integrationFixture(); return json(api.integration);
+    } } });
+  await settle();
+  assert.equal(page.elements.get('integration-gateway-button').disabled, false);
+  assert.equal(page.elements.get('integration-gateway-button').textContent, '更新网关连接');
+  assert.match(page.elements.get('integration-mode-error').textContent, /原生旧会话/);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+  page.elements.get('integration-gateway-button').trigger('click'); await settle();
+  assert.equal(page.calls.filter(call => call.method === 'POST').length, 1);
+  assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+  assert.match(page.elements.get('notice').textContent, /完全退出并重开 Codex/);
+  assert.equal(page.calls.some(call => /thread|service\/restart/.test(call.path)), false);
+});
+
+test('an old gateway backend does not claim that existing native threads have been connected', async () => {
+  const old = integrationFixture(); delete old.routing.nativeThreadsSupported; delete old.routing.nativeThreadsCovered;
+  const page = harness({ integration: old, backend: boundBackend(), verification: { status: 'passed' } }); await settle();
+  assert.equal(page.elements.get('integration-gateway-button').disabled, true);
+  assert.match(page.elements.get('integration-mode-error').textContent, /空闲重启网关加载新版/);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('an existing official selection can explicitly restore legacy custom threads without enabling the gateway', async () => {
+  const old = integrationFixture('official'); old.needsUpgrade = true; old.routing.nativeThreadsCovered = false;
+  const page = harness({ integration: old, backend: { running: true }, verification: { status: 'not_run' },
+    fetch(call, api) { if (call.path === '/api/integration/mode') {
+      assert.deepEqual(call.body, { mode: 'official' }); api.integration = integrationFixture('official'); return json(api.integration);
+    } } });
+  await settle();
+  assert.equal(page.elements.get('integration-official-button').disabled, false);
+  assert.equal(page.elements.get('integration-official-button').textContent, '更新原生连接');
+  assert.match(page.elements.get('integration-mode-error').textContent, /更新原生连接/);
+  page.elements.get('integration-official-button').trigger('click'); await settle();
+  assert.equal(page.calls.filter(call => call.method === 'POST').length, 1);
+  assert.equal(page.elements.get('integration-official-button').disabled, true);
+  assert.equal(page.elements.get('integration-mode-value').textContent, '官方直连');
 });
 
 test('Codex gateway selection requires saved route capability and confirmed verified B while official selection remains available', async () => {
@@ -610,6 +653,28 @@ test('model disclosure groups use account identities rather than merging sources
   assert.match(listText(modelGroups(page)[3].children[0]), /已勾选 0 \/ 可用 1 · 共 1 项/);
 });
 
+test('the B account group displays its full directory while only two saved choices are enabled', async () => {
+  const ids = ['B-gpt-6-astra', 'B-gpt-6.1-sol', 'B-gpt-directory-extra', 'B-gpt-directory-other'];
+  const models = ids.map((id, index) => ({ id, name: `Team model ${index + 1}`, channel: 'B',
+    enabled: index < 2, available: true, sourceAccountId: 'legacy-codex', sourceAccountName: 'Codex员工账号' }));
+  const page = harness({ models: { revision: 8, discovery: { B: { state: 'ready', count: 4 } }, models } });
+  await settle();
+  const group = modelGroupFor(page, 'B');
+  assert.deepEqual(group.querySelectorAll('input').map(input => input.value), ids);
+  assert.deepEqual(group.querySelectorAll('input').map(input => input.checked), [true, true, false, false]);
+  assert.ok(group.querySelectorAll('input').every(input => input.disabled === false));
+  assert.match(listText(group.children[0]), /已勾选 2 \/ 可用 4 · 共 4 项/);
+  setModelGroupOpen(group, true);
+  for (const [id, checked] of [[ids[0], false], [ids[2], true]]) {
+    const input = inputFor(page, id); input.checked = checked; input.trigger('change');
+  }
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const saved = page.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.deepEqual(saved.body, { revision: 8, disabledModels: [ids[0], ids[3]] });
+  assert.deepEqual(modelGroupFor(page, 'B').querySelectorAll('input').map(input => input.checked), [false, true, true, false]);
+  assert.match(listText(modelGroupFor(page, 'B').children[0]), /已勾选 2 \/ 可用 4 · 共 4 项/);
+});
+
 test('search matches account names and a rename preserves account disclosure and draft selections', async () => {
   const model = { id: 'remote/work/Claude-sonnet', name: 'Claude Sonnet', channel: 'Bifrost', enabled: false,
     sourceAccountId: 'work', sourceAccountName: '工作订阅' };
@@ -858,6 +923,203 @@ function quotaPage(snapshot = quotaSnapshot()) {
   page.setQuotas = value => { current = value; };
   return page;
 }
+
+const bifrostQuotaSource = (overrides = {}) => ({ id: 'home', name: 'Bifröst · Home', status: 'ok', authenticated: true,
+  identity: 'remote-user', source: 'bifrost-remote-account', fetchedAt: '2026-11-03T20:00:00.000Z', error: null, notice: '',
+  wallet: { currency: 'CNY', enforceBalance: true, balanceMicros: 12_345_678, reservedMicros: 2_000_000, availableMicros: 10_345_678 },
+  tokenQuota: { limit: 1000, used: 850, reserved: 150, remaining: 0 }, key: { expiresAt: '2026-11-30T20:00:00.000Z' }, ...overrides });
+const withBifrostQuota = (sources = [bifrostQuotaSource()], overrides = {}) => {
+  const snapshot = quotaSnapshot();
+  snapshot.accounts.Bifrost = { status: 'ok', authenticated: true, source: 'bifrost-remote-account', fetchedAt: '2026-11-03T20:00:00.000Z',
+    notice: '余额由各远端账本提供，不与本机 Token 统计混算。', sources, ...overrides };
+  return snapshot;
+};
+
+test('Bifrost balances render each source separately with exact CNY amounts, reservations, quotas and Key validity', async () => {
+  const other = bifrostQuotaSource({ id: 'second', name: 'Bifröst · Second', identity: 'second-user',
+    wallet: { currency: 'CNY', enforceBalance: false, balanceMicros: 9_000_000, reservedMicros: 1_000_000, availableMicros: 8_000_000 },
+    tokenQuota: { limit: null, used: 88, reserved: 20, remaining: null }, key: { expiresAt: null } });
+  const page = quotaPage(withBifrostQuota([bifrostQuotaSource(), other])); await settle();
+  const sources = page.elements.get('quota-bifrost-sources').children;
+  assert.equal(sources.length, 2); assert.equal(page.elements.get('quota-bifrost-state').textContent, '已更新');
+  const first = listText(sources[0]), second = listText(sources[1]);
+  assert.match(first, /remote-user/); assert.match(first, /可用余额（CNY） 10\.345678 元/);
+  assert.match(first, /总余额 12\.345678 元/); assert.match(first, /已预留金额 2 元/);
+  assert.match(first, /Token 配额：剩余 0 \/ 1,000/); assert.match(first, /本周期已用 850 Token · 已预留 150 Token/);
+  assert.match(first, /Key 有效期：至 2026\/11\/30 12:00:00/);
+  assert.match(second, /second-user/); assert.match(second, /账面余额（CNY） 9 元/);
+  assert.match(second, /可用账面金额 8 元/); assert.match(second, /远端未启用余额限制/);
+  assert.match(second, /Token 配额：未设置限额/); assert.match(second, /Key 有效期：未设置到期时间/);
+  assert.doesNotMatch(first + second, /无限|不限量|18\.345678|21\.345678/);
+  assert.equal(sources[0].querySelectorAll('progress').length, 0);
+  assert.match(page.elements.get('quota-bifrost-updated').textContent, /查询时间/);
+});
+
+test('Bifrost wallet formatting preserves legitimate zero, negative and safe-integer precision', async () => {
+  const wallets = [
+    { currency: 'CNY', enforceBalance: true, balanceMicros: 0, reservedMicros: 0, availableMicros: 0 },
+    { currency: 'CNY', enforceBalance: true, balanceMicros: -1_000_001, reservedMicros: 0, availableMicros: -1_000_001 },
+    { currency: 'CNY', enforceBalance: true, balanceMicros: Number.MAX_SAFE_INTEGER, reservedMicros: 0, availableMicros: Number.MAX_SAFE_INTEGER },
+  ];
+  const page = quotaPage(withBifrostQuota(wallets.map((wallet, index) => bifrostQuotaSource({ id: `source-${index}`, wallet })))); await settle();
+  const [zero, negative, large] = page.elements.get('quota-bifrost-sources').children.map(listText);
+  assert.match(zero, /可用余额（CNY） 0 元/); assert.doesNotMatch(zero, /无限|不限量/);
+  assert.match(negative, /可用余额（CNY） -1\.000001 元/);
+  assert.match(large, /可用余额（CNY） 9007199254\.740991 元/);
+});
+
+test('unknown and failed Bifrost sources never render monetary placeholders, old identities or raw markup', async () => {
+  const unknown = bifrostQuotaSource({ id: '<script>source</script>', name: '<img src=x onerror=fixture>', status: 'unknown',
+    identity: '<b>remote-user</b>', notice: '<script>notice</script>', usageUrl: 'javascript:fixture()',
+    wallet: { currency: 'CNY', enforceBalance: true, balanceMicros: 0, reservedMicros: 0, availableMicros: 0 } });
+  const failed = bifrostQuotaSource({ id: 'broken', name: 'Broken source', status: 'error', authenticated: false,
+    identity: 'old-identity-must-not-display', error: '远端 Key 已过期。' });
+  const page = quotaPage(withBifrostQuota([unknown, failed], { status: 'partial' })); await settle();
+  const [unknownCard, failedCard] = page.elements.get('quota-bifrost-sources').children;
+  assert.equal(page.elements.get('quota-bifrost-state').textContent, '部分需检查');
+  assert.match(listText(unknownCard), /未提供余额.*远端未提供可靠余额/);
+  assert.doesNotMatch(listText(unknownCard), /0 元|剩余 0|无限/);
+  assert.match(listText(unknownCard), /<img src=x onerror=fixture>/); assert.match(listText(unknownCard), /<script>notice<\/script>/);
+  assert.equal(unknownCard.querySelectorAll('img').length + unknownCard.querySelectorAll('script').length, 0);
+  assert.equal(unknownCard.querySelectorAll('a').length, 0);
+  assert.equal(unknownCard.getAttribute('aria-labelledby'), 'quota-bifrost-source-title-0');
+  assert.match(listText(failedCard), /需检查.*未确认有效的远端 Key/);
+  assert.match(listText(failedCard), /远端 Key 已过期/);
+  assert.doesNotMatch(listText(failedCard), /old-identity-must-not-display|10\.345678|12\.345678|1,000/);
+});
+
+test('authenticated Bifrost accounts retain verified Key expiry when the remote has no billing ledger', async () => {
+  const verified = bifrostQuotaSource({ status: 'unknown', wallet: null, tokenQuota: null,
+    key: { expiresAt: '2026-11-30T20:00:00.000Z' } });
+  const unverified = { ...verified, id: 'unverified', authenticated: null };
+  const page = quotaPage(withBifrostQuota([verified, unverified], { status: 'unknown' })); await settle();
+  const [verifiedCard, unverifiedCard] = page.elements.get('quota-bifrost-sources').children.map(listText);
+  assert.match(verifiedCard, /未提供余额/);
+  assert.match(verifiedCard, /Key 有效期：至 2026\/11\/30 12:00:00/);
+  assert.doesNotMatch(verifiedCard, /可用余额|总余额|已预留金额|Token 配额：剩余|0 元/);
+  assert.match(unverifiedCard, /Key 有效期：未返回/);
+  assert.doesNotMatch(unverifiedCard, /2026\/11\/30/);
+});
+
+test('malformed Bifrost balances and token quota values remain unknown instead of borrowing valid-looking numbers', async () => {
+  for (const wallet of [
+    { currency: 'USD', enforceBalance: true, balanceMicros: 100, reservedMicros: 0, availableMicros: 100 },
+    { currency: 'CNY', enforceBalance: true, balanceMicros: 100, reservedMicros: 20, availableMicros: 100 },
+    { currency: 'CNY', enforceBalance: true, balanceMicros: 1.5, reservedMicros: 0, availableMicros: 1.5 },
+  ]) {
+    const source = bifrostQuotaSource({ wallet, tokenQuota: { limit: 100, used: 90, reserved: 10, remaining: 100 } });
+    const page = quotaPage(withBifrostQuota([source])); await settle();
+    const card = page.elements.get('quota-bifrost-sources').children[0];
+    assert.match(listText(card), /远端未提供可靠余额/); assert.match(listText(card), /Token 配额：未返回/);
+    assert.doesNotMatch(listText(card), /可用余额|总余额|剩余 100|无限/);
+  }
+});
+
+test('Bifrost quota refresh clears removed sources and distinguishes a missing backend from no configured source', async () => {
+  const page = quotaPage(withBifrostQuota()); await settle();
+  assert.match(listText(page.elements.get('quota-bifrost-sources')), /remote-user/);
+  page.setQuotas(withBifrostQuota([], { status: 'not_connected', authenticated: false, notice: '' }));
+  page.elements.get('quota-refresh-button').trigger('click'); await settle();
+  assert.equal(page.elements.get('quota-bifrost-state').textContent, '未绑定');
+  assert.match(listText(page.elements.get('quota-bifrost-sources')), /未配置远端 Bifröst 来源/);
+  assert.doesNotMatch(listText(page.elements.get('quota-bifrost-sources')), /remote-user|10\.345678/);
+  page.setQuotas(quotaSnapshot()); page.elements.get('quota-refresh-button').trigger('click'); await settle();
+  assert.equal(page.elements.get('quota-bifrost-state').textContent, '待更新服务');
+  assert.match(listText(page.elements.get('quota-bifrost-sources')), /当前服务未提供远端账号余额/);
+});
+
+test('remote-only nodes display remote balances and permit manual refresh without polling local accounts or scheduling balance reads', async () => {
+  const page = harness({ quotas: withBifrostQuota(), node: { capabilities: {
+    clientIntegration: false, userManagement: true, activeKinds: ['bifrost'],
+  } } }); await settle();
+  const count = () => page.calls.filter(call => call.path === '/api/account-quotas').length;
+  assert.equal(page.elements.get('account-quotas-panel').hidden, false);
+  assert.ok(page.document.querySelectorAll('[data-local-quota]').every(element => element.hidden));
+  assert.equal(count(), 1); assert.match(listText(page.elements.get('quota-bifrost-sources')), /10\.345678 元/);
+  for (const interval of page.intervals) interval.callback(); await settle(); assert.equal(count(), 1);
+  page.elements.get('quota-refresh-button').trigger('click'); await settle(); assert.equal(count(), 2);
+  assert.equal(page.calls.some(call => ['/api/cursor', '/api/codebuddy', '/api/with', '/api/token-usage'].includes(call.path)), false);
+});
+
+test('service replacement refreshes Bifrost balances once and does not retain the former source list', async () => {
+  const page = harness({ quotas: withBifrostQuota(), node: { capabilities: { clientIntegration: true, activeKinds: ['bifrost'] } } }); await settle();
+  const count = () => page.calls.filter(call => call.path === '/api/account-quotas').length;
+  assert.equal(count(), 1);
+  page.token = 'new-service-token';
+  page.quotas = withBifrostQuota([bifrostQuotaSource({ id: 'new', identity: 'new-remote-user' })]);
+  for (const interval of page.intervals) interval.callback(); await settle();
+  assert.equal(count(), 2); assert.match(listText(page.elements.get('quota-bifrost-sources')), /new-remote-user/);
+  for (const interval of page.intervals) interval.callback(); await settle(); assert.equal(count(), 2);
+});
+
+test('late Bifrost quota results from a replaced service cannot restore the old account or release a newer query', async () => {
+  const waiting = [], page = harness({ fetch(call) {
+    if (call.path === '/api/account-quotas') return new Promise(resolve => waiting.push(resolve));
+  } }); await settle();
+  assert.equal(waiting.length, 1);
+  page.token = 'replacement-service-csrf';
+  await page.run('refreshStatus()'); await settle(); assert.equal(waiting.length, 2);
+  waiting[0](json(withBifrostQuota([bifrostQuotaSource({ identity: 'former-remote-owner' })]))); await settle();
+  assert.equal(page.elements.get('quota-refresh-button').disabled, true);
+  assert.doesNotMatch(listText(page.elements.get('quota-bifrost-sources')), /former-remote-owner/);
+  waiting[1](json(withBifrostQuota([bifrostQuotaSource({ identity: 'current-remote-owner' })]))); await settle();
+  assert.equal(page.elements.get('quota-refresh-button').disabled, false);
+  assert.match(listText(page.elements.get('quota-bifrost-sources')), /current-remote-owner/);
+  for (const interval of page.intervals) interval.callback(); await settle(); assert.equal(waiting.length, 2);
+});
+
+test('modern local nodes keep quota windows visible and refresh them only on load, manual action, or authorization change', async () => {
+  const page = harness({ quotas: quotaSnapshot(), node: { capabilities: {
+    clientIntegration: true, userManagement: false, activeKinds: ['codex-client', 'codex', 'codebuddy', 'cursor'],
+  } } });
+  await settle();
+  const count = () => page.calls.filter(call => call.path === '/api/account-quotas').length;
+  assert.equal(count(), 1, 'A modern local node must read its account quotas on initial load.');
+  const panel = page.elements.get('account-quotas-panel');
+  assert.ok(panel, 'The quota section must have a stable DOM identity.');
+  assert.equal(panel.hidden, false);
+  assert.equal(panel.hasAttribute('data-client-integration-only'), false, 'Remote-only nodes also have account balances.');
+  assert.equal(panel.hasAttribute('data-legacy-overview'), false);
+  assert.match(listText(page.elements.get('quota-a-windows')), /剩余 25%/);
+  assert.match(listText(page.elements.get('quota-b-windows')), /剩余 75%/);
+  for (const interval of page.intervals) interval.callback(); await settle();
+  assert.equal(count(), 1, 'Ordinary status polling must not repeatedly query account quotas.');
+  const changed = quotaSnapshot(); changed.accounts.B.windows[0].remainingPercent = 68;
+  page.quotas = changed;
+  page.elements.get('quota-refresh-button').trigger('click'); await settle();
+  assert.equal(count(), 2); assert.match(listText(page.elements.get('quota-b-windows')), /剩余 68%/);
+  changed.accounts.Cursor.identity = 'after-local-authorization@example.test';
+  page.cursor = { ...page.cursor, configured: true, enabled: true, authReady: true,
+    profile: { email: 'after-local-authorization@example.test' } };
+  await page.run('refreshCursor()'); await settle();
+  assert.equal(count(), 3, 'A newly authorized local provider must refresh account quota metadata.');
+  assert.equal(page.elements.get('quota-cursor-identity').textContent, 'after-local-authorization@example.test');
+  for (const interval of page.intervals) interval.callback(); await settle();
+  assert.equal(count(), 3); assert.equal(panel.hidden, false);
+  assert.ok(page.document.querySelectorAll('[data-legacy-overview]').every(element => element.hidden),
+    'Restoring the quota section must not restore other legacy sections.');
+});
+
+test('legacy backends retain a visible quota section and their initial quota lookup', async () => {
+  const page = quotaPage(); await settle();
+  const panel = page.elements.get('account-quotas-panel');
+  assert.ok(panel, 'The quota section must have a stable DOM identity.');
+  assert.equal(panel.hidden, false);
+  assert.equal(page.calls.filter(call => call.path === '/api/account-quotas').length, 1);
+  assert.match(listText(page.elements.get('quota-a-windows')), /剩余 25%/);
+});
+
+test('managed nodes keep quota controls hidden and cannot query unrelated quotas through manual or authorization refresh', async () => {
+  const page = harness({ node: { capabilities: { clientIntegration: false, userManagement: true, activeKinds: ['claude'] } } });
+  await settle();
+  const panel = page.elements.get('account-quotas-panel');
+  assert.ok(panel, 'The quota section must have a stable DOM identity.');
+  assert.equal(panel.hidden, true);
+  page.elements.get('quota-refresh-button').trigger('click');
+  await page.run('refreshAuthorizedAccountQuotas()'); await settle();
+  for (const interval of page.intervals) interval.callback(); await settle();
+  assert.equal(page.calls.some(call => call.path === '/api/account-quotas'), false);
+});
 
 test('four quota cards bind each provider identity and preserve real A/B percentages without inventing provider balances', async () => {
   const page = quotaPage(); await settle();

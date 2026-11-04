@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { BridgeError, writeJson } from './storage.mjs';
-import { resolveBModel, resolveCodeBuddyModel } from './models.mjs';
+import { B_MODELS, resolveBModel, resolveCodeBuddyModel } from './models.mjs';
 import { CURSOR_MODELS } from './cursor-service.mjs';
 import { capabilitiesFromCatalog, hasCatalogCapabilityData, unverifiedModel, verificationFromRecord } from './model-capabilities.mjs';
 
@@ -9,6 +9,7 @@ export const MODEL_POLICY_CHANNELS = Object.freeze(['A', 'B', 'CodeBuddy', 'Curs
 const MAX_DISABLED = 2048;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const LEGACY_EXTERNAL_DEFAULTS = new Set(['claude-codebuddy-opus-5-5', ...CURSOR_MODELS.map(model => model.id)]);
+const LEGACY_B_DEFAULTS = new Set(B_MODELS.map(model => model.id));
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const safeText = value => typeof value === 'string' && value.length > 0 && value.length <= 512
@@ -129,7 +130,7 @@ export class ModelPolicy {
   #modelAvailability(id) {
     const value = this.#availability.get(id), channel = this.#models.get(id)?.channel;
     const getter = this.#authorizationSources.get(channel);
-    if (getter && ['CodeBuddy', 'Cursor', 'Bifrost'].includes(channel) && (!value || value.authorizationVersion !== getter())) {
+    if (getter && ['B', 'CodeBuddy', 'Cursor', 'Bifrost'].includes(channel) && (!value || value.authorizationVersion !== getter())) {
       return { available: false, reason: '账号授权已变化或尚未取得当前账号目录，请刷新后重试。' };
     }
     if (!value) return undefined;
@@ -181,18 +182,22 @@ export class ModelPolicy {
     const observed = catalogModels(catalog).flatMap(model => {
       const id = modelId(model);
       if (id === null) return [];
-      const availability = typeof model.available === 'boolean' ? { available: model.available,
-        ...(!model.available ? { reason: safeText(model.reason) ? model.reason : '当前账号暂不能使用此模型。' } : {}),
-        ...(['remote', 'native-cache', 'account-catalog'].includes(model.source) ? { source: model.source } : {}),
-        ...(authorizationVersion !== undefined ? { authorizationVersion } : {}) } : null;
       const channel = fixedChannel(id) ?? channelHint ?? 'A';
       const getter = this.#authorizationSources.get(channel), previousDetails = this.#details.get(id);
       const version = authorizationVersion ?? getter?.();
+      // A merged client catalog must not overwrite the binding on authoritative
+      // B metadata, or relabel an old account's capabilities as a new account's.
+      const authoritative = channel !== 'B' || !getter || channelHint === 'B' && authorizationVersion !== undefined;
+      const availability = authoritative && typeof model.available === 'boolean' ? { available: model.available,
+        ...(channel === 'B' && Number.isInteger(model.priority) ? { priority: model.priority } : {}),
+        ...(!model.available ? { reason: safeText(model.reason) ? model.reason : '当前账号暂不能使用此模型。' } : {}),
+        ...(['remote', 'native-cache', 'account-catalog'].includes(model.source) ? { source: model.source } : {}),
+        ...(authorizationVersion !== undefined ? { authorizationVersion } : {}) } : null;
       // Client catalogs contain bridge-generated limits. Only the provider's
       // own directory may populate external capabilities.
-      const details = ['A', 'B'].includes(channel) && hasCatalogCapabilityData(model, { channel })
+      const details = authoritative && (['A', 'B'].includes(channel) && hasCatalogCapabilityData(model, { channel })
         || channelHint === channel && ['CodeBuddy', 'Cursor', 'Bifrost', 'Claude'].includes(channel)
-          && (hasCatalogCapabilityData(model, { channel }) || promptMode !== undefined || !previousDetails || previousDetails.authorizationVersion !== version)
+          && (hasCatalogCapabilityData(model, { channel }) || promptMode !== undefined || !previousDetails || previousDetails.authorizationVersion !== version))
         ? { authorizationVersion: version,
           value: capabilitiesFromCatalog(model, { channel, promptMode: promptMode
             ?? this.#details.get(id)?.value.capabilities.promptMode.mode }) } : null;
@@ -211,7 +216,8 @@ export class ModelPolicy {
         if (!previous || previous.name !== next.name || previous.channel !== next.channel) {
           models.set(entry.id, next); changed = true;
         }
-        if (!previous && (!defaultEnabled || ['CodeBuddy', 'Cursor'].includes(next.channel) && !LEGACY_EXTERNAL_DEFAULTS.has(next.id))) {
+        if (!previous && (!defaultEnabled || next.channel === 'B' && !LEGACY_B_DEFAULTS.has(next.id)
+          || ['CodeBuddy', 'Cursor'].includes(next.channel) && !LEGACY_EXTERNAL_DEFAULTS.has(next.id))) {
           disabled.add(entry.id);
         }
         if (entry.availability && JSON.stringify(availability.get(entry.id)) !== JSON.stringify(entry.availability)) {
@@ -248,7 +254,7 @@ export class ModelPolicy {
 
   assertEnabled(model) {
     this.#requireAvailable();
-    if (!this.#models.has(model) && ['CodeBuddy', 'Cursor'].includes(fixedChannel(model))) {
+    if (!this.#models.has(model) && ['B', 'CodeBuddy', 'Cursor'].includes(fixedChannel(model))) {
       throw new BridgeError('此模型尚未在管理页启用，请刷新账号目录后选择。', 400, 'model_disabled');
     }
     if (this.#disabled.has(model)) throw new BridgeError(`模型 ${model} 已在管理页禁用。`, 400, 'model_disabled');

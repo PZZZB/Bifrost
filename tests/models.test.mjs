@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { B_MODELS, CODEBUDDY_CODEX_MODEL, appendCodeBuddyModel, appendCodeBuddyModels, appendCursorModels, mergeCatalog, resolveBModel, resolveCodeBuddyModel } from '../src/models.mjs';
+import { B_MODELS, CODEBUDDY_CODEX_MODEL, appendCodeBuddyModel, appendCodeBuddyModels, appendCursorModels, bCatalogModels, mergeCatalog, resolveBModel, resolveCodeBuddyModel } from '../src/models.mjs';
 import { CURSOR_MODELS } from '../src/cursor-service.mjs';
 import { BridgeError } from '../src/storage.mjs';
 import { CODEBUDDY_MODEL } from '../src/codebuddy-provider.mjs';
@@ -23,7 +23,7 @@ function fixture() {
   const bData = {
     catalog_version: 'catalog-b',
     models: [
-      { slug: 'b-other', display_name: 'Do not add this model', priority: 0 },
+      { slug: 'b-other', display_name: 'Other account model', priority: 0 },
       {
         slug: 'gpt-6-astra', display_name: 'GPT-6 Astra', priority: 1,
         visibility: 'hide', upgrade: { model: 'future-model' }, supported_in_api: false,
@@ -47,45 +47,83 @@ function fixture() {
   return { aData, bData };
 }
 
-test('only the two exact reserved aliases resolve to B models', () => {
+test('safe B aliases resolve without replacing the identity of the two original defaults', () => {
   assert.deepEqual(B_MODELS, [
     { id: 'B-gpt-6-astra', name: 'B-GPT-6 Astra', upstream: 'gpt-6-astra' },
     { id: 'B-gpt-6.1-sol', name: 'B-GPT-6.1 Sol', upstream: 'gpt-6.1-sol' },
   ]);
   assert.equal(resolveBModel('B-gpt-6-astra'), B_MODELS[0]);
   assert.equal(resolveBModel('B-gpt-6.1-sol'), B_MODELS[1]);
-  for (const model of ['gpt-6-astra', 'gpt-6.1-sol', 'B-gpt-6-sol', 'B-GPT-6 Astra', '', null, undefined]) {
+  for (const upstream of ['gpt-6-sol', 'o3', 'future-model_v2.1', 'a'.repeat(256)]) {
+    assert.deepEqual(resolveBModel(`B-${upstream}`), { id: `B-${upstream}`, name: `B-${upstream}`, upstream });
+  }
+  for (const model of ['gpt-6-astra', 'gpt-6.1-sol', 'b-gpt-6-sol', 'B-', 'B-GPT-6 Astra',
+    'B-../escape', 'B-model..other', 'B-model/name', 'B-https://target', 'B-C:\\target',
+    'B-model\n', 'B-model\u0000', 'B-模型', `B-${'a'.repeat(257)}`, '', null, undefined, {}, 7]) {
     assert.equal(resolveBModel(model), null);
+  }
+  for (const prefix of ['bfk_', 'bfs_', 'bfi_', 'bfn_', 'bdk_', 'sk-', 'rt_', 'oat_', 'oaist', 'eyJ', 'Bearer']) {
+    assert.equal(resolveBModel(`B-${prefix}${'s'.repeat(43)}`), null);
   }
 });
 
-test('catalog keeps A metadata and order, appending only the two B aliases', () => {
+test('catalog keeps A metadata and order, appending the complete B account directory', () => {
   const { aData, bData } = fixture();
   const merged = mergeCatalog(aData, bData);
   assert.deepEqual(merged.models.slice(0, aData.models.length), aData.models);
-  assert.equal(merged.models.length, aData.models.length + 2);
-  assert.deepEqual(merged.models.map((model) => model.slug), ['a-first', 'a-second', 'B-gpt-6-astra', 'B-gpt-6.1-sol']);
+  assert.equal(merged.models.length, aData.models.length + bData.models.length);
+  assert.deepEqual(merged.models.map((model) => model.slug), ['a-first', 'a-second', 'B-b-other', 'B-gpt-6-astra', 'B-gpt-6.1-sol']);
   assert.equal(merged.catalog_version, 'catalog-a');
   assert.deepEqual(merged.features, aData.features);
-  assert.deepEqual(merged.models.slice(-2).map((model) => model.display_name), ['B-GPT-6 Astra', 'B-GPT-6.1 Sol']);
-  assert.deepEqual(merged.models.slice(-2).map((model) => model.priority), [10, 11]);
+  assert.deepEqual(merged.models.slice(-3).map((model) => model.display_name), ['B-Other account model', 'B-GPT-6 Astra', 'B-GPT-6.1 Sol']);
+  assert.deepEqual(merged.models.slice(-3).map((model) => model.priority), [10, 11, 12]);
+});
+
+test('B merge follows native priority while equal priorities retain upstream array order', () => {
+  const { aData, bData } = fixture();
+  bData.models = [{ ...bData.models[2], priority: 20 }, { ...bData.models[1], priority: 10 },
+    { slug: 'o3', display_name: 'Reasoning', priority: 10, model_messages: { instructions_template: 'O3 native instructions' } }];
+  const before = structuredClone({ aData, bData });
+  const aliases = bCatalogModels(bData);
+  assert.deepEqual(aliases.map(model => [model.slug, model.priority]), [['B-gpt-6.1-sol', 20], ['B-gpt-6-astra', 10], ['B-o3', 10]]);
+  const merged = mergeCatalog(aData, bData);
+  assert.deepEqual(merged.models.slice(0, aData.models.length), aData.models);
+  assert.deepEqual(merged.models.slice(-3).map(model => [model.slug, model.priority]), [['B-gpt-6-astra', 10], ['B-o3', 11], ['B-gpt-6.1-sol', 12]]);
+  assert.equal(merged.models.at(-2).model_messages.instructions_template, 'O3 native instructions');
+  assert.deepEqual({ aData, bData }, before);
 });
 
 test('B aliases retain the full upstream context, reasoning, tools, and instructions metadata', () => {
   const { aData, bData } = fixture();
-  const aliases = mergeCatalog(aData, bData).models.slice(-2);
+  const aliases = mergeCatalog(aData, bData).models.slice(aData.models.length);
   for (const [index, alias] of aliases.entries()) {
-    const source = bData.models.find((model) => model.slug === B_MODELS[index].upstream);
+    const source = bData.models[index];
     const retained = structuredClone(alias);
     const original = structuredClone(source);
-    for (const key of ['slug', 'display_name', 'visibility', 'upgrade', 'priority', 'supported_in_api']) {
+    for (const key of ['slug', 'display_name', 'visibility', 'upgrade', 'priority', 'supported_in_api', 'available']) {
       delete retained[key]; delete original[key];
     }
     assert.deepEqual(retained, original);
     assert.equal(alias.visibility, 'list');
     assert.equal(alias.upgrade, null);
     assert.equal(alias.supported_in_api, true);
+    assert.equal(alias.available, true);
   }
+});
+
+test('the B metadata helper preserves source priorities and exact current model capabilities independently of A', () => {
+  const { bData } = fixture();
+  bData.models.push({ slug: 'o3', available: false, reason: 'Withdrawn in this account',
+    input_modalities: ['text'], base_instructions: 'B account model instructions',
+    extra_capability: { mode: ['source-only'] } });
+  const original = structuredClone(bData), models = bCatalogModels(bData);
+  assert.deepEqual(models.map(model => model.slug), ['B-b-other', 'B-gpt-6-astra', 'B-gpt-6.1-sol', 'B-o3']);
+  assert.deepEqual(models.map(model => model.priority), [0, 1, 5, 3]);
+  assert.equal(models.at(-1).display_name, 'B-o3');
+  assert.equal(models.at(-1).available, false); assert.equal(models.at(-1).reason, 'Withdrawn in this account');
+  assert.equal(models.at(-1).base_instructions, 'B account model instructions');
+  models[1].model_messages.variables.tools.push('changed'); models.at(-1).extra_capability.mode.push('changed');
+  assert.deepEqual(bData, original);
 });
 
 test('catalog merging does not mutate inputs or retain shared metadata references', () => {
@@ -102,21 +140,24 @@ test('catalog merging does not mutate inputs or retain shared metadata reference
   assert.deepEqual(bData, beforeB);
 });
 
-test('missing either required B upstream refuses the merge instead of inventing metadata', () => {
+test('withdrawn defaults and empty B directories preserve the remaining exact account catalog without invented metadata', () => {
   for (const upstream of ['gpt-6-astra', 'gpt-6.1-sol']) {
     const { aData, bData } = fixture();
     bData.models = bData.models.filter((model) => model.slug !== upstream);
     const before = structuredClone({ aData, bData });
-    assert.throws(() => mergeCatalog(aData, bData), (error) => (
-      error instanceof BridgeError && error.code === 'model_catalog_missing' && error.message.includes(upstream)
-    ));
+    const merged = mergeCatalog(aData, bData);
+    assert.deepEqual(merged.models.slice(aData.models.length).map(model => model.slug), bData.models.map(model => `B-${model.slug}`));
+    assert.equal(merged.models.some(model => model.slug === `B-${upstream}`), false);
     assert.deepEqual({ aData, bData }, before);
   }
-  assert.throws(() => mergeCatalog(fixture().aData, { models: [] }), BridgeError);
+  const { aData } = fixture();
+  const empty = mergeCatalog(aData, { models: [] });
+  assert.deepEqual(empty, aData); assert.notEqual(empty, aData); assert.notEqual(empty.models[0], aData.models[0]);
+  assert.deepEqual(bCatalogModels({ models: [] }), []);
 });
 
 test('an existing reserved alias in A fails without replacing an original model', () => {
-  for (const alias of B_MODELS) {
+  for (const alias of [...B_MODELS, { id: 'B-b-other' }, { id: 'B-withdrawn-model' }]) {
     for (const field of ['slug', 'id']) {
       const { aData, bData } = fixture();
       aData.models.push({ [field]: alias.id, display_name: 'Existing model' });
@@ -126,6 +167,39 @@ test('an existing reserved alias in A fails without replacing an original model'
       ));
       assert.deepEqual(aData, before);
     }
+  }
+});
+
+test('invalid, duplicate, unsafe or oversized B directories fail before exposing partial aliases', () => {
+  for (const source of [null, [], {}, { id: 'missing-slug' }, { slug: '' }, { slug: '../escape' },
+    { slug: 'https://target' }, { slug: 'model/name' }, { slug: ' model ' },
+    { slug: `bfk_${'s'.repeat(43)}` }, { slug: 'model', priority: 1.5 }, { slug: 'model', priority: null },
+    { slug: 'model', priority: 2147483648 }, { slug: 'model', priority: -2147483649 },
+    { slug: 'model', extra: () => {} }]) {
+    assert.throws(() => bCatalogModels({ models: [{ slug: 'valid-model' }, source] }),
+      error => error instanceof BridgeError && error.code === 'invalid_model_catalog');
+  }
+  for (const models of [[{ slug: 'same' }, { slug: 'same' }], Array(1),
+    Array.from({ length: 513 }, (_, index) => ({ slug: `model-${index}` }))]) {
+    assert.throws(() => bCatalogModels({ models }), error => error instanceof BridgeError && error.code === 'invalid_model_catalog');
+  }
+  const maximum = bCatalogModels({ models: Array.from({ length: 512 }, (_, index) => ({ slug: `model-${index}` })) });
+  assert.equal(maximum.length, 512); assert.equal(maximum.at(-1).slug, 'B-model-511');
+});
+
+test('B aliases use a source name when safe and never publish invalid display fields', () => {
+  const models = bCatalogModels({ models: [{ slug: 'trim-name', display_name: '  Source name  ' },
+    { slug: 'missing-name' }, { slug: 'blank-name', display_name: ' ' },
+    { slug: 'invalid-name', display_name: 'name\nvalue' }, { slug: 'long-name', display_name: 'a'.repeat(511) }] });
+  assert.deepEqual(models.map(model => model.display_name), ['B-Source name', 'B-missing-name', 'B-blank-name', 'B-invalid-name', 'B-long-name']);
+});
+
+test('B merge refuses unrepresentable trailing priorities while preserving both source directories', () => {
+  for (const priority of [2147483647, 2147483646, 1.5]) {
+    const { aData, bData } = fixture(); aData.models[0].priority = priority; aData.models[1].priority = 0;
+    const before = structuredClone({ aData, bData });
+    assert.throws(() => mergeCatalog(aData, bData), error => error instanceof BridgeError && error.code === 'invalid_model_catalog');
+    assert.deepEqual({ aData, bData }, before);
   }
 });
 
@@ -154,7 +228,7 @@ test('CodeBuddy appends after original A models and B aliases without changing t
   assert.deepEqual(result.models.slice(0, -1), existing.models);
   assert.equal(result.models.at(-1).slug, CODEBUDDY_MODEL.id);
   assert.equal(result.models.at(-1).display_name, 'CodeBuddy Opus 5.5');
-  assert.equal(result.models.at(-1).priority, 12);
+  assert.equal(result.models.at(-1).priority, 13);
   assert.equal(result.catalog_version, existing.catalog_version);
   assert.deepEqual(result.features, existing.features);
   result.features.defaults.push('changed');
@@ -245,7 +319,7 @@ test('Cursor appends the full account catalog in source order after A, B and Cod
   const result = appendCursorModels(before, sources);
   assert.deepEqual(result.models.slice(0, -3), before.models);
   assert.deepEqual(result.models.slice(-3).map(item => item.slug), sources.map(item => `Cursor-${item.id}`));
-  assert.deepEqual(result.models.slice(-3).map(item => item.priority), [13, 14, 15]);
+  assert.deepEqual(result.models.slice(-3).map(item => item.priority), [14, 15, 16]);
   assert.deepEqual(appendCursorModels(before, [{ id: 'grok-4.7' }]).models.slice(-1).map(item => item.slug), ['Cursor-grok-4.7']);
   assert.deepEqual(appendCursorModels(before, []), before);
   result.models[0].model_messages.variables.push('new');
@@ -258,7 +332,7 @@ test('Cursor independent catalog declares default SDK reasoning and serialized c
   assert.match(value.description, /Cursor default reasoning/); assert.match(value.description, /Codex effort levels do not apply/);
   assert.equal(value.supports_reasoning_summary_parameter, false); assert.equal(value.supports_parallel_tool_calls, false);
   assert.equal(value.supports_search_tool, true); assert.equal(value.use_responses_lite, false);
-  assert.deepEqual(value.input_modalities, ['text']);
+  assert.equal(Object.hasOwn(value, 'input_modalities'), false, 'An SDK descriptor without image metadata must not become text-only.');
   assert.equal(value.model_messages.instructions_template, value.base_instructions);
   assert.match(value.base_instructions, /Native Cursor approval requests cannot be forwarded/);
   assert.equal(JSON.stringify(value).includes('A instructions'), false);
@@ -307,11 +381,16 @@ test('new CodeBuddy models default to upstream reasoning and cannot inherit Opus
   assert.throws(() => appendCodeBuddyModels({ models: [{ slug: 'CodeBuddy-x' }] }, [{ id: 'CodeBuddy-x' }]), BridgeError);
 });
 
-test('full Cursor catalog keeps exact effort names and only explicit image capability', () => {
+test('full Cursor catalog preserves unknown image capability and explicit denials while retaining exact effort names', () => {
   const sources = [{ id: 'future-model', displayName: 'Future model', inputModalities: ['text', 'image'],
     parameters: [{ id: 'reasoning', values: [{ value: 'low' }, { value: 'extra-high' }] }] },
-  { id: 'future-text', displayName: 'Future text' }];
+  { id: 'future-unknown', displayName: 'Future unknown' },
+  { id: 'future-text', displayName: 'Future text', inputModalities: ['text'] },
+  { id: 'future-denied', supportsImages: false },
+  { id: 'future-conflicting', supportsImages: true, capabilities: { vision: false }, inputModalities: ['text', 'image'] }];
   const added = appendCursorModels({ models: [] }, sources).models;
   assert.equal(added[0].display_name, 'Cursor Future model'); assert.deepEqual(added[0].supported_reasoning_levels.map(item => item.effort), ['low']);
-  assert.deepEqual(added[0].input_modalities, ['text', 'image']); assert.deepEqual(added[1].input_modalities, ['text']);
+  assert.deepEqual(added[0].input_modalities, ['text', 'image']);
+  assert.equal(Object.hasOwn(added[1], 'input_modalities'), false);
+  for (const model of added.slice(2)) assert.deepEqual(model.input_modalities, ['text']);
 });

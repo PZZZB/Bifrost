@@ -15,6 +15,15 @@ export function upstreamName(v) {
   if (typeof v !== 'string' || !v.trim() || v.trim().length > 80 || /[\x00-\x1f\x7f]|bfk_|Bearer\s|\bsk-/i.test(v)) throw new BridgeError('账号名称须为 1–80 个字符，不能包含密钥。', 400, 'upstream_name_invalid');
   return v.trim();
 }
+export function validateModelPresentation(value) {
+  const invalidPresentation = () => new BridgeError('模型展示须包含前缀和排序；前缀最多 48 个字符，不能包含控制字符或凭证，排序须为 0–9999 的整数。', 400, 'upstream_model_presentation_invalid');
+  if (!fields(value, ['prefix', 'order']) || typeof value.prefix !== 'string' || !Number.isInteger(value.order)
+    || value.order < 0 || value.order > 9999) throw invalidPresentation();
+  const prefix = value.prefix.trim();
+  if (prefix.length > 96 || [...prefix].length > 48 || /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(value.prefix)
+    || /bf[ksin]_|bearer(?:\b|_)|(?:^|[^A-Za-z0-9])(?:sk-|rt_|oat_|oaist[a-z_]*|eyJ)/i.test(value.prefix)) throw invalidPresentation();
+  return { prefix, order: value.order };
+}
 export function validateRemoteBinding(v) {
   if (!fields(v, ['sourceId', 'baseUrl', 'protocols', 'credentialRef']) || typeof v.sourceId !== 'string'
     || !/^[a-z][a-z0-9-]{0,31}$/.test(v.sourceId) || typeof v.baseUrl !== 'string' || typeof v.credentialRef !== 'string'
@@ -27,9 +36,14 @@ export function validateUpstreamAccounts(value) {
     || !Array.isArray(value.accounts) || value.accounts.length > 64) throw invalid();
   const ids = new Set(), slots = new Set(); let remotes = 0;
   for (const a of value.accounts) {
-    if (!fields(a, ['id', 'kind', 'name', 'enabled', 'binding', 'createdAt']) || typeof a.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,95}$/.test(a.id)
+    const presentation = a && Object.hasOwn(a, 'modelPresentation');
+    if (!fields(a, ['id', 'kind', 'name', 'enabled', 'binding', 'createdAt', ...(presentation ? ['modelPresentation'] : [])]) || typeof a.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,95}$/.test(a.id)
       || ids.has(a.id) || !UPSTREAM_KINDS.includes(a.kind) || typeof a.enabled !== 'boolean' || upstreamName(a.name) !== a.name
       || typeof a.createdAt !== 'string' || !Number.isFinite(Date.parse(a.createdAt))) throw invalid();
+    if (presentation) {
+      try { if (validateModelPresentation(a.modelPresentation).prefix !== a.modelPresentation.prefix) throw invalid(); }
+      catch { throw invalid(); }
+    }
     ids.add(a.id);
     if (a.kind === 'bifrost') { validateRemoteBinding(a.binding); if (++remotes > 8) throw invalid(); }
     else if (!fields(a.binding, ['slot']) || a.binding.slot !== LEGACY_SLOTS[a.kind]) throw invalid();
@@ -96,14 +110,16 @@ export class UpstreamAccountStore {
   snapshot() { return structuredClone(this.#state); }
   async reload() { const state = await readUpstreamAccounts(this.directory); if (!state) throw invalid(); this.#state = state; return this.snapshot(); }
   async update(id, patch) {
-    if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(k => !['revision', 'name', 'enabled'].includes(k))
-      || !Number.isSafeInteger(patch.revision) || patch.name === undefined && patch.enabled === undefined
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(k => !['revision', 'name', 'enabled', 'modelPresentation'].includes(k))
+      || !Number.isSafeInteger(patch.revision) || patch.revision < 0 || patch.name === undefined && patch.enabled === undefined && !Object.hasOwn(patch, 'modelPresentation')
       || patch.enabled !== undefined && typeof patch.enabled !== 'boolean') throw new BridgeError('账号更新参数无效。', 400);
+    const presentation = Object.hasOwn(patch, 'modelPresentation') ? validateModelPresentation(patch.modelPresentation) : null;
     return this.#transaction(state => {
       if (state.revision !== patch.revision) throw new BridgeError('账号配置已更新，请刷新后重试。', 409, 'upstream_accounts_conflict');
       const row = state.accounts.find(a => a.id === id); if (!row) throw new BridgeError('上游账号不存在。', 404);
       if (patch.name !== undefined) row.name = upstreamName(patch.name);
       if (patch.enabled !== undefined) row.enabled = patch.enabled;
+      if (presentation) row.modelPresentation = presentation;
       return state;
     });
   }

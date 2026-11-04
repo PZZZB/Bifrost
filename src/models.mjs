@@ -4,13 +4,23 @@ import { CODEBUDDY_EFFORTS } from './codebuddy-thinking.mjs';
 import { CURSOR_MODELS, resolveCursorModel, cursorEffortParameter, cursorImageCapability, cursorModelAvailability } from './cursor-service.mjs';
 import { resolveCodeBuddyAlias } from './codebuddy-models.mjs';
 
+// Retain the original two default selections and their public IDs.
 export const B_MODELS = [
   { id: 'B-gpt-6-astra', name: 'B-GPT-6 Astra', upstream: 'gpt-6-astra' },
   { id: 'B-gpt-6.1-sol', name: 'B-GPT-6.1 Sol', upstream: 'gpt-6.1-sol' },
 ];
 
+const B_SOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/;
+const bSourceId = value => typeof value === 'string' && B_SOURCE_ID.test(value) && !value.includes('..')
+  && !/^(?:bfk_|bfs_|bfi_|bfn_|bdk_|sk-|rt_|oat_|oaist|eyJ|bearer)/i.test(value);
+
+/** Parse bridge aliases only. The caller must verify current account membership. */
 export function resolveBModel(model) {
-  return B_MODELS.find(({ id }) => id === model) ?? null;
+  const legacy = B_MODELS.find(({ id }) => id === model);
+  if (legacy) return legacy;
+  if (typeof model !== 'string' || !model.startsWith('B-')) return null;
+  const upstream = model.slice(2);
+  return bSourceId(upstream) ? { id: model, name: model, upstream } : null;
 }
 
 export const CODEBUDDY_CODEX_MODEL = Object.freeze({
@@ -38,13 +48,43 @@ function requireCatalog(data, account) {
   }
 }
 
+/** Clone the complete B directory; this supplies metadata, not model authorization. */
+export function bCatalogModels(bData) {
+  requireCatalog(bData, 'B');
+  if (bData.models.length > 512) {
+    throw new BridgeError('账户 B 的 Codex 模型目录超过大小限制。', 502, 'invalid_model_catalog');
+  }
+  const seen = new Set();
+  return Array.from(bData.models, (source, index) => {
+    if (!source || typeof source !== 'object' || Array.isArray(source) || !bSourceId(source.slug)
+      || seen.has(source.slug)) {
+      throw new BridgeError('账户 B 的 Codex 模型目录包含无效或重复模型。', 502, 'invalid_model_catalog');
+    }
+    seen.add(source.slug);
+    if (source.priority !== undefined && (!Number.isInteger(source.priority)
+      || source.priority < -2147483648 || source.priority > 2147483647)) {
+      throw new BridgeError('账户 B 的 Codex 模型目录包含无效优先级。', 502, 'invalid_model_catalog');
+    }
+    let copy;
+    try { copy = structuredClone(source); }
+    catch { throw new BridgeError('账户 B 未返回有效的 Codex 模型元数据。', 502, 'invalid_model_catalog'); }
+    const name = typeof source.display_name === 'string' && source.display_name.trim()
+      && source.display_name.length <= 510 && !/[\x00-\x1f\x7f]/.test(source.display_name)
+      ? source.display_name.trim() : source.slug;
+    return { ...copy, slug: `B-${source.slug}`, display_name: `B-${name}`,
+      visibility: 'list', upgrade: null, supported_in_api: true,
+      priority: source.priority ?? index, available: source.available !== false };
+  });
+}
+
 export function mergeCatalog(aData, bData) {
   requireCatalog(aData, 'A');
-  requireCatalog(bData, 'B');
+  const models = bCatalogModels(bData);
 
-  for (const { id } of B_MODELS) {
-    if (aData.models.some((model) => model?.slug === id || model?.id === id)) {
-      throw new BridgeError(`账户 A 的模型目录包含保留别名 ${id}，无法安全合并。`, 409, 'model_alias_conflict');
+  for (const model of aData.models) {
+    const conflict = [model?.slug, model?.id].find(value => resolveBModel(value));
+    if (conflict) {
+      throw new BridgeError(`账户 A 的模型目录包含保留别名 ${conflict}，无法安全合并。`, 409, 'model_alias_conflict');
     }
   }
 
@@ -54,21 +94,13 @@ export function mergeCatalog(aData, bData) {
       : maximum
   ), aData.models.length - 1);
 
-  const aliases = B_MODELS.map(({ id, name, upstream }, index) => {
-    const source = bData.models.find((model) => model?.slug === upstream);
-    if (!source) {
-      throw new BridgeError(`账户 B 的模型目录缺少 ${upstream}，无法添加 ${id}。`, 502, 'model_catalog_missing');
-    }
-    return {
-      ...structuredClone(source),
-      slug: id,
-      display_name: name,
-      visibility: 'list',
-      upgrade: null,
-      priority: lastPriority + index + 1,
-      supported_in_api: true,
-    };
-  });
+  if (models.length && (!Number.isInteger(lastPriority) || lastPriority + models.length > 2147483647)) {
+    throw new BridgeError('模型目录无法为账户 B 分配有效的末尾优先级。', 502, 'invalid_model_catalog');
+  }
+  // The native picker orders by priority. Stable sorting preserves source order
+  // for equal priorities before assigning this account one continuous range.
+  const aliases = models.sort((a, b) => a.priority - b.priority)
+    .map((model, index) => ({ ...model, priority: lastPriority + index + 1 }));
 
   const merged = structuredClone(aData);
   merged.models.push(...aliases);
@@ -205,6 +237,7 @@ export function appendCursorModels(data, sdkSourceModels) {
     checkAlias(result.models, id, 'Cursor');
     if (!cursorModelAvailability(source).available) continue;
     const priority = nextPriority(result.models, 'Cursor'), parameter = cursorEffortParameter(source);
+    const images = cursorImageCapability(source);
     const efforts = [...new Set((parameter?.values ?? []).map(item => item.value).filter(value => knownEfforts.has(value)))];
     const preferred = source.variants?.find(variant => variant.isDefault)?.params?.find(item => item.id === parameter?.id)?.value;
     const instructions = 'You are a coding assistant using the Cursor Agent SDK. Follow the user instructions and configured tool permissions. '
@@ -227,7 +260,12 @@ export function appendCursorModels(data, sdkSourceModels) {
       web_search_tool_type: 'text', truncation_policy: { mode: 'tokens', limit: 10000 }, supports_image_detail_original: false,
       // This is a conservative client history budget, not a claim about SDK raw-inference limits.
       context_window: 128000, max_context_window: 128000, effective_context_window_percent: 90,
-      experimental_supported_tools: [], input_modalities: cursorImageCapability(source) === true ? ['text', 'image'] : ['text'], supports_parallel_tool_calls: false,
+      experimental_supported_tools: [],
+      // The SDK's public model list omits per-model image capabilities. Preserve
+      // that unknown value: Codex defaults an omitted modality list to text/image,
+      // allowing the SDK image path without inventing a source declaration.
+      ...(images === null ? {} : { input_modalities: images ? ['text', 'image'] : ['text'] }),
+      supports_parallel_tool_calls: false,
       supports_search_tool: true, supports_experimental_context: false, use_responses_lite: false,
       supports_reasoning_effort_updates: false, prefer_websockets: false, tool_mode: 'direct', multi_agent_version: null,
     });

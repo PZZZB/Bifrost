@@ -18,7 +18,15 @@ export async function writePrivateAccountRecord(path, record) {
     file = await open(temporary, 'wx', 0o600);
     await file.writeFile(JSON.stringify(record) + '\n');
     await file.sync(); await file.close(); file = null;
-    await rename(temporary, path);
+    // Windows sharing violations can briefly block atomic replacement. Retry
+    // only the same rename; keep the old file and the transaction lock intact.
+    for (let attempt = 0; ; attempt++) {
+      try { await rename(temporary, path); break; }
+      catch (error) {
+        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 5) throw error;
+        await delay(25 * (attempt + 1));
+      }
+    }
   } finally { await file?.close(); await rm(temporary, { force: true }); }
 }
 

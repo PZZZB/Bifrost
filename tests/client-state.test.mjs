@@ -34,6 +34,21 @@ test('public users cannot retrieve vendor-stored conversations, files, container
     {tools:[{type:'namespace',name:'wrapped',tools:[{type:'code_interpreter',container:'private'}]}]}];
   for(const value of values) assert.throws(()=>cipher.input({model,...value},scope), error=>error.status===400);
 });
+
+test('client compaction controls preserve authenticated per-user and per-model checkpoint isolation', async () => {
+  const cipher = codec(), checkpoint = { type: 'compaction', id: 'cmp_fixture', encrypted_content: 'private-summary-state' };
+  const first = await (await cipher.response(Response.json({ output: [checkpoint] }), scope, model)).json();
+  assert.notEqual(first.output[0].encrypted_content, checkpoint.encrypted_content);
+  const controls = [{ type: 'configuration_update', reasoning: { effort: 'high' } }, { type: 'compaction_trigger' }];
+  const history = { model, input: [first.output[0], { role: 'user', content: 'continue' }, ...controls] };
+  const prepared = cipher.input(history, scope);
+  assert.equal(prepared.input[0].encrypted_content, checkpoint.encrypted_content);
+  assert.deepEqual(prepared.input.slice(-2), controls);
+  assert.equal(history.input[0].encrypted_content, first.output[0].encrypted_content);
+  for (const [owner, nextModel] of [[other, model], [scope, 'CodeBuddy-other']]) {
+    assert.throws(() => cipher.input({ ...history, model: nextModel }, owner), error => error.status === 409);
+  }
+});
 test('Responses JSON output and streaming item/completed events wrap every opaque continuation', async () => {
   const cipher=codec(), item={type:'reasoning',encrypted_content:'native-private',summary:[]};
   const data=await (await cipher.response(Response.json({output:[item]}),scope,model)).json();

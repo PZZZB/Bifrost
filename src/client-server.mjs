@@ -136,6 +136,22 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
     const history = billing.history(principal.accountId, { limit: 50, ...(before === undefined ? {} : { before }) });
     return { ...billing.account(principal.accountId), history: history.rows, nextBefore: history.nextBefore };
   }
+  function keyAccount(principal) {
+    const account = access.publicAccount(principal.accountId);
+    const key = account.keys.find(key => key.id === principal.keyId && key.status === 'active');
+    if (!key || !account.enabled) throw fail('API Key 无效、已停用或已过期。', 401, 'client_key_invalid');
+    const wallet = billing ? billing.account(principal.accountId) : null;
+    if (billing && (!object(wallet) || wallet.accountId !== principal.accountId)) {
+      throw fail('计费账本暂不可用。', 503, 'client_billing_unavailable');
+    }
+    // This read-only API identifies only the caller's account and current Key.
+    // Never expose the account's other Keys, password data, or billing history.
+    return { object: 'account', account: { id: account.id, username: account.username },
+      key: { id: key.id, expiresAt: key.effectiveExpiresAt ?? key.expiresAt },
+      billing: wallet === null ? null : { currency: 'CNY', enforceBalance: wallet.enforceBalance,
+        balanceMicros: wallet.balanceMicros, reservedMicros: wallet.reservedMicros, availableMicros: wallet.availableMicros,
+        tokenLimit: wallet.tokenLimit, usedTokens: wallet.usedTokens, reservedTokens: wallet.reservedTokens, remainingTokens: wallet.remainingTokens } };
+  }
   function cookie(res, value, expiresAt) {
     res.setHeader('set-cookie', `${cookieName}=${value}; HttpOnly; SameSite=Strict; Path=/portal/api/; ${publicUrl.protocol === 'https:' ? 'Secure; ' : ''}${expiresAt ? `Expires=${new Date(expiresAt).toUTCString()}` : 'Max-Age=0'}`);
   }
@@ -221,10 +237,16 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
         if (match && req.method === 'DELETE') { await access.revokeKey(auth.principal.accountId, match[1]); json(res, 200, { revoked: true }); return; }
         throw fail('用户接口不存在。', 404, 'client_route_not_found');
       }
-      if (!['/v1/models', '/v1/responses', '/v1/chat/completions', '/v1/messages'].includes(path)) throw fail('接口不存在。', 404, 'client_route_not_found');
+      if (!['/v1/account', '/v1/models', '/v1/responses', '/v1/chat/completions', '/v1/messages'].includes(path)) throw fail('接口不存在。', 404, 'client_route_not_found');
       const suppliedKey = secretHeader(req); let principal = access.authenticateKey(suppliedKey);
       if (!principal) throw fail('API Key 无效、已停用或已过期。', 401, 'client_key_invalid');
       if (req.headers.origin !== undefined) throw fail('模型入口不接受浏览器跨站调用。', 403, 'client_origin_rejected');
+      if (path === '/v1/account') {
+        if (req.method !== 'GET') throw fail('请求方法不支持。', 405);
+        if (url.search) throw fail('账号信息接口不接受查询参数。', 400, 'client_account_query_unsupported');
+        rate(`account-metadata:${principal.accountId}`, 60, 60_000);
+        json(res, 200, keyAccount(principal)); return;
+      }
       // A protection failure must not interrupt an already-valid model Key.
       await access.rememberKey?.(suppliedKey).catch(() => {});
       principal = access.authenticateKey(suppliedKey);

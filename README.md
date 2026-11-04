@@ -16,20 +16,21 @@ Mac 上的 CodeBuddy IDE 已通过本机回环入口调用 VM 中的 Claude Opus
 
 管理页与网页版用户中心共享午夜蓝、极光青绿与暖金视觉，支持手机布局、键盘操作与减少动态效果设置。静态页面更新后刷新即可加载；连接模式等后台功能更新仍需重启网关服务。
 
-当前 Codex 保持账号 A 登录，模型选择器保留原有模型，追加两个使用账号 B 订阅的模型，以及在网页选择启用的 CodeBuddy、Cursor 账号模型。文件操作、终端命令、用户问答和权限确认继续由当前 Codex 执行。
+当前 Codex 保持账号 A 登录，模型选择器保留原有模型，追加在网页启用的账号 B、CodeBuddy、Cursor 模型。账号 B 从其官方目录发现完整列表，保留已有勾选，新发现的模型默认关闭；最初接入的两个 B 模型保留为初始选择。文件操作、终端命令、用户问答和权限确认继续由当前 Codex 执行。
 
 | 选择的模型 | 推理账号 | 上游模型 |
 | --- | --- | --- |
 | 原有模型名称 | A，沿用原始 Provider 路由与授权 | 原模型名称 |
 | `B-GPT-6 Astra` | B | `gpt-6-astra` |
 | `B-GPT-6.1 Sol` | B | `gpt-6.1-sol` |
+| 网页启用的其他 B 模型 | B | 该账号官方目录中的原模型 ID |
 | `CodeBuddy Opus 5.5` | CodeBuddy 独立员工授权 | 账号目录中的 Opus 5.5 实际 ID |
 | `Cursor Gemini 4` | 本人授权的 Cursor 账号 | `gemini-4-argon` |
 | `Cursor Grok 4.7` | 本人授权的 Cursor 账号 | `grok-4.7` |
 | 网页启用的其他 `CodeBuddy · …` | CodeBuddy 独立员工授权 | 该账号目录中的实际模型 ID |
 | 网页启用的其他 `Cursor …` | 本人授权的 Cursor 账号 | 该账号 SDK 目录中的实际模型 ID |
 
-两个新增模型的内部名称分别为 `B-gpt-6-astra`、`B-gpt-6.1-sol`。B 不可用时返回错误，不会改用 A。普通模型的请求不读取 B 的授权。
+B 模型使用 `B-<上游 ID>` 作为内部名称，原有 `B-gpt-6-astra`、`B-gpt-6.1-sol` 保持不变。目录请求使用 B 自己的授权与匹配的客户端版本，保留 B 返回的模型指令、工具和上下文等元数据。B 不可用时返回错误，不会改用 A。普通模型的请求不读取 B 的授权。
 
 原 CodeBuddy Opus 5.5 的内部名称保持 `claude-codebuddy-opus-5-5`，其他 CodeBuddy 模型使用 `CodeBuddy-<上游 ID>`，Cursor 使用 `Cursor-<上游 ID>`。网页展示完整的当前账号目录，只有已开启且可用于当前适配的模型才发布到 Codex。CodeBuddy 或 Cursor 不可用时不会改用 A、B 或另一渠道。原有 A/B 请求仍沿用原来的透传方式。
 
@@ -75,6 +76,8 @@ ssh -L 43155:127.0.0.1:43155 user@server
 管理入口为 <http://127.0.0.1:43155/>。页面提供“连接总览”“账号池”“客户端接入”和按节点能力开放的“接入用户”：总览显示服务状态、模型开关、额度和请求统计；账号池集中管理上游身份、授权和模型来源；客户端接入管理本机应用与连接方式；接入用户管理下游账号、独立 API Key、模型权限和注册方式。上游缺少的信息明确显示未返回。
 
 账号池统一登记当前客户端 A 与独立授权的 B 等模型来源，分别显示凭证归属、模型和各入口的协议路径。模型选择按来源 ID 独立折叠，账号重命名不会改变模型勾选。客户端接入页新增[本机客户端管理](docs/local-client-controls.md)：启动应用、接入或恢复原生、网关模式自动同步目录及“立即同步”按钮；实际客户端重载状态单独提示，不自动退出应用或切换模式。
+
+账号池可逐账号设置模型显示前缀和排列顺序，格式统一为“前缀 · 模型名”。原生模型固定在前，其他来源按账号顺序连续排列；名称变化不改变模型 ID、授权、模型勾选或既有会话。
 
 Mac 隔离 Claude 入口另提供[注册网页](docs/web-accounts.md)，页面源码位于 `public/accounts/`，使用邮箱、密码和一次性邀请码。分享给微信的网页可独立使用标准 HTTPS 443，客户端仍填写原模型 API 地址；各入口独立校验 Origin 和 CSRF。仅检查邮箱格式及域名收信 DNS，不发送验证码，邮箱保持未验证；旧用户名账号仍可登录。不依赖小程序注册或读取微信身份。Mac 可启用[统一账号模式](docs/mac-unified-accounts.md)：这张注册页和主干“接入用户”共用一个 ClientAccess 实例及计费账本，统一停用、模型授权、限额和计量。保留的旧版独立账号模式及可选[微信身份小程序](docs/wechat-accounts.md)属于兼容部署，不能与统一模式同时作为写入者。
 
@@ -133,8 +136,10 @@ CodeBuddy IDE 使用 `models.json`，WorkBuddy 使用“设置 → 模型 → �
 1. 在管理页点击“登录账号 B”，在 OpenAI 官方页面选择账号 B 及它的订阅工作区。
 2. 核对管理页显示的邮箱和套餐，点击“确认此账号为 B”。
 3. 点击“验证推理”。只有同一个网关返回 `response.completed` 和非空回复才算通过；模型列表不算验证证据。
-4. 点击“接入本机 Codex”；已安装旧版本时点击“更新模型路由”。程序保留现有 Provider ID 和默认模型，配置网关地址、HTTP/SSE、独立网关认证头及模型目录地址。
-5. 重启 Codex，使现有进程重新加载配置与模型目录。原有模型走 A，选择新增的两个 B 模型时走 B。
+4. 点击“接入本机 Codex”；已安装旧版本时点击“更新网关连接”。程序同时配置现有网关提供方和内置 OpenAI 提供方的连接，覆盖原来保留不同提供方的会话，不改会话内容与模型偏好。
+5. 从系统托盘完全退出并重开 Codex，使已有会话加载新配置。原有模型走 A，选择新增的两个 B 模型时走 B；同一会话可以切换。
+
+网页切换到原生时会恢复受管提供方的原始地址和设置。重开 Codex 后，如原会话仍选择 B／CodeBuddy／Cursor 等网关模型，需要改选普通 GPT 模型。切换只保存配置，不终止客户端或重启网关服务。旧的逐会话修复脚本不再作为接入步骤；实现与验证范围见[本机客户端管理](docs/local-client-controls.md#codex-已有会话与连接切换)。
 
 不在电脑前时，可点击“手机授权”。在手机浏览器打开页面提供的 OpenAI 官方设备授权链接，登录账号 B，再输入一次性设备码。电脑上的原生 Codex 会接收授权，无需把密码或验证码发给网关或聊天。个人账号需在 ChatGPT 安全设置启用设备代码登录，Team/Business 工作区可能需要管理员启用对应权限。手机授权无需转发本机 1455 回调端口。
 
@@ -168,11 +173,17 @@ Cursor 与 CodeBuddy 共用的转换层识别 Codex 的 `internal_chat_message_m
 
 OpenAI 托管的联网搜索、服务端压缩、服务端会话存储及结构化输出保证不在此适配范围。Codex 默认附带但未使用的 `web_search` 声明会被移除，同时明确告知模型此能力不可用；强制选择搜索或包含托管工具历史的请求会报错。模型仍可使用实际提供的客户端联网工具。系统及 developer 更新保留原顺序，以标记内容和顶层优先级说明转换；并行工具尚未全部返回时，更新随紧接的工具结果传递。
 
-建议为 CodeBuddy 新建聊天。A/B 的 OpenAI 加密思考历史不能转换为 CodeBuddy 的接续状态；CodeBuddy 状态也不能转给 A/B，切换渠道遇到此类历史会提示新建聊天。普通本地总结继续通过 `/responses` 完成，不伪造 `/responses/compact` 的成功。
+共享转换层接受 `include: null`，以及思考接续、搜索结果、图片引用和代码执行输出的七个公开可选选择器，并兼容 Codex 的 `output.encrypted_content` 选择器。这些字段只选择额外返回内容，不会启用托管工具或伪造其结果；没有对应响应项时不添加额外内容。加密输出选择器保留本网关已有的思考接续，不为普通消息或工具参数伪造 OpenAI 密文。`message.output_text.logprobs` 仍明确拒绝，因为当前通道不提供真实分数。未知选择器和错误类型会报错；`include` 不传给 CodeBuddy 的 Messages／Chat 上游。[公开选择器定义](https://developers.openai.com/api/reference/typescript/resources/responses)。
+
+Codex 在 A/B、CodeBuddy 和远端 Bifröst 之间切换时，网关从当前请求派生可转交的明文历史，保留消息、工具调用和工具结果。来源专用的隐藏思考状态不会转交给其他来源；公开的思考摘要仍作为带标签的历史文本保留。客户端保存的原历史不被改写。CodeBuddy 自有压缩摘要经当前账号和接入用户验证后可转交给其他模型；OpenAI 已有的专用压缩密文无法由其他来源解码，遇到这种历史仍需先用原模型生成明文交接摘要。
+
+支持 Codex v2 通过 `/responses` 发送 `compaction_trigger`：所选上游生成真实工作摘要，完整结束且没有工具调用时，网关才返回一个自有加密 `compaction` 检查点；后续请求恢复为标注的用户上下文。截断、空白、取消和工具错误不会提交压缩成功。CodeBuddy 检查点使用持久密钥，并绑定当前账号、实际模型和接入用户。独立的 `/responses/compact` 仍未适配，不伪造该接口成功。
 
 Token 统计合并 CodeBuddy 的 Codex 与 Claude 渠道，按真实上游 `usage` 记录；缺失分项保持未知，协议占位值不计入账本。管理页同时显示 Codex 入口和合计请求数。
 
-可运行 `node scripts/verify-codebuddy-codex-offline.mjs` 做独立本地协议检查：它使用空白 Codex 配置、本地模拟上游和临时文件，不使用真实账户或发送模型推理。真实质量、实时模型权限和扣费仍需用户验收。
+可运行 `node scripts/verify-codebuddy-codex-offline.mjs` 做独立本地协议检查：它使用空白 Codex 配置、本地模拟上游和临时文件，不使用真实账户或发送模型推理。增加 `--include-mode selectors` 或 `--include-mode null` 可在模拟适配器边界验证额外选择器（包括 `output.encrypted_content`）或 null 与原有工具回合、思考接续兼容；报告分别记录原始客户端字段与合成输入。真实质量、实时模型权限和扣费仍需用户验收。
+
+`node scripts/verify-codebuddy-compaction-offline.mjs` 使用官方 Codex app-server 和假上游，验证同一会话中的真实 v2 压缩触发、压缩后续聊、CodeBuddy 与 A/B 来回切换，以及远端 Bifröst 的压缩和跨模型交接。每个客户端推理请求只派发一次模型请求；不加载现有登录或修改用户配置。
 
 ## Codex 使用 Cursor
 
@@ -186,25 +197,27 @@ Cursor SDK 提供完整的 Agent 接口。适配器把 Codex 的指令、历史�
 
 需要直接传入系统提示时，可在私有数据目录的 `cursor.json` 显式设置 `"promptMode": "system"` 并重启网关。该模式使用 SDK `systemPrompt`，关闭设置来源，要求 Cursor 向当前账号开放这项能力；上游拒绝时明确报错，不自动改成项目规则或普通用户消息。Cursor 官方人员在 [2026-10-19 的说明](https://forum.cursor.com/t/how-do-i-get-access-to-systemprompt-in-cursor-sdk-unknown-option-system-prompt/175262/7)中指出，该能力目前尚未对外部账号开放，建议使用项目规则或 `AGENTS.md`。配置只接受 `project-rules` 和 `system`；缺少字段时默认兼容模式，非法值会停用 Cursor 渠道并返回配置错误。网页根据运行中的服务显示模式和指令优先级，旧服务未返回字段时显示待重启。
 
-适配器支持文本、内嵌图片或公开 HTTPS 图片引用，以及客户端函数、自定义工具与工具发现；模型目录明确不支持的输入在创建 SDK 会话前拒绝。当前 SDK 目录未提供图像能力的模型只在 Codex 声明文本输入，不统一声称支持图片。未映射的媒体、服务端工具和参数返回明确错误；Cursor 自身要求的交互审批不能当成 Codex 的问答工具。模型支持的思考参数以官方目录为准，精确匹配 `reasoning`、`reasoning_effort` 或 `effort` 等目录档位，不将 `extra-high` 伪造成 `xhigh`；没有精确控制时沿用 Cursor 默认思考。SDK 不提供的输出长度或并行工具保证不会伪造。创建会话成功不能代替真实回合验收。
+适配器支持文本、内嵌图片或公开 HTTPS 图片引用，以及客户端函数、自定义工具与工具发现；模型目录明确不支持的输入在创建 SDK 会话前拒绝。当前 SDK 的公开模型目录不含逐模型图像能力，未知时省略 Codex 原始目录的 `input_modalities`，沿用客户端的文字与图片兼容默认值，允许图片经 SDK 转发；管理页仍标记图像能力未确认。允许发送不代表该账号和模型已完成图片验收，明确的否定声明仍优先拒绝。[Codex 目录默认规则](https://learn.chatgpt.com/docs/app-server#list-models-modellist)、[Cursor 模型目录与图片消息](https://cursor.com/docs/sdk/typescript)。未映射的媒体、服务端工具和参数返回明确错误；Cursor 自身要求的交互审批不能当成 Codex 的问答工具。模型支持的思考参数以官方目录为准，精确匹配 `reasoning`、`reasoning_effort` 或 `effort` 等目录档位，不将 `extra-high` 伪造成 `xhigh`；没有精确控制时沿用 Cursor 默认思考。SDK 不提供的输出长度或并行工具保证不会伪造。创建会话成功不能代替真实回合验收。
 
 Cursor SDK 会话存储包含运行所需的历史和检查点，位于私有数据目录的 `cursor-sdk/`；它与只保存元数据的用量账本不同。跨渠道的加密状态不能混用，建议为 Cursor 模型新建 Codex 聊天。上游缓存由 Cursor 管理，不能承诺与原模型的缓存命中或行为相同。跨多次 HTTP 的工具回合可能只在整个 SDK Run 结束时报告用量，无法归属到单条 HTTP 的分项保持未知，不把合计放到最后一个请求。费用以 Cursor 的账单为准。
 
 已完成并写入有效 SDK 检查点的会话可在服务重启后恢复；恢复索引绑定账号、模型、接入模式、指令正文与已展示历史，并在下次续聊前消费一次。切换接入模式后应新建聊天，不能把旧模式的检查点当成新模式续接。检查点默认保留 7 天，历史索引最多保留 128 份。正在等待工具回调的 Run 只能在当前进程续接，强制重启或退出授权会使它失效；这也是网页重启会检查活跃 Run 的原因。注销会清除本网关的 Cursor 恢复索引。
 
-`node scripts/verify-cursor-codex-offline.mjs --prompt-mode project-rules` 使用实际 Codex CLI、本地模拟 SDK 和临时配置验证兼容模式的工具回合；`--prompt-mode system` 验证直接系统提示模式。两种离线验证都不加载现有授权或调用 Cursor 模型。增加 `--internal-metadata` 可在模拟 provider 边界注入内部元数据，检查字段兼容、跨 HTTP 续接和第三方数据隔离；报告会区分合成注入与原始客户端请求。
+`node scripts/verify-cursor-codex-offline.mjs --prompt-mode project-rules` 使用实际 Codex CLI、本地模拟 SDK 和临时配置验证兼容模式的工具回合；`--prompt-mode system` 验证直接系统提示模式。两种离线验证都不加载现有授权或调用 Cursor 模型。增加 `--with-image --model Cursor-grok-4.7` 会生成一张本地 PNG，核对实际 Codex 目录对未知与明确否定图片能力的处理，再验证图片传给指定 SDK 模型并继续原工具回合；报告只记录图片数量、类型与哈希。增加 `--internal-metadata` 可在模拟 provider 边界注入内部元数据，检查字段兼容、跨 HTTP 续接和第三方数据隔离；报告会区分合成注入与原始客户端请求。
 
 Cursor 的 API Key 按官方 [CLI 认证说明](https://cursor.com/docs/cli/reference/authentication) 归属授权用户；SDK 的套餐池与费用规则见官方 [SDK 文档](https://cursor.com/docs/sdk/typescript) 和 [套餐说明](https://cursor.com/docs/account/pricing/legacy-cursor-plans)。不同 Teams 计费版本有区别，不能据 Teams 标签承诺所有模型请求均包含在固定订阅内。当前接入不查询 Cursor 剩余额度，实时权限、模型质量及实际扣费由用户完成授权后验证。
 
 ## 账号剩余额度
 
-管理页显示 A、B、CodeBuddy、Cursor 四张账号卡，显示各自可确认的绑定身份、来源、套餐与查询时间。A、B 的官方剩余额度、重置时间和 Credits 余额通过各自登录目录中的官方 `account/rateLimits/read` 查询，不发送模型请求；它包含该账号在其他设备的消耗，与本网关的请求历史和 Token 累计分开。
+管理页显示 A、B、CodeBuddy、Cursor，以及远端 Bifröst 账号组，显示各自可确认的绑定身份、来源、套餐与查询时间。每个远端来源单独展示余额，不合并多个账号的钱包。A、B 的官方剩余额度、重置时间和 Credits 余额通过各自登录目录中的官方 `account/rateLimits/read` 查询，不发送模型请求；它包含该账号在其他设备的消耗，与本网关的请求历史和 Token 累计分开。
 
 按接口实际返回的窗口长度显示周额度、5 小时额度或其他窗口。Business 的个人限额单独标注，不作为整个工作区余额。未返回的窗口、余额和重置时间保持未知，不推算成 0 或 100%。查询失败只影响对应账号的额度展示，不影响模型转发。
 
 当前 CodeBuddy 员工账号元数据及 Cursor 用户 SDK 没有提供可确认的账号套餐余量或重置时间，因此明确显示“未提供剩余额度”，同时保留已绑定状态和官方用量入口。CodeBuddy 的模型积分倍率是价格信息；Cursor `Agent.getUsage()` 仅统计单个 Agent，都不能替代整个账号余额。CodeBuddy 的查询路径见官方[套餐与用量](https://www.codebuddy.cn/docs/ide/Account/usage)，Cursor 可在[官方用量页](https://cursor.com/dashboard/usage)查看。Teams 标签属于声明，未由 SDK 验证。
 
-页面打开、相关账号授权变化时查询，之后可点“刷新额度”；不定时轮询，也不因切回页面或请求统计刷新而查询。服务按账号合并并发查询，结果最多缓存 30 秒，失败最多缓存 10 秒。授权变化会使旧身份及迟到查询失效，包括合并四卡时等待另一渠道的情况。`GET /api/account-quotas` 仅允许本机管理会话访问，只返回安全显示身份和规范化数据，不返回原始响应或凭证。With 暂未启用，不在当前绑定账号中。
+远端 Bifröst 使用已配置的个人用户 Key 读取同一 HTTPS 来源的 `GET /v1/account`，展示该用户的可用余额、总余额、预留金额、Token 配额和当前 Key 有效期。余额来自远端用户账本，不是模型厂商订阅余额；未启用余额限制时明确标记为账面余额，不视为不限量。尚无计费账本或旧服务没有该接口时显示未提供，不能显示成 0。远端主机需先更新代码并重启网关；只重启旧代码不会新增接口。
+
+页面打开、相关账号授权变化时查询，之后可点“刷新额度”；不定时轮询，也不因切回页面或请求统计刷新而查询。服务按账号合并并发查询，结果最多缓存 30 秒，失败最多缓存 10 秒。授权变化会使旧身份、余额及迟到查询失效，包括等待另一渠道的情况。`GET /api/account-quotas` 仅允许本机管理会话访问，只返回安全显示身份和规范化数据，不返回原始响应或凭证。With 暂未启用，不在当前绑定账号中。
 
 ## 模型目录与网页开关
 

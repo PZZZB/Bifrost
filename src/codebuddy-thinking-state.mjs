@@ -3,7 +3,9 @@ import { types } from 'node:util';
 
 // This is the bridge's encrypted continuation state, never a vendor signature.
 export const CODEBUDDY_STATE_PREFIX = 'bridge-codebuddy-v1:';
+export const CODEBUDDY_COMPACTION_STATE_PREFIX = 'bifrost-codebuddy-compaction-v1:';
 const AAD = Buffer.from(CODEBUDDY_STATE_PREFIX, 'utf8');
+const COMPACTION_AAD = Buffer.from(CODEBUDDY_COMPACTION_STATE_PREFIX, 'utf8');
 const MAX_PAYLOAD_BYTES = 32 * 1024 * 1024;
 const MAX_SCOPE_LENGTH = 256;
 const MAX_JSON_DEPTH = 256;
@@ -11,12 +13,15 @@ const IV_BYTES = 12;
 const TAG_BYTES = 16;
 const HEADER_BYTES = IV_BYTES + TAG_BYTES;
 const MAX_TOKEN_LENGTH = CODEBUDDY_STATE_PREFIX.length + Math.ceil((MAX_PAYLOAD_BYTES + HEADER_BYTES) * 4 / 3);
+const MAX_COMPACTION_TOKEN_LENGTH = CODEBUDDY_COMPACTION_STATE_PREFIX.length + Math.ceil((MAX_PAYLOAD_BYTES + HEADER_BYTES) * 4 / 3);
 const keyLoads = new WeakMap();
 const messages = {
   invalid_thinking_state: 'CodeBuddy 思考接续状态无效或已失效。',
   invalid_thinking_state_payload: 'CodeBuddy 思考接续内容无效或超过大小限制。',
   invalid_thinking_state_key: 'CodeBuddy 思考接续密钥无效。',
   thinking_state_key_store_failed: '无法读取或保存 CodeBuddy 思考接续密钥。',
+  invalid_compaction_state: 'CodeBuddy 历史摘要状态无效或已失效。',
+  invalid_compaction_state_payload: 'CodeBuddy 历史摘要内容无效或超过大小限制。',
 };
 
 export class ThinkingStateError extends Error {
@@ -96,6 +101,21 @@ function payload(value) {
   return result;
 }
 
+function compactionPayload(value) {
+  if (!value || typeof value !== 'object' || types.isProxy(value) || Array.isArray(value)) throw new Error();
+  const fields = ['summary', 'identity', 'model'];
+  if (Object.hasOwn(value, 'client_scope')) fields.push('client_scope');
+  if (!shape(value, fields) || typeof value.summary !== 'string' || !value.summary.trim()
+      || value.summary.length > MAX_PAYLOAD_BYTES || Buffer.byteLength(value.summary, 'utf8') > MAX_PAYLOAD_BYTES
+      || !scope(value.identity) || !scope(value.model)) throw new Error();
+  const result = { summary: value.summary, identity: value.identity, model: value.model };
+  if (Object.hasOwn(value, 'client_scope')) {
+    if (!scope(value.client_scope)) throw new Error();
+    result.client_scope = value.client_scope;
+  }
+  return result;
+}
+
 export class CodeBuddyThinkingState {
   #key;
 
@@ -142,6 +162,42 @@ export class CodeBuddyThinkingState {
       const json = new TextDecoder('utf-8', { fatal: true }).decode(plain);
       return payload(JSON.parse(json));
     } catch { throw new ThinkingStateError(); }
+    finally { plain?.fill(0); }
+  }
+
+  // Summaries are bridge-owned state with a separate authenticated purpose.
+  // The persisted key is shared; prefixes and AAD prevent thinking/summary reuse.
+  sealCompaction(value) {
+    let plain;
+    try {
+      const json = JSON.stringify(compactionPayload(value));
+      if (json.length > MAX_PAYLOAD_BYTES || Buffer.byteLength(json, 'utf8') > MAX_PAYLOAD_BYTES) throw new Error();
+      plain = Buffer.from(json, 'utf8');
+      const iv = randomBytes(IV_BYTES);
+      const cipher = createCipheriv('aes-256-gcm', this.#key, iv, { authTagLength: TAG_BYTES });
+      cipher.setAAD(COMPACTION_AAD);
+      const encrypted = Buffer.concat([cipher.update(plain), cipher.final()]);
+      return CODEBUDDY_COMPACTION_STATE_PREFIX + Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString('base64url');
+    } catch { throw new ThinkingStateError('invalid_compaction_state_payload'); }
+    finally { plain?.fill(0); }
+  }
+
+  openCompaction(token) {
+    let plain;
+    try {
+      if (typeof token !== 'string' || token.length > MAX_COMPACTION_TOKEN_LENGTH
+          || !token.startsWith(CODEBUDDY_COMPACTION_STATE_PREFIX)) throw new Error();
+      const encoded = token.slice(CODEBUDDY_COMPACTION_STATE_PREFIX.length);
+      if (!encoded || encoded.length % 4 === 1 || !/^[A-Za-z0-9_-]+$/.test(encoded)) throw new Error();
+      const packet = Buffer.from(encoded, 'base64url');
+      if (packet.length <= HEADER_BYTES || packet.length > MAX_PAYLOAD_BYTES + HEADER_BYTES
+          || packet.toString('base64url') !== encoded) throw new Error();
+      const decipher = createDecipheriv('aes-256-gcm', this.#key, packet.subarray(0, IV_BYTES), { authTagLength: TAG_BYTES });
+      decipher.setAAD(COMPACTION_AAD);
+      decipher.setAuthTag(packet.subarray(IV_BYTES, HEADER_BYTES));
+      plain = Buffer.concat([decipher.update(packet.subarray(HEADER_BYTES)), decipher.final()]);
+      return compactionPayload(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plain)));
+    } catch { throw new ThinkingStateError('invalid_compaction_state'); }
     finally { plain?.fill(0); }
   }
 }

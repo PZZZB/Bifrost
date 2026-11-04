@@ -128,6 +128,7 @@
           <section class="panel model-settings-panel" aria-labelledby="model-settings-title">
             <div class="panel-heading"><div><div class="eyebrow">PUBLISHED MODELS</div><h2 id="model-settings-title">模型选择</h2></div><span class="pill pending" id="model-settings-state">读取中</span></div>
             <p class="panel-copy" id="model-settings-description">按账号目录管理当前网关开放的模型；不可用或尚未适配的模型会显示原因。保存后在客户端刷新模型目录，或重开客户端。</p>
+            <p class="footnote">模型显示前缀与账号排列顺序可在<a href="#accounts">账号池</a>设置。原生模型固定在前，同一账号的模型连续排列。</p>
             <label class="model-search-label" for="model-settings-search">搜索模型或账号<input type="search" id="model-settings-search" placeholder="输入模型名称、ID 或账号" autocomplete="off" disabled></label>
             <p class="model-settings-summary" id="model-settings-summary" role="status" aria-live="polite"></p>
             <p class="gateway-error" id="model-settings-discovery" role="status" hidden></p>
@@ -149,7 +150,7 @@
               <div class="last-model"><span>最近模型</span><code id="account-a-last-model">尚无请求</code></div>
             </section>
             <section class="account-usage-row" aria-label="账号 B 请求统计">
-              <div class="account-usage-heading"><strong>账号 B</strong><span>两个 B 模型</span></div>
+              <div class="account-usage-heading"><strong>账号 B</strong><span>已开放的 B 模型</span></div>
               <div class="metrics"><div><strong id="metric-b-requests">0</strong><span>收到请求</span></div><div><strong id="metric-b-completed">0</strong><span>完成</span></div><div><strong id="metric-b-failed">0</strong><span>失败</span></div></div>
               <div class="last-model"><span>最近模型</span><code id="account-b-last-model">尚无请求</code></div>
             </section>
@@ -163,13 +164,13 @@
             </section>
           </div>
           <div class="gateway-error" id="gateway-error" hidden></div>
-          <p class="footnote">页面每 3 秒更新。原有模型使用 A；仅 B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用已确认的账号 B。</p>
+          <p class="footnote">页面每 3 秒更新。原有模型使用 A；已开放的 B 模型使用已确认的账号 B。</p>
         </section>
-        <section data-client-integration-only data-legacy-overview hidden class="panel quota-panel" aria-labelledby="quota-title">
+        <section id="account-quotas-panel" class="panel quota-panel" aria-labelledby="quota-title">
           <div class="panel-heading"><div><div class="eyebrow">ACCOUNT QUOTAS</div><h2 id="quota-title">账号剩余额度</h2></div><button class="button secondary small" id="quota-refresh-button" type="button">刷新额度</button></div>
-          <p class="panel-copy">按渠道查看已绑定账号与官方套餐额度。未提供的剩余额度显示未知，不按 0% 或 100% 计算，也不从本网关 Token 统计推算。</p>
+          <p class="panel-copy">按渠道查看已绑定账号的套餐额度与远端 Bifröst 用户余额。未提供的剩余额度显示未知，不按 0% 或 100% 计算，也不从本网关 Token 统计推算。</p>
           <div class="quota-accounts">
-            <section class="quota-account" aria-labelledby="quota-a-title">
+            <section class="quota-account" data-local-quota aria-labelledby="quota-a-title">
               <div class="quota-account-heading"><div><h3 id="quota-a-title">账号 A</h3><span id="quota-a-plan">套餐未返回</span></div><span class="pill pending" id="quota-a-state">等待查询</span></div>
               <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-a-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-a-source">来源未返回</dd></div></dl>
               <div class="quota-windows" id="quota-a-windows"><p class="quota-empty">等待官方额度</p></div>
@@ -179,7 +180,7 @@
               <div class="gateway-error" id="quota-a-error" role="status" hidden></div>
               <p class="quota-updated" id="quota-a-updated">尚未查询</p>
             </section>
-            <section class="quota-account" aria-labelledby="quota-b-title">
+            <section class="quota-account" data-local-quota aria-labelledby="quota-b-title">
               <div class="quota-account-heading"><div><h3 id="quota-b-title">账号 B</h3><span id="quota-b-plan">套餐未返回</span></div><span class="pill pending" id="quota-b-state">等待查询</span></div>
               <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-b-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-b-source">来源未返回</dd></div></dl>
               <div class="quota-windows" id="quota-b-windows"><p class="quota-empty">等待官方额度</p></div>
@@ -189,7 +190,7 @@
               <div class="gateway-error" id="quota-b-error" role="status" hidden></div>
               <p class="quota-updated" id="quota-b-updated">尚未查询</p>
             </section>
-            <section class="quota-account" aria-labelledby="quota-codebuddy-title">
+            <section class="quota-account" data-local-quota aria-labelledby="quota-codebuddy-title">
               <div class="quota-account-heading"><div><h3 id="quota-codebuddy-title">CodeBuddy</h3><span id="quota-codebuddy-plan">套餐未返回</span></div><span class="pill pending" id="quota-codebuddy-state">等待查询</span></div>
               <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-codebuddy-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-codebuddy-source">来源未返回</dd></div></dl>
               <div class="quota-windows" id="quota-codebuddy-windows"><p class="quota-empty">等待官方额度</p></div>
@@ -199,7 +200,7 @@
               <div class="gateway-error" id="quota-codebuddy-error" role="status" hidden></div>
               <p class="quota-updated" id="quota-codebuddy-updated">尚未查询</p>
             </section>
-            <section class="quota-account" aria-labelledby="quota-cursor-title">
+            <section class="quota-account" data-local-quota aria-labelledby="quota-cursor-title">
               <div class="quota-account-heading"><div><h3 id="quota-cursor-title">Cursor</h3><span id="quota-cursor-plan">套餐未返回</span></div><span class="pill pending" id="quota-cursor-state">等待查询</span></div>
               <dl class="quota-account-meta"><div><dt>绑定账号</dt><dd id="quota-cursor-identity">等待查询</dd></div><div><dt>来源</dt><dd id="quota-cursor-source">来源未返回</dd></div></dl>
               <div class="quota-windows" id="quota-cursor-windows"><p class="quota-empty">等待官方额度</p></div>
@@ -209,8 +210,14 @@
               <div class="gateway-error" id="quota-cursor-error" role="status" hidden></div>
               <p class="quota-updated" id="quota-cursor-updated">尚未查询</p>
             </section>
+            <section class="quota-account quota-remote-account" aria-labelledby="quota-bifrost-title">
+              <div class="quota-account-heading"><div><h3 id="quota-bifrost-title">Bifröst（远端）</h3><span>各远端用户账号分别显示</span></div><span class="pill pending" id="quota-bifrost-state">等待查询</span></div>
+              <p class="quota-notice" id="quota-bifrost-notice" hidden></p>
+              <div class="quota-remote-sources" id="quota-bifrost-sources"><p class="quota-empty">等待远端账号余额</p></div>
+              <p class="quota-updated" id="quota-bifrost-updated">尚未查询</p>
+            </section>
           </div>
-          <p class="footnote">打开页面、账号授权变化或点击“刷新额度”时查询，不定时轮询。重置时间与更新时间使用洛杉矶时间（America/Los_Angeles）。个人限额不代表团队总余额；各渠道费用以其官方用量页为准。</p>
+          <p class="footnote">打开页面、账号授权变化或点击“刷新额度”时查询，不定时轮询。重置时间与更新时间使用洛杉矶时间（America/Los_Angeles）。个人限额不代表团队总余额；订阅费用以各渠道官方用量页为准，远端用户余额以各自远端账本为准。</p>
         </section>
         <section data-client-integration-only data-legacy-overview hidden class="panel token-panel" aria-labelledby="token-title">
           <div class="panel-heading"><div><div class="eyebrow">TOKEN USAGE</div><h2 id="token-title">Token 用量</h2></div><span class="pill" id="token-state">读取中</span></div>
@@ -229,7 +236,7 @@
               <div class="token-account-subsets"><span>缓存命中 <strong id="token-a-cached">—</strong></span><span>思考 <strong id="token-a-reasoning">—</strong></span></div>
             </section>
             <section class="token-account" aria-label="账号 B Token 用量">
-              <div class="account-usage-heading"><strong>账号 B</strong><span>两个 B 模型</span></div>
+              <div class="account-usage-heading"><strong>账号 B</strong><span>已开放的 B 模型</span></div>
               <div class="token-account-main"><div><span>输入</span><strong id="token-b-input">—</strong></div><div><span>输出</span><strong id="token-b-output">—</strong></div></div>
               <div class="token-account-subsets"><span>缓存命中 <strong id="token-b-cached">—</strong></span><span>思考 <strong id="token-b-reasoning">—</strong></span></div>
             </section>
@@ -447,7 +454,7 @@
               <p class="integration-mode-description" id="integration-mode-description">读取本机 Codex 的连接模式。</p>
               <div class="integration-mode-actions"><button class="button secondary" id="integration-official-button" type="button" disabled>切换到官方</button><button class="button primary" id="integration-gateway-button" type="button" disabled>切换到 Bifröst 网关</button></div>
               <p class="gateway-error" id="integration-mode-error" role="status" hidden></p>
-              <p class="footnote">切换会保存配置。请完全退出并重新打开 Codex 后使用新模式；此处不重启网关服务。</p>
+                <p class="footnote">切换会同时保存原生与已接入网关会话的连接配置。完全退出并重开 Codex 后生效，原会话历史保留。</p>
             </div>
             <p class="panel-copy" id="integration-description">管理当前 Codex 的网关接入。</p>
             <div class="config-path"><span>配置文件</span><code id="config-path">读取中</code></div>

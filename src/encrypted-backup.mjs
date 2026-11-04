@@ -11,6 +11,14 @@ const safeName = value => typeof value === 'string' && value.length < 1024 && !i
   && !value.includes('\\') && !/[\x00-\x1f\x7f]/.test(value)
   && value.split('/').every(part => part && part !== '.' && part !== '..');
 
+/** The recovery-key CLI requires POSIX permissions; Windows ACL support is not implemented. */
+export function assertBackupPlatform() {
+  if (process.platform === 'win32') throw Object.assign(
+    new Error('Encrypted backup commands require POSIX file permissions; Windows is not supported.'),
+    { code: 'backup_platform_unsupported' },
+  );
+}
+
 async function regular(path, limit = LIMIT, privateOnly = false) {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -23,6 +31,7 @@ async function regular(path, limit = LIMIT, privateOnly = false) {
 }
 
 export async function backupKey(path, { create = false } = {}) {
+  assertBackupPlatform();
   if (create) {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     let handle;

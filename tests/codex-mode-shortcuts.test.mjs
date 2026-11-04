@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { switchCodexMode } from '../scripts/switch-codex-mode.mjs';
+import { Integration } from '../src/integration.mjs';
+import { createCodexNativeEntry } from '../src/codex-native-entry.mjs';
 
 const refuseConnection = async () => { throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }); };
 const forbiddenRpc = () => { assert.fail('A running gateway must own configuration writes.'); };
@@ -68,7 +70,11 @@ function configRpc(home, { overridden = false, rejectWrite = false } = {}) {
       assert.equal(params.reloadUserConfig, false);
       if (rejectWrite) throw new Error('Concurrent native config edit.');
       writes.push(params.edits);
-      for (const edit of params.edits) { assert.equal(edit.keyPath, 'model_provider'); config.model_provider = edit.value; }
+      for (const edit of params.edits) {
+        const parts = edit.keyPath.split('.'); let parent = config;
+        for (const part of parts.slice(0, -1)) parent = parent[part] ??= {};
+        if (edit.value === null) delete parent[parts.at(-1)]; else parent[parts.at(-1)] = structuredClone(edit.value);
+      }
       return { status: 'ok', filePath: join(home, 'config.toml') };
     },
     async close() { this.closed = true; },
@@ -139,6 +145,25 @@ test('offline official switching preserves provider settings, authentication, an
 test('offline gateway mode cannot bypass service/account checks', async t => {
   const { options } = await fixture(t);
   await assert.rejects(switchCodexMode({ ...options, mode: 'gateway', fetchImpl: refuseConnection }), { code: 'mode_gateway_offline' });
+});
+
+test('offline native shortcut restores both built-in and custom routes from a v3 gateway installation', async t => {
+  const { options, stateDir, home, auth } = await fixture(t);
+  const rpc = configRpc(home);
+  const { gatewayKey } = JSON.parse(await readFile(join(stateDir, 'bridge.json'), 'utf8'));
+  const baseUrl = 'http://127.0.0.1:43155/backend-api/codex';
+  const integration = new Integration({ rpc, configPath: join(home, 'config.toml'), statePath: join(stateDir, 'integration.json'),
+    baseUrl, gatewayKey, nativeBaseUrl: createCodexNativeEntry({ baseUrl, gatewayKey }).baseUrl });
+  await integration.install();
+  assert.equal(typeof rpc.config.openai_base_url, 'string');
+  const result = await switchCodexMode({ ...options, mode: 'official', fetchImpl: refuseConnection, rpcFactory: () => rpc });
+  assert.equal(result.success, true); assert.equal(result.transport, 'local-config');
+  assert.equal(Object.hasOwn(rpc.config, 'openai_base_url'), false);
+  assert.deepEqual(rpc.config.model_providers.custom, rpc.original.model_providers.custom);
+  assert.equal(rpc.config.model_provider, 'openai');
+  assert.equal(rpc.config.model, rpc.original.model);
+  assert.equal(await readFile(join(home, 'auth.json'), 'utf8'), auth);
+  assert.equal(rpc.closed, true);
 });
 
 test('a timeout does not establish that the service is absent', async t => {

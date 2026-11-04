@@ -88,6 +88,26 @@ test('CodeBuddy mode switching posts explicit mode and preserves the original-mo
   assert.deepEqual(p.calls.filter(call => call.options.method === 'POST').at(-1).body, { mode: 'gateway' });
 });
 
+test('upgrading an existing Codex gateway is a distinct explicit action from restoring native mode', async () => {
+  const value = fixture(); value.clients[0].modeUpdateRequired = true;
+  const p = await page({ value });
+  assert.equal(p.action('codex', 'mode').textContent, '恢复原生');
+  const upgrade = find(p.card('codex'), node => node.textContent === '更新网关连接');
+  assert.ok(upgrade); upgrade.fire('click'); await settle();
+  const writes = p.calls.filter(call => call.options.method === 'POST');
+  assert.equal(writes.length, 1); assert.equal(writes[0].path, '/api/client-controls/codex/mode');
+  assert.deepEqual(writes[0].body, { mode: 'gateway' });
+});
+
+test('a legacy native selection offers a native connection update without turning the gateway on', async () => {
+  const value = fixture(); Object.assign(value.clients[0], { mode: 'native', modeUpdateRequired: true });
+  const p = await page({ value });
+  const upgrade = find(p.card('codex'), node => node.textContent === '更新原生连接');
+  assert.ok(upgrade); upgrade.fire('click'); await settle();
+  const writes = p.calls.filter(call => call.options.method === 'POST');
+  assert.equal(writes.length, 1); assert.deepEqual(writes[0].body, { mode: 'native' });
+});
+
 test('automatic sync defaults on, persists an explicit opt-out, and does not imply client menus updated in place', async () => {
   const data = fixture(); delete data.clients[0].autoSync;
   const p = await page({ value: data }); assert.equal(p.action('codex', 'settings').checked, true);

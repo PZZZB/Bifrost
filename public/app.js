@@ -99,6 +99,7 @@ const elements = Object.fromEntries([
   'codebuddy-failed', 'codebuddy-active', 'codebuddy-error',
   'token-codebuddy-input', 'token-codebuddy-output', 'token-codebuddy-cached', 'token-codebuddy-reasoning',
   'token-claude-row', 'token-claude-input', 'token-claude-output', 'token-claude-cached', 'token-claude-reasoning',
+  'account-quotas-panel', 'quota-bifrost-state', 'quota-bifrost-notice', 'quota-bifrost-sources', 'quota-bifrost-updated',
   'quota-refresh-button', ...['a', 'b', 'codebuddy', 'cursor'].flatMap(account =>
     ['plan', 'state', 'identity', 'source', 'windows', 'credits', 'error', 'updated', 'notice', 'usage-link'].map(field => `quota-${account}-${field}`)),
   'service-state', 'service-ready', 'service-independent', 'service-active', 'service-restart-button',
@@ -222,6 +223,10 @@ function text(id, value) {
 function pill(id, label, kind = '') {
   text(id, label);
   elements[id].className = `pill${kind ? ` ${kind}` : ''}`;
+}
+
+function canReadAccountQuotas(caps = status?.node?.capabilities) {
+  return !caps || caps.clientIntegration === true || caps.activeKinds?.includes('bifrost') === true;
 }
 
 function selectManagementTab(name, { focus = false, updateLocation = true } = {}) {
@@ -1551,20 +1556,28 @@ function renderIntegrationMode({ integration, idle, bound, passed, verifying }) 
     && integrationModeUnavailableToken !== (status?.csrfToken || 'unknown-service');
   const mode = routing.supported === true ? ['official', 'gateway', 'other'].includes(routing.mode) ? routing.mode : 'other'
     : codexOfficialSelected(integration) ? 'official' : codexGatewaySelected(integration) ? 'gateway' : 'other';
+  const needsConnectionUpdate = routing.nativeThreadsSupported === true && integration.needsUpgrade === true;
+  const updateGateway = needsConnectionUpdate && mode !== 'official';
+  const updateOfficial = needsConnectionUpdate && mode === 'official';
   const enabled = supported && idle && managementConnected && !managementStatusError && !restartInProgress;
   text('integration-mode-value', mode === 'official' ? '官方直连' : mode === 'gateway' ? 'Bifröst 网关'
     : integration.providerId ? `其他提供方（${integration.providerId}）` : '尚未确认');
-  text('integration-mode-description', mode === 'official' ? '请求使用 Codex 官方连接及当前登录账号。'
-    : mode === 'gateway' ? '请求经过 Bifröst，按所选模型分配账号与渠道。'
+  text('integration-mode-description', mode === 'official' ? '已保存官方直连配置。重开 Codex 后使用当前登录账号；原会话若仍选着网关模型，请改选普通 GPT 模型。'
+    : mode === 'gateway' ? routing.nativeThreadsCovered === true
+      ? '已保存原生及网关会话的连接配置。完全退出并重开 Codex 后，原会话可切换普通模型和网关模型。'
+      : '默认连接已指向网关，原生旧会话的连接仍需更新。'
       : '请选择官方连接，或使用已保存的 Bifröst 网关配置。');
-  elements['integration-official-button'].disabled = !enabled || mode === 'official' || routing.canSwitchOfficial !== true;
-  elements['integration-gateway-button'].disabled = !enabled || verifying || mode === 'gateway' || routing.canSwitchGateway !== true || !bound || !passed;
-  text('integration-official-button', busyAction === 'integration-mode-official' ? '正在切换到官方…' : mode === 'official' ? '当前为官方直连' : '切换到官方');
-  text('integration-gateway-button', busyAction === 'integration-mode-gateway' ? '正在切换到网关…' : mode === 'gateway' ? '当前为 Bifröst 网关' : '切换到 Bifröst 网关');
+  elements['integration-official-button'].disabled = !enabled || mode === 'official' && !updateOfficial || routing.canSwitchOfficial !== true;
+  elements['integration-gateway-button'].disabled = !enabled || verifying || mode === 'gateway' && !updateGateway || routing.canSwitchGateway !== true || !bound || !passed;
+  text('integration-official-button', busyAction === 'integration-mode-official' ? '正在保存官方配置…' : updateOfficial ? '更新原生连接' : mode === 'official' ? '官方配置已保存' : '切换到官方');
+  text('integration-gateway-button', busyAction === 'integration-mode-gateway' ? '正在保存网关配置…' : updateGateway ? '更新网关连接' : mode === 'gateway' ? '网关配置已保存' : '切换到 Bifröst 网关');
   const error = !supported ? '切换功能需重启网关服务后可用。请在控制台点击“重启网关服务”，恢复连接后刷新页面。'
+    : updateOfficial && routing.canSwitchOfficial === true ? '请更新原生连接以恢复旧会话的原始路由，然后完全退出并重新打开 Codex。'
     : mode !== 'gateway' && routing.canSwitchGateway !== true ? routing.reason || '尚无可切换的网关路由，请先完成下方网关接入配置。'
       : mode !== 'gateway' && (!bound || !passed) ? '切换到网关前，请登录并确认账号 B，完成推理验证。'
-        : routing.reason || '';
+        : updateGateway ? '请更新网关连接以覆盖原生旧会话，然后完全退出并重新打开 Codex。'
+          : mode === 'gateway' && routing.nativeThreadsSupported !== true ? '当前后台尚未提供旧会话兼容切换，请先空闲重启网关加载新版。'
+            : routing.reason || '';
   text('integration-mode-error', error);
   elements['integration-mode-error'].hidden = !error;
 }
@@ -1576,6 +1589,8 @@ function render() {
     elements['tab-connections'].hidden = !caps.clientIntegration;
     elements['tab-clients'].hidden = !caps.userManagement;
     for (const panel of document.querySelectorAll('[data-client-integration-only]')) panel.hidden = !caps.clientIntegration || panel.hasAttribute('data-legacy-overview');
+    elements['account-quotas-panel'].hidden = !canReadAccountQuotas(caps);
+    for (const card of document.querySelectorAll('[data-local-quota]')) card.hidden = caps.clientIntegration !== true;
     if (!caps.userManagement && elements['tab-clients'].getAttribute('aria-selected') === 'true'
       || !caps.clientIntegration && elements['tab-connections'].getAttribute('aria-selected') === 'true') selectManagementTab('console');
     if (!caps.clientIntegration) {
@@ -1636,7 +1651,7 @@ function render() {
   elements['logout-button'].disabled = !idle || verifying;
   elements['bind-button'].disabled = !idle || !hasAccount || bound || verifying;
   text('bind-button', busyAction === 'bind' ? '正在确认…' : bound ? '已确认账号 B' : '确认此账号为 B');
-  text('bind-description', bound ? '已固定下方账号 B。B-GPT-6 Astra 与 B-GPT-6.1 Sol 使用该账号的授权。' : '核对上方邮箱，确认它就是你要使用订阅额度的账号 B。');
+  text('bind-description', bound ? '已固定下方账号 B。已开放的 B 模型使用该账号的授权。' : '核对上方邮箱，确认它就是你要使用订阅额度的账号 B。');
   text('bound-account', pinned ? `已确认：${pinned.email || '账号 B'}${pinned.planType ? ` · ${pinned.planType}` : ''}` : '');
 
   elements['model-select'].disabled = !idle || !bound || verifying;
@@ -1716,6 +1731,8 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         clientAdminLoaded = false;
         clientAdminUnavailable = true;
         clientAdminRequest = null;
+        accountQuotaStatus = null;
+        accountQuotasRequest = null;
       }
       if (queuedRestartToken && status.csrfToken && status.csrfToken !== queuedRestartToken) {
         queuedRestartToken = null;
@@ -1736,7 +1753,7 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
         if (active('with') || !caps) void refreshWith();
         if (active('codebuddy')) void refreshCodeBuddy();
         if (active('cursor')) void refreshCursor();
-        if (!caps && !accountQuotaStatus && !accountQuotasRequest) void refreshAccountQuotas();
+        if (canReadAccountQuotas(caps) && !accountQuotaStatus && !accountQuotasRequest) void refreshAccountQuotas();
         void refreshServiceStatus();
         if (!modelSettingsLoaded) void refreshModelSettings();
         if (!clientAdminLoaded && (elements['tab-clients'].getAttribute('aria-selected') === 'true'
@@ -1800,9 +1817,94 @@ function safeQuotaUsageUrl(accountId, value) {
   return null;
 }
 
+function quotaNode(tag, value, className = '') {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (value != null) node.textContent = String(value);
+  return node;
+}
+
+function remoteQuotaWallet(value) {
+  return value?.currency === 'CNY' && typeof value.enforceBalance === 'boolean'
+    && [value.balanceMicros, value.reservedMicros, value.availableMicros].every(Number.isSafeInteger)
+    && value.reservedMicros >= 0
+    && BigInt(value.balanceMicros) - BigInt(value.reservedMicros) === BigInt(value.availableMicros) ? value : null;
+}
+
+function remoteTokenQuota(value) {
+  if (!value || ![value.used, value.reserved].every(number => Number.isSafeInteger(number) && number >= 0)) return null;
+  if (value.limit === null) return value.remaining === null ? value : null;
+  if (![value.limit, value.remaining].every(number => Number.isSafeInteger(number) && number >= 0)) return null;
+  const remaining = BigInt(value.limit) - BigInt(value.used) - BigInt(value.reserved);
+  return BigInt(value.remaining) === (remaining < 0n ? 0n : remaining) ? value : null;
+}
+
+function renderBifrostQuotas(group, timeZone) {
+  const missing = group == null, unavailable = group?.status === 'not_connected';
+  const state = missing ? ['待更新服务', 'pending'] : unavailable ? ['未绑定', 'pending']
+    : group.status === 'ok' ? ['已更新', 'success'] : group.status === 'error' ? ['需检查', 'error']
+      : group.status === 'partial' ? ['部分需检查', 'pending'] : ['未提供余额', 'pending'];
+  pill('quota-bifrost-state', ...state);
+  const notice = typeof group?.notice === 'string' ? group.notice : '';
+  text('quota-bifrost-notice', notice); elements['quota-bifrost-notice'].hidden = !notice;
+  text('quota-bifrost-updated', group?.fetchedAt ? `查询时间：${quotaTime(group.fetchedAt, timeZone)}` : '尚未取得查询时间');
+  const sources = Array.isArray(group?.sources) ? group.sources.filter(source => source && typeof source === 'object').slice(0, 8) : [];
+  const cards = sources.map((source, index) => {
+    const card = quotaNode('section', null, 'quota-remote-source');
+    card.setAttribute('data-bifrost-source-index', index);
+    const titleId = `quota-bifrost-source-title-${index}`;
+    card.setAttribute('aria-labelledby', titleId);
+    const heading = quotaNode('div', null, 'quota-account-heading'), title = quotaNode('h4', source.name || 'Bifröst 远端账号');
+    title.setAttribute('id', titleId);
+    const succeeded = source.status === 'ok' && source.authenticated === true;
+    const failed = source.status === 'error';
+    heading.append(title, quotaNode('span', failed ? '需检查' : source.authenticated === false ? '未授权' : succeeded ? '已更新' : '未提供余额',
+      `pill ${failed || source.authenticated === false ? 'error' : succeeded ? 'success' : 'pending'}`));
+    card.append(heading);
+    const metadata = quotaNode('dl', null, 'quota-account-meta');
+    const identity = source.authenticated === true ? typeof source.identity === 'string' && source.identity.trim()
+      ? source.identity : '已绑定（账号标识未返回）' : source.authenticated === false ? '未确认有效的远端 Key' : '账号状态未返回';
+    for (const [label, value] of [['绑定账号', identity], ['来源', source.id || '远端 Bifröst']]) {
+      const row = quotaNode('div'); row.append(quotaNode('dt', label), quotaNode('dd', value)); metadata.append(row);
+    }
+    card.append(metadata);
+    const wallet = succeeded ? remoteQuotaWallet(source.wallet) : null;
+    if (wallet) {
+      const balance = quotaNode('div', null, 'quota-remote-balance');
+      balance.append(quotaNode('span', wallet.enforceBalance ? '可用余额（CNY）' : '账面余额（CNY）'),
+        quotaNode('strong', clientMoney(wallet.enforceBalance ? wallet.availableMicros : wallet.balanceMicros)));
+      card.append(balance);
+      const amounts = quotaNode('dl', null, 'quota-remote-metrics');
+      for (const [label, value] of [[wallet.enforceBalance ? '总余额' : '可用账面金额', wallet.enforceBalance ? wallet.balanceMicros : wallet.availableMicros], ['已预留金额', wallet.reservedMicros]]) {
+        const row = quotaNode('div'); row.append(quotaNode('dt', label), quotaNode('dd', clientMoney(value))); amounts.append(row);
+      }
+      card.append(amounts);
+      if (!wallet.enforceBalance) card.append(quotaNode('p', '远端未启用余额限制；金额仅为账面记录，不代表可用模型额度。', 'quota-notice'));
+    } else card.append(quotaNode('p', failed ? '本次未取得远端余额。' : source.authenticated === false
+      ? '请检查远端用户 Key 的授权与有效期。' : '远端未提供可靠余额。', 'quota-empty'));
+    const quota = succeeded ? remoteTokenQuota(source.tokenQuota) : null;
+    if (quota) {
+      card.append(quotaNode('p', quota.limit === null ? 'Token 配额：未设置限额' : `Token 配额：剩余 ${clientTokenValue(quota.remaining)} / ${clientTokenValue(quota.limit)}`, 'quota-credits'));
+      card.append(quotaNode('p', `本周期已用 ${clientTokenValue(quota.used)} Token · 已预留 ${clientTokenValue(quota.reserved)} Token`, 'quota-notice'));
+    } else if (succeeded) card.append(quotaNode('p', 'Token 配额：未返回', 'quota-notice'));
+    const expiresAt = source.authenticated === true && source.key && Object.hasOwn(source.key, 'expiresAt') ? source.key.expiresAt : undefined;
+    const expiry = expiresAt === null ? '未设置到期时间' : typeof expiresAt === 'string' && Number.isFinite(new Date(expiresAt).getTime())
+      ? `至 ${quotaTime(expiresAt, timeZone)}` : '未返回';
+    card.append(quotaNode('p', `Key 有效期：${expiry}`, 'quota-notice'));
+    if (typeof source.notice === 'string' && source.notice) card.append(quotaNode('p', source.notice, 'quota-notice'));
+    if (failed) card.append(quotaNode('p', typeof source.error === 'string' && source.error ? source.error : '远端余额暂时无法读取，请稍后刷新。', 'gateway-error'));
+    card.append(quotaNode('p', source.fetchedAt ? `查询时间：${quotaTime(source.fetchedAt, timeZone)}` : '尚未取得查询时间', 'quota-updated'));
+    return card;
+  });
+  if (!cards.length) cards.push(quotaNode('p', missing ? '当前服务未提供远端账号余额，请更新并重启网关。'
+    : unavailable ? '未配置远端 Bifröst 来源。' : group?.status === 'error' ? '远端余额暂时无法读取，请稍后刷新。' : '远端未提供账号余额。', 'quota-empty'));
+  elements['quota-bifrost-sources'].replaceChildren(...cards);
+}
+
 function renderAccountQuotas(data) {
   accountQuotaStatus = data;
   const timeZone = data.timeZone || 'America/Los_Angeles';
+  renderBifrostQuotas(data.accounts?.Bifrost, timeZone);
   for (const accountId of ['A', 'B', 'CodeBuddy', 'Cursor']) {
     const prefix = `quota-${accountId.toLowerCase()}`;
     const account = data.accounts?.[accountId];
@@ -1881,26 +1983,35 @@ function renderAccountQuotas(data) {
 }
 
 async function refreshAccountQuotas() {
+  if (!canReadAccountQuotas()) return;
   if (accountQuotasRequest) return accountQuotasRequest;
   elements['quota-refresh-button'].disabled = true;
   text('quota-refresh-button', '查询中…');
   for (const accountId of ['a', 'b', 'codebuddy', 'cursor']) pill(`quota-${accountId}-state`, '查询中', 'pending');
-  accountQuotasRequest = (async () => {
+  pill('quota-bifrost-state', '查询中', 'pending');
+  const generation = worldServiceGeneration;
+  const pending = (async () => {
     try {
-      renderAccountQuotas(await request('/api/account-quotas', { signal: AbortSignal.timeout(30_000) }));
+      const data = await request('/api/account-quotas', { signal: AbortSignal.timeout(30_000) });
+      if (generation === worldServiceGeneration) renderAccountQuotas(data);
     } catch (error) {
+      if (generation !== worldServiceGeneration) return;
       const message = error.name === 'TimeoutError' ? '官方额度查询超时，请稍后重试。' : error.message || '官方额度暂时无法读取，请稍后重试。';
-      renderAccountQuotas({ accounts: Object.fromEntries(['A', 'B', 'CodeBuddy', 'Cursor'].map(account => [account, { status: 'error', error: message }])) });
+      renderAccountQuotas({ accounts: { ...Object.fromEntries(['A', 'B', 'CodeBuddy', 'Cursor'].map(account => [account, { status: 'error', error: message }])),
+        Bifrost: { status: 'error', notice: message, sources: [] } } });
     } finally {
-      accountQuotasRequest = null;
-      elements['quota-refresh-button'].disabled = false;
-      text('quota-refresh-button', '刷新额度');
+      if (accountQuotasRequest === pending) {
+        accountQuotasRequest = null;
+        elements['quota-refresh-button'].disabled = false;
+        text('quota-refresh-button', '刷新额度');
+      }
     }
   })();
-  return accountQuotasRequest;
+  accountQuotasRequest = pending;
+  return pending;
 }
 async function refreshAuthorizedAccountQuotas() {
-  if (status?.node?.capabilities) return;
+  if (!canReadAccountQuotas()) return;
   if (accountQuotasRequest) await accountQuotasRequest;
   await refreshAccountQuotas();
 }
@@ -2345,7 +2456,11 @@ async function switchIntegrationMode(mode) {
       throw error;
     }
     if (status) status = { ...status, integration };
-    notify(`已保存${mode === 'official' ? '官方直连' : 'Bifröst 网关'}配置。请完全退出并重新打开 Codex，再选择该模式可用的模型。`);
+    notify(mode === 'official'
+      ? '已恢复官方连接配置。请完全退出并重开 Codex，并将原会话中选着的网关模型改为普通 GPT 模型。'
+      : integration.routing?.nativeThreadsCovered === true
+        ? '已保存网关配置并覆盖原生旧会话。请完全退出并重开 Codex，然后可在原会话切换普通模型和网关模型。'
+        : '默认网关配置已保存；此后台尚未确认旧会话接入。请更新网关服务后重试。');
   });
 }
 
@@ -2356,7 +2471,7 @@ for (const mode of ['official', 'gateway']) {
 elements['install-button'].addEventListener('click', () => {
   void action('install', async () => {
     await post('/api/integration/install');
-    notify('已添加两个 B 模型并启用账号分流。保存当前工作，重启 Codex 后可在模型选择器中切换。');
+    notify('已接入已开放的 B 模型并启用账号分流。保存当前工作，重启 Codex 后可在模型选择器中切换。');
   });
 });
 

@@ -655,3 +655,325 @@ test('concurrent connection switches serialize while retaining one recovery base
   assert.equal(rpc.config.model_provider, 'openai');
   assert.equal(await readFile(statePath, 'utf8'), recovery);
 });
+
+const privateNativeBase = 'http://127.0.0.1:19437/native/private-capability/backend-api/codex';
+const nativeIntegration = context => new Integration({ ...context.options, nativeBaseUrl: privateNativeBase });
+
+test('native compatibility covers both provider families and official switching restores all owned routes', async t => {
+  const context = await setup(t);
+  const { rpc, statePath } = context, integration = nativeIntegration(context);
+  const original = copy(rpc.config);
+  const installed = await integration.install();
+  assert.equal(installed.routing.mode, 'gateway');
+  assert.equal(installed.routing.nativeThreadsSupported, true);
+  assert.equal(installed.routing.nativeThreadsCovered, true);
+  assert.equal(rpc.config.openai_base_url, privateNativeBase);
+  assert.equal(rpc.config.model_providers.custom.base_url, context.options.baseUrl);
+  assert.equal(rpc.writes[0].edits.length, 6);
+  const state = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(state.version, 3);
+  assert.equal(state.fields.length, 5);
+  assert.deepEqual(state.fields[4].original, { exists: false });
+  assert.equal(JSON.stringify(installed).includes('private-capability'), false);
+  assert.equal(JSON.stringify(installed).includes(context.options.gatewayKey), false);
+  assert.equal((await integration.originalNativeProvider()).config.base_url, 'https://chatgpt.com/backend-api/codex');
+  assert.equal((await integration.originalProvider()).config.base_url, original.model_providers.custom.base_url);
+  const manifest = await readFile(statePath, 'utf8');
+  rpc.config.model_reasoning_effort = 'low'; rpc.version++;
+  const official = await integration.switchMode('official');
+  assert.equal(official.routing.mode, 'official');
+  assert.equal(official.routing.nativeThreadsCovered, false);
+  assert.equal(official.installed, true);
+  assert.equal(official.routing.canSwitchGateway, true);
+  assert.deepEqual(rpc.config, { ...original, model_provider: 'openai', model_reasoning_effort: 'low' });
+  assert.equal(await readFile(statePath, 'utf8'), manifest);
+  const refreshed = nativeIntegration(context);
+  await refreshed.switchMode('gateway');
+  assert.equal(rpc.config.openai_base_url, privateNativeBase);
+  assert.equal(rpc.config.model_providers.custom.model_catalog_url, `${context.options.baseUrl}/models`);
+  const count = rpc.writes.length;
+  await refreshed.switchMode('gateway'); assert.equal(rpc.writes.length, count);
+  await refreshed.restore();
+  assert.deepEqual(rpc.config, { ...original, model_reasoning_effort: 'low' });
+});
+
+test('an existing v2 gateway selection can upgrade in place without losing the custom baseline', async t => {
+  const context = await setup(t);
+  await context.integration.install();
+  const oldManifest = JSON.parse(await readFile(context.statePath, 'utf8'));
+  const integration = nativeIntegration(context);
+  const before = await integration.inspect();
+  assert.equal(before.needsUpgrade, true);
+  assert.equal(before.routing.nativeThreadsSupported, true);
+  assert.equal(before.routing.nativeThreadsCovered, false);
+  assert.equal(before.routing.canSwitchGateway, true);
+  const upgraded = await integration.switchMode('gateway');
+  assert.equal(upgraded.needsUpgrade, false);
+  assert.equal(upgraded.routing.nativeThreadsCovered, true);
+  const state = JSON.parse(await readFile(context.statePath, 'utf8'));
+  assert.deepEqual(state.fields.slice(0, 4), oldManifest.fields);
+  assert.deepEqual(state.fields[4].original, { exists: false });
+  assert.equal((await integration.originalProvider()).config.base_url, originalConfig().model_providers.custom.base_url);
+  await integration.switchMode('official');
+  assert.deepEqual(context.rpc.config, { ...originalConfig(), model_provider: 'openai' });
+});
+
+test('v1 and a previously selected official v2 mode migrate safely in either direction', async t => {
+  for (const legacy of [true, false]) {
+    const context = legacy ? await setupLegacy(t) : await setup(t);
+    if (!legacy) { await context.integration.install(); await context.integration.switchMode('official'); }
+    const integration = nativeIntegration(context);
+    const result = await integration.switchMode(legacy ? 'official' : 'gateway');
+    assert.equal(result.routing.mode, legacy ? 'official' : 'gateway');
+    if (legacy) {
+      assert.deepEqual(context.rpc.config, { ...originalConfig(), model_provider: 'openai' });
+      await integration.switchMode('gateway');
+    }
+    assert.equal(context.rpc.config.openai_base_url, privateNativeBase);
+    await integration.restore();
+    assert.deepEqual(context.rpc.config, originalConfig());
+  }
+});
+
+test('selecting official again upgrades legacy official mode and releases old custom routes idempotently', async t => {
+  for (const version of [1, 2]) for (const lostResponse of [false, true]) {
+    const original = originalConfig(); original.chatgpt_base_url = 'https://chat.openai.com/backend-api/';
+    const context = version === 1 ? await setupLegacy(t, original) : await setup(t, original);
+    if (version === 2) await context.integration.install();
+    context.rpc.config.model_provider = 'openai'; context.rpc.version++;
+    const before = JSON.parse(await readFile(context.statePath, 'utf8'));
+    const integration = nativeIntegration(context);
+    const status = await integration.inspect();
+    assert.equal(status.routing.mode, 'official');
+    assert.equal(status.needsUpgrade, true);
+    assert.equal(status.routing.canSwitchOfficial, true);
+    assert.equal((await integration.originalNativeProvider()).config.base_url, 'https://chat.openai.com/backend-api/codex');
+    assert.equal((await integration.originalProvider()).config.base_url, original.model_providers.custom.base_url);
+    if (lostResponse) {
+      context.rpc.afterWrite = server => { server.afterWrite = null; throw new Error('lost official upgrade response'); };
+      await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_WRITE_FAILED' });
+    } else await integration.switchMode('official');
+    const expected = { ...original, model_provider: 'openai' };
+    assert.deepEqual(context.rpc.config, expected);
+    const count = context.rpc.writes.length;
+    const restarted = nativeIntegration(context);
+    const complete = await restarted.switchMode('official');
+    assert.equal(complete.routing.mode, 'official');
+    assert.equal(complete.needsUpgrade, false);
+    assert.equal(complete.routing.canSwitchOfficial, false);
+    assert.equal(complete.routing.nativeThreadsCovered, false);
+    assert.equal(context.rpc.writes.length, count);
+    assert.deepEqual(context.rpc.config, expected);
+    const saved = JSON.parse(await readFile(context.statePath, 'utf8'));
+    assert.equal(saved.version, 3); assert.equal(saved.phase, 'installed');
+    assert.equal(Object.hasOwn(saved, 'upgradeBaselineCount'), false);
+    assert.deepEqual(saved.fields.slice(0, before.fields.length), before.fields);
+    assert.deepEqual(await restarted.originalNativeProvider(), { providerId: 'openai', config: { base_url: 'https://chat.openai.com/backend-api/codex' } });
+    assert.equal((await restarted.originalProvider()).config.base_url, original.model_providers.custom.base_url);
+    await restarted.switchMode('official'); assert.equal(context.rpc.writes.length, count);
+  }
+});
+
+test('native compatibility retains separate original native and custom routes including inherited roots', async t => {
+  for (const inherited of [false, true]) {
+    const original = originalConfig();
+    const upstream = 'https://native-original.example.invalid/backend-api/codex';
+    if (!inherited) original.openai_base_url = upstream;
+    const context = await setup(t, original, inherited ? { openai_base_url: upstream } : {});
+    const integration = nativeIntegration(context);
+    await integration.install();
+    assert.deepEqual(await integration.originalNativeProvider(), { providerId: 'openai', config: { base_url: upstream } });
+    assert.equal((await integration.originalProvider()).config.base_url, original.model_providers.custom.base_url);
+    if (inherited) {
+      context.rpc.inherited.openai_base_url = 'https://updated-native.example.invalid/backend-api/codex';
+      assert.equal((await integration.originalNativeProvider()).config.base_url, context.rpc.inherited.openai_base_url);
+    }
+    const restored = await integration.switchMode('official');
+    assert.equal(restored.routing.mode, 'other');
+    assert.equal(restored.routing.nativeSettingsRestored, true);
+    assert.deepEqual(context.rpc.config, { ...original, model_provider: 'openai' });
+    assert.equal(JSON.stringify(restored).includes('native-original'), false);
+    await integration.restore();
+    assert.deepEqual(context.rpc.config, { ...original, model_provider: 'openai' });
+  }
+  const original = originalConfig(); original.chatgpt_base_url = 'https://chat.openai.com/backend-api/';
+  const context = await setup(t, original);
+  assert.equal((await nativeIntegration(context).originalNativeProvider()).config.base_url, 'https://chat.openai.com/backend-api/codex');
+});
+
+test('native compatibility recovers committed writes and optimistic conflicts without recapturing originals', async t => {
+  for (const legacy of [false, true]) {
+    const context = await setup(t);
+    if (legacy) await context.integration.install();
+    const integration = nativeIntegration(context);
+    context.rpc.beforeWrite = server => { server.config.model_reasoning_effort = 'low'; server.version++; server.beforeWrite = null; };
+    await assert.rejects(legacy ? integration.switchMode('gateway') : integration.install(), { code: 'INTEGRATION_WRITE_FAILED' });
+    const pending = JSON.parse(await readFile(context.statePath, 'utf8'));
+    assert.equal(pending.phase, legacy ? 'upgrading' : 'prepared');
+    assert.equal((await integration.inspect()).canInstall, true);
+    context.rpc.afterWrite = server => { server.afterWrite = null; throw new Error('lost write after commit'); };
+    await assert.rejects(integration.install(), { code: 'INTEGRATION_WRITE_FAILED' });
+    const count = context.rpc.writes.length;
+    await nativeIntegration(context).switchMode('gateway');
+    assert.equal(context.rpc.writes.length, count);
+    assert.equal(JSON.parse(await readFile(context.statePath, 'utf8')).phase, 'installed');
+    context.rpc.afterWrite = server => { server.afterWrite = null; throw new Error('lost restore after commit'); };
+    await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_WRITE_FAILED' });
+    const officialCount = context.rpc.writes.length;
+    await nativeIntegration(context).switchMode('official');
+    assert.equal(context.rpc.writes.length, officialCount);
+    assert.equal(context.rpc.config.openai_base_url, undefined);
+    assert.equal(context.rpc.config.model_providers.custom.base_url, originalConfig().model_providers.custom.base_url);
+    assert.equal(context.rpc.config.model_reasoning_effort, 'low');
+  }
+});
+
+test('an interrupted native upgrade can restore before or after the config commit', async t => {
+  for (const committed of [false, true]) {
+    const context = await setupLegacy(t);
+    const integration = nativeIntegration(context);
+    const hook = committed ? 'afterWrite' : 'beforeWrite';
+    context.rpc[hook] = server => { server[hook] = null; throw new Error('interrupted upgrade'); };
+    await assert.rejects(integration.install(), { code: 'INTEGRATION_WRITE_FAILED' });
+    assert.equal(JSON.parse(await readFile(context.statePath, 'utf8')).phase, 'upgrading');
+    context.rpc.afterWrite = server => { server.afterWrite = null; throw new Error('lost restore response'); };
+    await assert.rejects(nativeIntegration(context).restore(), { code: 'INTEGRATION_WRITE_FAILED' });
+    assert.equal((await nativeIntegration(context).restore()).restored, true);
+    assert.deepEqual(context.rpc.config, originalConfig());
+  }
+});
+
+test('native compatibility refuses edited owned routes and higher-priority controls before writes', async t => {
+  for (const key of ['openai_base_url', 'model_provider', 'custom']) {
+    const context = await setup(t), integration = nativeIntegration(context);
+    await integration.install();
+    context.rpc.overrides = key === 'custom' ? { model_providers: { custom: { base_url: 'https://locked.invalid' } } }
+      : { [key]: key === 'model_provider' ? 'custom' : 'https://locked.invalid' };
+    const before = copy(context.rpc.config), count = context.rpc.writes.length;
+    await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_CONFLICT' });
+    assert.deepEqual(context.rpc.config, before); assert.equal(context.rpc.writes.length, count);
+  }
+  for (const key of ['openai_base_url', 'custom']) {
+    const context = await setup(t), integration = nativeIntegration(context);
+    await integration.install();
+    if (key === 'openai_base_url') context.rpc.config.openai_base_url = 'https://user-edit.invalid';
+    else context.rpc.config.model_providers.custom.base_url = 'https://user-edit.invalid';
+    context.rpc.version++;
+    const before = copy(context.rpc.config);
+    for (const mode of ['official', 'gateway']) await assert.rejects(integration.switchMode(mode), { code: 'INTEGRATION_CONFLICT' });
+    await assert.rejects(integration.restore(), { code: 'INTEGRATION_CONFLICT' });
+    assert.deepEqual(context.rpc.config, before);
+    assert.equal(context.rpc.writes.length, 1);
+    assert.equal(JSON.stringify(await integration.inspect()).includes('user-edit'), false);
+  }
+});
+
+test('native mode reports a higher-priority route that arrives after a committed switch', async t => {
+  const context = await setup(t), integration = nativeIntegration(context);
+  await integration.install();
+  context.rpc.afterWrite = server => { server.afterWrite = null; server.overrides = { openai_base_url: 'https://locked.invalid' }; };
+  await assert.rejects(integration.switchMode('official'), { code: 'INTEGRATION_CONFLICT' });
+  assert.equal((await integration.inspect()).routing.mode, 'other');
+  assert.equal(context.rpc.config.model_provider, 'openai');
+});
+
+test('native original route rejects a bridge loop and changed credentials remain recoverable', async t => {
+  const context = await setup(t), integration = nativeIntegration(context);
+  await integration.install();
+  const changed = new Integration({ ...context.options, nativeBaseUrl: privateNativeBase, gatewayKey: 'changed-key' });
+  assert.equal((await changed.inspect()).canInstall, false);
+  await assert.rejects(changed.switchMode('gateway'), { code: 'INTEGRATION_CONFLICT' });
+  await changed.switchMode('official');
+  await changed.restore();
+  context.rpc.config.openai_base_url = privateNativeBase;
+  await assert.rejects(integration.originalNativeProvider(), { code: 'INTEGRATION_ORIGINAL_PROVIDER_UNAVAILABLE' });
+  assert.equal(JSON.stringify(await integration.inspect()).includes('private-capability'), false);
+});
+
+test('native upgrades reject known higher-priority roots and pre-existing loops before capturing a baseline', async t => {
+  for (const legacy of [false, true]) {
+    const context = await setup(t);
+    if (legacy) await context.integration.install();
+    context.rpc.overrides = { openai_base_url: 'https://higher-priority.invalid/backend-api/codex' };
+    const integration = nativeIntegration(context), count = context.rpc.writes.length;
+    await assert.rejects(legacy ? integration.switchMode('gateway') : integration.install(), { code: 'INTEGRATION_CONFLICT' });
+    assert.equal(context.rpc.writes.length, count);
+    if (legacy) assert.equal(JSON.parse(await readFile(context.statePath, 'utf8')).version, 2);
+    else await assert.rejects(readFile(context.statePath), { code: 'ENOENT' });
+  }
+  const original = originalConfig(); original.openai_base_url = privateNativeBase;
+  const context = await setup(t, original), integration = nativeIntegration(context);
+  await assert.rejects(integration.install(), { code: 'INTEGRATION_CONFLICT' });
+  assert.equal(context.rpc.writes.length, 0);
+  await assert.rejects(readFile(context.statePath), { code: 'ENOENT' });
+});
+
+test('native recovery validates the manifest shape and an older optional adapter can still remove a v3 overlay', async t => {
+  const context = await setup(t), integration = nativeIntegration(context);
+  await integration.install();
+  const manifest = JSON.parse(await readFile(context.statePath, 'utf8'));
+  for (const mutate of [
+    value => { value.fields[4].keyPath = 'unrelated'; },
+    value => { value.fields[4].original.value = false; value.fields[4].original.exists = true; },
+    value => { value.phase = 'upgrading'; value.upgradeBaselineCount = 5; },
+    value => { value.upgradeBaselineCount = 4; },
+  ]) {
+    const corrupted = copy(manifest); mutate(corrupted);
+    await writeFile(context.statePath, JSON.stringify(corrupted));
+    await assert.rejects(integration.restore(), { code: 'INTEGRATION_STATE_INVALID' });
+    assert.equal(context.rpc.writes.length, 1);
+  }
+  await writeFile(context.statePath, JSON.stringify(manifest));
+  assert.equal((await context.integration.restore()).restored, true);
+  assert.deepEqual(context.rpc.config, originalConfig());
+});
+
+test('concurrent native mode operations serialize and keep one baseline while preserving unrelated settings', async t => {
+  const context = await setup(t), integration = nativeIntegration(context);
+  await integration.install();
+  const manifest = await readFile(context.statePath, 'utf8');
+  const results = await Promise.all([integration.switchMode('official'), integration.switchMode('gateway'), integration.switchMode('official')]);
+  assert.deepEqual(results.map(result => result.routing.mode), ['official', 'gateway', 'official']);
+  assert.equal(await readFile(context.statePath, 'utf8'), manifest);
+  assert.deepEqual(context.rpc.config, { ...originalConfig(), model_provider: 'openai' });
+});
+
+test('native and custom originals reject equivalent loopback bridge hosts before enabling gateway routes', async t => {
+  for (const host of ['localhost', 'localhost.', '127.0.0.1', '127.1', '127.0.0.2', '[::1]', '[::ffff:127.0.0.1]']) {
+    const alias = `http://${host}:19437/_bifrost/codex/private-capability/backend-api/codex`;
+    const original = originalConfig(); original.openai_base_url = alias;
+    const native = await setup(t, original), nativeControl = nativeIntegration(native);
+    assert.equal((await nativeControl.inspect()).canInstall, false);
+    await assert.rejects(nativeControl.originalNativeProvider(), { code: 'INTEGRATION_ORIGINAL_PROVIDER_UNAVAILABLE' });
+    await assert.rejects(nativeControl.install(), { code: 'INTEGRATION_CONFLICT' });
+    assert.equal(native.rpc.writes.length, 0);
+
+    const customOriginal = originalConfig(); customOriginal.model_providers.custom.base_url = alias;
+    const custom = await setupLegacy(t, customOriginal), customControl = nativeIntegration(custom);
+    assert.equal((await customControl.inspect()).routing.canSwitchGateway, false);
+    await assert.rejects(customControl.originalProvider(), { code: 'INTEGRATION_ORIGINAL_PROVIDER_UNAVAILABLE' });
+    await assert.rejects(customControl.switchMode('gateway'), { code: 'INTEGRATION_CONFLICT' });
+    assert.equal((await custom.integration.inspect()).routing.canSwitchGateway, false);
+    await assert.rejects(custom.integration.originalProvider(), { code: 'INTEGRATION_ORIGINAL_PROVIDER_UNAVAILABLE' });
+    assert.equal(custom.rpc.writes.length, 0);
+  }
+});
+
+test('loopback protection preserves genuinely different ports and protocols and normalizes default ports', async t => {
+  for (const address of ['http://localhost:19438/v1', 'http://[::1]:19438/v1', 'https://localhost:19437/v1']) {
+    const original = originalConfig(); original.openai_base_url = address; original.model_providers.custom.base_url = address;
+    const context = await setup(t, original), integration = nativeIntegration(context);
+    assert.equal((await integration.inspect()).canInstall, true);
+    await integration.install();
+    assert.equal((await integration.originalProvider()).config.base_url, address);
+    assert.equal((await integration.originalNativeProvider()).config.base_url, address);
+    await integration.switchMode('official');
+    assert.deepEqual(context.rpc.config, { ...original, model_provider: 'openai' });
+  }
+  const original = originalConfig(); original.openai_base_url = 'http://[::1]/backend-api/codex';
+  const context = await setup(t, original);
+  const integration = new Integration({ ...context.options, baseUrl: 'http://127.0.0.1:80/v1', nativeBaseUrl: 'http://127.0.0.1:80/native/private' });
+  assert.equal((await integration.inspect()).canInstall, false);
+  await assert.rejects(integration.originalNativeProvider(), { code: 'INTEGRATION_ORIGINAL_PROVIDER_UNAVAILABLE' });
+  assert.equal(context.rpc.writes.length, 0);
+});

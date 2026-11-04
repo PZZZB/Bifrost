@@ -77,12 +77,17 @@ test('unavailable B fails without falling back to A', async t => {
   assert.equal(gateway.metrics.accounts.A.requests, 0);
 });
 
-test('unknown B aliases and missing A credentials do not reach either model account', async t => {
-  let sent = 0;
-  const { url, bReads } = await fixture(t, async () => { sent++; return new Response(completed); });
+test('unknown B aliases may read B metadata but never start inference, and missing A credentials never dispatch', async t => {
+  let metadata = 0, sent = 0;
+  const { url, bReads } = await fixture(t, async (address, options) => {
+    if (address.endsWith('/models') && options.method === 'GET') {
+      metadata++; return Response.json({ models: [{ slug: 'gpt-6.1-sol' }] });
+    }
+    sent++; return new Response(completed);
+  });
   assert.equal((await fetch(`${url}/responses`, { method: 'POST', headers, body: '{"model":"B-unknown"}' })).status, 400);
   assert.equal((await fetch(`${url}/responses`, { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: '{"model":"gpt-6.1-sol"}' })).status, 401);
-  assert.equal(sent, 0); assert.equal(bReads(), 0);
+  assert.equal(sent, 0); assert.equal(metadata, 1); assert.ok(bReads() > 0);
 });
 
 test('compaction uses the same B alias route', async t => {
@@ -95,13 +100,13 @@ test('compaction uses the same B alias route', async t => {
   assert.equal(sent.headers.get('authorization'), 'Bearer token-b');
 });
 
-test('catalog keeps all A models, adds exactly two B aliases, and A remains available without B', async t => {
+test('catalog keeps all A models, adds the complete B directory, and A remains available without B', async t => {
   const a = { models: [{ slug: 'a-original', visibility: 'list', base_instructions: 'A original', priority: 1 }] };
   const b = { models: ['gpt-6-astra', 'gpt-6.1-sol', 'unused-b-model'].map(slug => ({ slug, visibility: 'list', base_instructions: slug, priority: 1 })) };
   const fetchImpl = async address => new Response(JSON.stringify(address.startsWith('https://account-a.') ? a : b));
   const active = await fixture(t, fetchImpl);
   const data = await (await fetch(`${active.url}/models?client_version=test`, { headers })).json();
-  assert.deepEqual(data.models.map(model => model.slug), ['a-original', 'B-gpt-6-astra', 'B-gpt-6.1-sol']);
+  assert.deepEqual(data.models.map(model => model.slug), ['a-original', 'B-gpt-6-astra', 'B-gpt-6.1-sol', 'B-unused-b-model']);
   assert.deepEqual(data.models[0], a.models[0]);
   const offline = await fixture(t, fetchImpl, true);
   assert.deepEqual(await (await fetch(`${offline.url}/models`, { headers })).json(), a);
