@@ -16,6 +16,7 @@ import { createWebAccounts } from '../src/web-accounts.mjs';
 import { createClientServer } from '../src/client-server.mjs';
 import { createClientGatewayForwarder, loopbackHttpFetch } from '../src/client-gateway-forwarder.mjs';
 import { createExternalClaudeGateway } from '../src/external-claude-gateway.mjs';
+import { BifrostRemote } from '../src/providers/bifrost-remote.mjs';
 
 const HOST = 'bifrost.example.test', ORIGIN = `https://${HOST}`, MODEL = 'Claude-sonnet', PASSWORD = 'Offline-only-password-123';
 async function fixture(t, { usage = true, revealKeys = false } = {}) {
@@ -41,8 +42,9 @@ async function fixture(t, { usage = true, revealKeys = false } = {}) {
     requestResponses: () => { throw new Error('Wrong provider'); }, csrfSecret: randomBytes(32).toString('base64url') });
   assert.equal(server.clientEndpoint().portalUrl, ORIGIN + '/account/');
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const fixed = createClientGatewayForwarder({ fetchImpl: async (url, options) => {
+  const forwarded = [], fixed = createClientGatewayForwarder({ fetchImpl: async (url, options) => {
     assert.ok(url.startsWith('http://127.0.0.1:43159/'));
+    forwarded.push({ url, method: options.method, headers: Object.fromEntries(options.headers) });
     return loopbackHttpFetch(url.replace(':43159/', `:${server.address().port}/`), options);
   } });
   const legacyKey = randomBytes(32).toString('hex'), legacyCalls = [];
@@ -74,8 +76,66 @@ async function fixture(t, { usage = true, revealKeys = false } = {}) {
     for (const s of [front, server]) { s.closeAllConnections(); await new Promise(done => s.close(done)); }
     await access.close(); await billing.close(); await rm(dir, { recursive: true, force: true });
   });
-  return { access, billing, admin, store, send, register, calls, legacyKey, legacyCalls, dir };
+  return { access, billing, admin, store, send, register, calls, legacyKey, legacyCalls, forwarded, dir };
 }
+
+test('public account metadata and a bound remote quota card read only the personal Key owner without inference or billing changes', async t => {
+  const f = await fixture(t), first = await f.register('first@example.com'), second = await f.register('second@example.com');
+  await f.admin.mutate(`/api/client-admin/accounts/${first.account.id}/billing`, { enforceBalance: true, tokenLimit: 500 });
+  await f.admin.mutate(`/api/client-admin/accounts/${first.account.id}/balance`, { operationId: randomUUID(), amountMicros: 1234 });
+  await f.admin.mutate(`/api/client-admin/accounts/${second.account.id}/balance`, { operationId: randomUUID(), amountMicros: 9876 });
+  const before = f.billing.account(first.account.id);
+  const own = await f.send('/v1/account', { headers: { authorization: `Bearer ${first.apiKey}`, cookie: second.writeHeaders.cookie,
+    'x-account-id': second.account.id, 'x-client-admin': 'true' } });
+  assert.equal(own.status, 200, own.text); assert.equal(own.data.object, 'account');
+  assert.equal(own.data.account.id, first.account.id); assert.equal(own.data.billing.availableMicros, 1234);
+  assert.equal(own.data.billing.remainingTokens, 500); assert.match(own.headers['cache-control'], /no-store/);
+  const hop = f.forwarded.at(-1);
+  assert.equal(hop.url, 'http://127.0.0.1:43159/v1/account'); assert.equal(hop.method, 'GET');
+  assert.equal(hop.headers.authorization, `Bearer ${first.apiKey}`);
+  assert.equal(hop.headers.cookie, undefined); assert.equal(hop.headers['x-account-id'], undefined); assert.equal(hop.headers['x-client-admin'], undefined);
+  assert.equal(own.headers['set-cookie'], undefined);
+  assert.doesNotMatch(own.text, new RegExp([first.apiKey, second.apiKey, PASSWORD, second.account.id].join('|')));
+  const other = await f.send('/v1/account', { headers: { 'x-api-key': second.apiKey } });
+  assert.equal(other.status, 200); assert.equal(other.data.account.id, second.account.id); assert.equal(other.data.billing.availableMicros, 9876);
+  const remote = new BifrostRemote({ id: 'home', baseUrl: `${ORIGIN}/v1`, apiKey: first.apiKey, fetchImpl: async (url, options) => {
+    assert.equal(url, `${ORIGIN}/v1/account`); assert.equal(options.method, 'GET');
+    const response = await f.send(new URL(url).pathname, { method: options.method, headers: options.headers });
+    return new Response(response.text, { status: response.status, headers: { 'content-type': response.headers['content-type'] } });
+  } });
+  t.after(() => remote.close());
+  const quota = await remote.accountQuota();
+  assert.equal(quota.status, 'ok'); assert.equal(quota.authenticated, true);
+  assert.equal(quota.wallet.availableMicros, 1234); assert.equal(quota.tokenQuota.remaining, 500);
+  assert.deepEqual(f.billing.account(first.account.id), before);
+  await f.admin.mutate(`/api/client-admin/accounts/${first.account.id}/balance`, { operationId: randomUUID(), amountMicros: -1234 });
+  const zero = await remote.accountQuota(); assert.equal(zero.status, 'ok'); assert.equal(zero.wallet.availableMicros, 0);
+  await f.access.revokeKey(first.account.id, own.data.key.id);
+  const revoked = await remote.accountQuota(); assert.equal(revoked.errorCode, 'unauthorized'); assert.equal(revoked.wallet, null);
+  assert.equal(f.calls.length, 0); assert.equal(f.legacyCalls.length, 0);
+});
+
+test('public account metadata requires a personal API Key and rejects writes, query paths, cookies and administrator credentials', async t => {
+  const f = await fixture(t), user = await f.register('metadata@example.com'), personal = { authorization: `Bearer ${user.apiKey}` };
+  const initiallyForwarded = f.forwarded.length;
+  for (const headers of [{}, { cookie: user.writeHeaders.cookie }, { authorization: `Bearer ${f.legacyKey}` },
+    { authorization: 'Bearer ' + 'g'.repeat(64) }, { authorization: 'Bearer ' + 's'.repeat(64) },
+    { ...personal, 'x-api-key': 'bfk_' + 'z'.repeat(43) }]) {
+    const denied = await f.send('/v1/account', { headers });
+    assert.equal(denied.status, 401); assert.equal(denied.data.error.code, 'external_personal_key_required');
+  }
+  assert.equal(f.forwarded.length, initiallyForwarded);
+  for (const method of ['POST', 'DELETE', 'PUT', 'HEAD']) {
+    const denied = await f.send('/v1/account', { method, headers: personal }); assert.equal(denied.status, 405);
+    if (method !== 'HEAD') assert.equal(denied.data.error.code, 'client_gateway_method_not_allowed');
+  }
+  for (const path of ['/v1/account?accountId=other', '/v1/account/', '/v1/accounts', '/v1/account/other', '/api/account-quotas', '/api/client-admin', '/health']) {
+    const denied = await f.send(path, { headers: personal });
+    assert.equal(denied.status, 404); assert.equal(denied.data.error.code, 'client_gateway_route_not_found');
+  }
+  assert.equal((await f.send('/v1/account', { headers: { ...personal, origin: ORIGIN } })).status, 403);
+  assert.equal(f.forwarded.length, initiallyForwarded); assert.equal(f.legacyCalls.length, 0); assert.equal(f.calls.length, 0);
+});
 
 test('WeChat registration, local admin, API key rotation, limits and metering share one canonical account', async t => {
   const f = await fixture(t), user = await f.register('First@Example.com');

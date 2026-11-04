@@ -7,7 +7,7 @@ const label = value => typeof value === 'string' && value.trim() === value && va
   && !/[\x00-\x1f\x7f]/.test(value) && !/(?:bfk_|bfs_|bfi_|sk-|rt_|oat_|oaist|Bearer\s|https?:\/\/|[a-z]:\\)/i.test(value) ? value : null;
 const time = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
 const messages = Object.freeze({
-  unsupported: '远端尚未提供只读余额接口，请先更新远端 Bifröst。',
+  unsupported: '远端余额查询尚未开放，可能是服务或公网入口尚未更新。请更新远端 Bifröst（含公网入口）后重试。',
   no_billing: '远端尚未提供计费账本，无法读取余额。',
   unauthorized: '远端用户 Key 已失效或无权查询，请检查该来源授权。',
   unavailable: '远端余额暂时无法读取，请稍后刷新。',

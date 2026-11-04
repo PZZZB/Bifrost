@@ -40,6 +40,20 @@ test('remote keys and cookies are replaced before calling the fixed local gatewa
   assert.equal(response.headers.get('set-cookie'), null);
 });
 
+test('account reads never enter the legacy private-key route and expose safe ingress-specific error codes', async t => {
+  let calls = 0;
+  const { send } = await fixture(t, { fetchImpl: async () => { calls++; return Response.json({}); } });
+  const legacy = await send('/v1/account');
+  assert.equal(legacy.status, 401); assert.equal((await legacy.json()).error.code, 'external_personal_key_required');
+  const unavailable = await send('/v1/account', { key: 'bfk_' + 'x'.repeat(43) });
+  assert.equal(unavailable.status, 404); assert.equal((await unavailable.json()).error.code, 'external_account_route_unavailable');
+  const missing = await send('/api/admin');
+  assert.equal(missing.status, 404); assert.equal((await missing.json()).error.code, 'external_route_not_found');
+  const wrongMethod = await send('/v1/models', { method: 'POST' });
+  assert.equal(wrongMethod.status, 405); assert.equal((await wrongMethod.json()).error.code, 'external_method_not_allowed');
+  assert.equal(calls, 0);
+});
+
 test('agent SDK tracing headers fit ingress without being forwarded or bypassing authentication', async t => {
   let calls = 0;
   const headers = Object.fromEntries(Array.from({ length: 48 }, (_, index) => [`x-client-trace-${index}`, 'trace']));

@@ -6,9 +6,9 @@ import { paymentNotificationChannel } from './payments/http.mjs';
 
 const WEB = new Set(['/register', '/account', '/account/', '/account/privacy', '/account/app.js', '/account/style.css',
   '/account/web/v1/session', '/account/web/v1/register', '/account/web/v1/login', '/account/web/v1/logout', '/account/web/v1/me', '/account/web/v1/api-key']);
-const API = new Map([['/v1/models', 'GET'], ['/v1/chat/completions', 'POST'], ['/v1/messages', 'POST'], ['/v1/responses', 'POST']]);
+const API = new Map([['/v1/account', 'GET'], ['/v1/models', 'GET'], ['/v1/chat/completions', 'POST'], ['/v1/messages', 'POST'], ['/v1/responses', 'POST']]);
 const SESSION = ['x-session-id', 'x-claude-code-session-id', 'x-conversation-id', 'x-session-affinity', 'session_id', 'session-id', 'x-opencode-session'];
-const fail = status => { throw Object.assign(new Error('Client gateway unavailable.'), { status }); };
+const fail = (status, code) => { throw Object.assign(new Error('Client gateway unavailable.'), { status, ...(code ? { code } : {}) }); };
 
 // Node fetch rewrites Host to the loopback destination. This hop must preserve
 // the already-validated public authority for origin-bound website CSRF checks.
@@ -31,14 +31,14 @@ export function loopbackHttpFetch(url, { method, headers, body, signal }) {
 export function createClientGatewayForwarder({ port = 43159, fetchImpl = loopbackHttpFetch } = {}) {
   if (port !== 43159) throw new TypeError('The unified account gateway must use its dedicated loopback port.');
   return {
-    handles: url => WEB.has(url?.split('?')[0]) || url?.startsWith('/account/web/v1/'),
+    handles: url => url === '/v1/account' || WEB.has(url?.split('?')[0]) || url?.startsWith('/account/web/v1/'),
     async handle(req, res, signal) {
       const web = WEB.has(req.url?.split('?')[0]) || req.url?.startsWith('/account/web/v1/');
       const notification = paymentNotificationChannel(req.url);
       if (web) {
         if (!['GET', 'HEAD', 'POST', 'DELETE'].includes(req.method)) fail(405);
-      } else if (!API.has(req.url)) fail(404);
-      else if (API.get(req.url) !== req.method) fail(405);
+      } else if (!API.has(req.url)) fail(404, 'client_gateway_route_not_found');
+      else if (API.get(req.url) !== req.method) fail(405, 'client_gateway_method_not_allowed');
       if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') fail(415);
       if (['GET', 'HEAD', 'DELETE'].includes(req.method) && (req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0))) fail(400);
       const headers = new Headers({ host: req.headers.host });

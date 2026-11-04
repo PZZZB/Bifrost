@@ -10,7 +10,15 @@ const SESSION_HEADERS = ['x-session-id', 'x-claude-code-session-id', 'x-conversa
 const FORWARDED_HEADERS = ['accept', 'content-type', 'anthropic-version', 'anthropic-beta'];
 const sha256 = value => createHash('sha256').update(value).digest();
 const key = value => typeof value === 'string' && /^[\x21-\x7e]{40,4096}$/.test(value);
-const fail = status => { throw Object.assign(new Error(), { status }); };
+const fail = (status, code) => { throw Object.assign(new Error(), { status, ...(code ? { code } : {}) }); };
+const ERROR_CODES = new Set(['external_route_not_found', 'external_method_not_allowed', 'external_account_route_unavailable',
+  'external_personal_key_required', 'client_gateway_route_not_found', 'client_gateway_method_not_allowed']);
+function suppliedKeys(headers) {
+  const values = [];
+  if (headers.authorization !== undefined) values.push(/^Bearer (\S+)$/i.exec(headers.authorization)?.[1]);
+  if (headers['x-api-key'] !== undefined) values.push(headers['x-api-key']);
+  return values;
+}
 
 /** Explicit HTTP authorities for ingress processes which preserve the public Host.
  * These names never select a network destination; the upstream remains loopback. */
@@ -47,7 +55,7 @@ export function validateExternalClients(clients) {
   });
 }
 
-function errorResponse(res, status) {
+function errorResponse(res, status, code) {
   const message = ({ 400: 'Invalid request.', 401: 'Invalid external API key.', 403: 'Access denied.',
     404: 'Endpoint not available.', 405: 'Method not allowed.', 413: 'Request body too large.',
     415: 'Compressed requests are not supported.', 429: 'Request limit reached.',
@@ -55,7 +63,7 @@ function errorResponse(res, status) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store',
     ...(status === 429 ? { 'retry-after': '60' } : {}), connection: 'close' });
   res.end(JSON.stringify({ error: { type: status === 401 ? 'authentication_error'
-    : status === 429 ? 'rate_limit_error' : 'api_error', message } }));
+    : status === 429 ? 'rate_limit_error' : 'api_error', message, ...(ERROR_CODES.has(code) ? { code } : {}) } }));
 }
 
 /** HTTPS is terminated at the public ingress. This process accepts only a fixed
@@ -87,6 +95,16 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
       }
       if (counts.get('host') !== 1 || !hosts.has(req.headers.host?.toLowerCase())) fail(403);
       if (['authorization', 'x-api-key', 'cookie', 'origin', 'x-bifrost-csrf', ...SESSION_HEADERS].some(name => (counts.get(name) ?? 0) > 1)) fail(400);
+      if (req.url === '/v1/account') {
+        if (req.headers.origin !== undefined) fail(403);
+        const supplied = suppliedKeys(req.headers);
+        if (!supplied.length || supplied.some(value => typeof value !== 'string' || !/^bfk_[A-Za-z0-9_-]{43}$/.test(value)
+            || value !== supplied[0])) fail(401, 'external_personal_key_required');
+        if (!clientGateway) fail(404, 'external_account_route_unavailable');
+        // Only the personal user service can authenticate this metadata read.
+        // Never replace this user's Key with the private model gateway Key.
+        await clientGateway.handle(req, res, abort.signal); return;
+      }
       if (clientGateway?.handles(req.url)) { await clientGateway.handle(req, res, abort.signal); return; }
       if (webAccounts?.handles(req.url)) {
         await webAccounts.handle(req, res); return;
@@ -95,9 +113,7 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
       if (accountApi && req.url.startsWith('/account/v1/')) {
         await accountApi.handle(req, res); return;
       }
-      const supplied = [];
-      if (req.headers.authorization !== undefined) supplied.push(/^Bearer (\S+)$/i.exec(req.headers.authorization)?.[1]);
-      if (req.headers['x-api-key'] !== undefined) supplied.push(req.headers['x-api-key']);
+      const supplied = suppliedKeys(req.headers);
       if (!supplied.length || supplied.some(value => !key(value))) fail(401);
       const clients = validateExternalClients(await getClients());
       if (clients.some(client => client.keySha256 === sha256(gatewayKey).toString('hex') ||
@@ -110,8 +126,8 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
         await clientGateway.handle(req, res, abort.signal); return;
       }
       if (!client) fail(401);
-      if (!ROUTES.has(req.url)) fail(404);
-      if (ROUTES.get(req.url) !== req.method) fail(405);
+      if (!ROUTES.has(req.url)) fail(404, 'external_route_not_found');
+      if (ROUTES.get(req.url) !== req.method) fail(405, 'external_method_not_allowed');
       if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') fail(415);
       if (req.method === 'GET' && (req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0) !== 0)) fail(400);
       if (Number(req.headers['content-length'] ?? 0) > maxBodyBytes) fail(413);
@@ -153,7 +169,7 @@ export function createExternalClaudeGateway({ gatewayKey, sessionKey, getClients
       abort.abort();
       if (res.destroyed) return;
       if (res.headersSent) res.destroy();
-      else errorResponse(res, [400, 401, 403, 404, 405, 413, 415, 429, 502].includes(error.status) ? error.status : 503);
+      else errorResponse(res, [400, 401, 403, 404, 405, 413, 415, 429, 502].includes(error.status) ? error.status : 503, error.code);
     } finally {
       clearTimeout(headerTimer); clearTimeout(requestTimer);
       if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
