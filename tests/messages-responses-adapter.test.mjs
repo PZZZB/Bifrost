@@ -11,6 +11,28 @@ const optionalIncludes = [...codexIncludes, 'code_interpreter_call.outputs', 'co
 const reply = content => Response.json({ type: 'message', role: 'assistant', model: request.model, content, stop_reason: 'end_turn',
   usage: { input_tokens: 7, output_tokens: 3, cache_read_input_tokens: 2 } });
 
+test('adapter reconstruction preserves scoped priority markers and exact native history', async () => {
+  const calls = [], secret = randomBytes(32).toString('base64url');
+  const body = { ...request, input: [{ role: 'user', content: 'Original task.' },
+    { role: 'assistant', content: 'Earlier answer.' }, { role: 'developer', content: 'A later priority update.' },
+    { role: 'user', content: 'Continue with that update.' }] };
+  const send = async (stateSecret, scope, input = body) => {
+    const adapter = new MessagesResponsesAdapter({ stateSecret, requestMessages: async value => {
+      calls.push(structuredClone(value.body)); return reply([{ type: 'text', text: 'Updated answer.' }]);
+    } });
+    const response = await adapter.request({ body: input, scope });
+    assert.equal(response.status, 200); await response.text();
+  };
+  await send(secret, scope, { ...request, input: body.input.slice(0, 1) });
+  await send(secret, scope); await send(secret, scope);
+  assert.deepEqual(calls[1].system, calls[0].system, 'The first late priority update must not replace the global native prompt.');
+  assert.deepEqual(calls[2], calls[1], 'Recreating an adapter with persisted state must not rewrite native context.');
+  await send(secret, 'different-caller'); await send(randomBytes(32).toString('base64url'), scope);
+  assert.notDeepEqual(calls[3].system, calls[1].system, 'Other callers must have distinct private markers.');
+  assert.notDeepEqual(calls[4].system, calls[1].system, 'Rotated private state must change the marker.');
+  assert.equal(calls.length, 5, 'Each client request must dispatch once.');
+});
+
 async function result(response, stream) {
   if (!stream) return response.json();
   assert.match(response.headers.get('content-type'), /text\/event-stream/);

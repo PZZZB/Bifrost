@@ -195,7 +195,7 @@ test('Messages can use authoritative bridge usage despite placeholder envelopes'
 });
 
 test('HTTP refusal is released, including body cancellation before any read; 5xx is unresolved', async () => {
-  for (const status of [400, 401, 403, 404, 422, 429, 500, 502, 503]) {
+  for (const status of [400, 401, 402, 403, 404, 422, 429, 500, 502, 503]) {
     for (const consume of [true, false]) {
       const { output, results, meter } = wrap(Response.json({ error: { message: 'rejected' } }, { status }));
       if (consume) await output.text(); else await output.body.cancel();
@@ -206,7 +206,7 @@ test('HTTP refusal is released, including body cancellation before any read; 5xx
 });
 
 test('HTTP failure with explicit final usage remains billable rather than becoming free', async () => {
-  for (const status of [200, 400, 500]) {
+  for (const status of [200, 400, 402, 500]) {
     const { output, results } = wrap(Response.json({ error: { message: 'failed after generation' }, usage: usage() }, { status }));
     await output.text(); assert.deepEqual(results, [{ usage: expected, status: 'completed' }]);
   }

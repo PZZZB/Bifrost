@@ -297,8 +297,11 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
           // dispatch has already inspected error usage. Public errors must not
           // reveal host addresses, operating systems, or upstream credentials.
           await response.body?.cancel().catch(() => {});
-          response = Response.json({ error: { message: '模型服务暂时不可用，请稍后重试或联系管理员。', code: 'client_upstream_rejected' } },
-            { status: [400, 409, 413, 422, 429].includes(response.status) ? response.status : 503 });
+          const noSourceBalance = response.status === 402;
+          response = Response.json({ error: { message: noSourceBalance ? '模型来源额度不足，请联系管理员。'
+            : '模型服务暂时不可用，请稍后重试或联系管理员。',
+          code: noSourceBalance ? 'client_upstream_balance_exhausted' : 'client_upstream_rejected' } },
+            { status: [400, 402, 409, 413, 422, 429].includes(response.status) ? response.status : 503 });
         }
         await relay(req, res, response, abort);
       } finally {

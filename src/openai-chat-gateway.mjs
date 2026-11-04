@@ -173,9 +173,14 @@ export function translateChatRequest(body, store, identity = null) {
     ...(system.length ? { system } : {}), ...(tools?.length ? { tools } : {}),
     thinking: { type: effort && effort !== 'none' ? 'adaptive' : 'disabled' },
     ...(effort && effort !== 'none' ? { output_config: { effort } } : {}) };
-  const context = { model: body.model, system, tools: tools ?? [], maxTokens, effort: effort ?? 'none', identity, user: body.user ?? null };
+  // Output limits/effort configure the next generation, not ownership of the
+  // existing transcript. The CLI hub handles changed options by native resume.
+  const context = { model: body.model, system, tools: tools ?? [], identity, user: body.user ?? null };
   const keys = store.keys(context, normalized);
-  const restored = store.restore(keys, normalized);
+  let restored = store.restore(keys, normalized);
+  // Keep existing persisted conversations readable when their settings still
+  // match. New snapshots use the generation-independent identity above.
+  if (!restored.messages.length) restored = store.restore(store.keys({ ...context, maxTokens, effort: effort ?? 'none' }, normalized), normalized);
   const messages = restored.messages;
   for (const message of restored.rest) {
     if (['system', 'developer'].includes(message.role)) continue;

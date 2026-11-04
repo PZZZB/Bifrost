@@ -92,6 +92,31 @@ test('parallel tool results restore exact interleaved native blocks and signed t
   assert.equal(request.body.messages.length, 3);
 });
 
+test('generation changes preserve completed signed history while applying new output settings', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'bifrost-chat-generation-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'history.json'), history = new ChatHistoryStore({ path });
+  const canonical = [{ type: 'thinking', thinking: 'Earlier readable reasoning.', signature: 'PERSISTED_THINKING_SIGNATURE' },
+    { type: 'text', text: 'Completed answer.' }];
+  const f = await fixture(t, { history, request: () => response(reply(canonical)) });
+  const identity = 'generation-fixture';
+  const original = { model, max_tokens: 128, reasoning_effort: 'high', messages: [{ role: 'user', content: 'Initial request.' }] };
+  const first = await (await f.send(original, { headers: { 'x-session-id': identity } })).json();
+  const loaded = new ChatHistoryStore({ path }); await loaded.load();
+  const next = { ...original, max_tokens: 256, reasoning_effort: 'low',
+    messages: [...original.messages, first.choices[0].message, { role: 'user', content: 'Next request.' }] };
+  const translated = translateChatRequest(next, loaded, identity);
+  assert.deepEqual(translated.body.messages[1].content, canonical);
+  assert.equal(translated.body.max_tokens, 256); assert.equal(translated.body.output_config.effort, 'low');
+  assert.notDeepEqual(translateChatRequest(next, loaded, 'another-caller').body.messages[1].content, canonical);
+
+  const legacy = new ChatHistoryStore();
+  const oldContext = { ...translated.context, maxTokens: 128, effort: 'high' };
+  await legacy.save(legacy.keys(oldContext, translated.normalized.slice(0, -1)).at(-1), translated.body.messages.slice(0, 2));
+  const unchanged = translateChatRequest({ ...next, max_tokens: 128, reasoning_effort: 'high' }, legacy, identity);
+  assert.deepEqual(unchanged.body.messages[1].content, canonical, 'Existing generation-bound snapshots must remain readable.');
+});
+
 test('tool argument deltas become indexed OpenAI calls and replayable JSON', async t => {
   const events = reply([], 'tool_use');
   events.splice(1, 0,

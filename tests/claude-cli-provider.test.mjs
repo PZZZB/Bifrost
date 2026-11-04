@@ -286,7 +286,8 @@ for (const stream of [false, true]) test(`fresh ${stream ? 'SSE' : 'JSON'} histo
   assert.ok(worker.sends[0].some(block => block.text === JSON.stringify({ type: 'thinking', thinking: blocks[0].thinking })));
   assert.ok(worker.sends[0].some(block => block.text === blocks[3].text));
   assert.ok(worker.sends[0].some(block => block.text === JSON.stringify(blocks[4])));
-  assert.ok(worker.sends[0].some(block => block.text === JSON.stringify(result)));
+  assert.ok(worker.sends[0].some(block => block.text === result.content));
+  assert.ok(worker.sends[0].some(block => block.text?.includes('"tool_use_id":"historical-tool"') && block.text.includes('"is_error":true')));
   assert.equal(worker.sends[0].at(-1).text, 'Summarize the work.');
   assert.deepEqual((await rpc(worker, 'tools/list')).value.result.tools, []);
   answer(worker); const response = await pending;
@@ -306,8 +307,28 @@ test('history import does not redact ordinary text or tool data that resembles a
     { role: 'user', content: [toolResult] }, { role: 'assistant', content: 'Preserve the fixture.' },
     { role: 'user', content: 'Continue.' }] };
   const first = await completed(state, body);
-  assert.equal(first.worker.sends[0].filter(block => block.text === literal).length, 2);
-  assert.ok(first.worker.sends[0].some(block => block.text === JSON.stringify(toolResult)));
+  assert.equal(first.worker.sends[0].filter(block => block.text === literal).length, 3);
+  assert.ok(first.worker.sends[0].some(block => block.text?.includes('"tool_use_id":"old-tool"')));
+});
+
+test('imported tool result media remain native blocks instead of base64 prompt text', async t => {
+  const state = await fixture(t);
+  const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aW1h'.repeat(32_000) } };
+  const document = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'ZG9j'.repeat(32_000) } };
+  const text = 'Exact command output: "quoted"\n\\path\n'.repeat(20);
+  const blocks = [{ type: 'tool_result', tool_use_id: 'old-image', is_error: true,
+    content: [{ type: 'text', text }, image, document, { type: 'fixture_extension', value: 'Keep unknown historical data.' }] },
+  { type: 'tool_result', tool_use_id: 'old-text', content: text }];
+  const body = { ...input, messages: [{ role: 'user', content: blocks },
+    { role: 'assistant', content: 'Previously inspected results.' }, { role: 'user', content: 'Continue.' }] };
+  const original = structuredClone(body), first = await completed(state, body), sent = first.worker.sends[0];
+  assert.deepEqual(sent.filter(block => ['image', 'document'].includes(block.type)), [image, document]);
+  assert.equal(sent.filter(block => block.type === 'text' && block.text === text).length, 2);
+  assert.ok(sent.some(block => block.text?.includes('"tool_use_id":"old-image"') && block.text.includes('"is_error":true')));
+  const texts = sent.filter(block => block.type === 'text').map(block => block.text).join('\n');
+  assert.ok(!texts.includes(image.source.data) && !texts.includes(document.source.data));
+  assert.ok(texts.includes(JSON.stringify(blocks[0].content[3])), 'Unknown result data must not disappear.');
+  assert.deepEqual(body, original);
 });
 
 test('signed ordinary replies retain exact native continuation across a hub restart', async t => {

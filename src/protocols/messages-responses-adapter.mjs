@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import { ClientStateCodec } from '../client-state.mjs';
 import { meterClientResponse, getClientMeter } from '../client-meter.mjs';
 import { translateResponses, ResponsesConversion, MessagesSseParser, messagesJsonEvents,
@@ -18,7 +18,7 @@ function thinkingBlock(value) {
 
 /** Responses ↔ Messages. Independent of Codex, source identity, URLs and billing. */
 export class MessagesResponsesAdapter {
-  #request; #codec; #compactionCodec; #marker = `bifrost-priority-${randomUUID()}`;
+  #request; #codec; #compactionCodec;
   #toolMetadata = new Map(); #digest;
   constructor({ requestMessages, stateSecret } = {}) {
     if (typeof requestMessages !== 'function') throw new TypeError('A scoped Messages transport is required.');
@@ -40,6 +40,7 @@ export class MessagesResponsesAdapter {
     let translated, upstream, reader, metered;
     const profile = { model: body?.model, label: 'Bifrost', idPrefix: 'bifrost_messages', reasoningIdPrefix: 'rs_bifrost_messages_',
       allowedEfforts: capabilities.reasoningEfforts ?? [], defaultReasoning: {}, allowRedactedThinking: true,
+      stablePriorityPrefix: true,
       openState: value => {
         let block;
         try { block = JSON.parse(this.#codec.open(value, scope, body.model)); } catch { throw new AdapterError('思考接续状态不属于当前来源、会话或授权。', 409); }
@@ -82,7 +83,11 @@ export class MessagesResponsesAdapter {
         if (!EFFORTS.has(input.reasoning.effort)) throw new AdapterError('未知的 reasoning.effort。', 400, 'reasoning.effort');
         delete input.reasoning.effort; ignoredEffort = true;
       }
-      translated = translateResponses(input, this.#marker, profile);
+      // Reconstructing an adapter must not rewrite historical priority updates
+      // and the system prompt. Derive an unguessable marker from persisted
+      // state, scoped to this caller/model, to preserve exact native prefixes.
+      const marker = `bifrost-priority-${this.#digest({ purpose: 'messages-priority-v1', scope, model: body.model }).slice(0, 32)}`;
+      translated = translateResponses(input, marker, profile);
       upstream = await this.#request({ body: translated.upstream, scope, session, signal: linked });
       if (!(upstream instanceof Response)) throw new AdapterError('Messages 来源未返回有效响应。', 502);
       if (!upstream.ok) {

@@ -126,6 +126,15 @@ function importedHistoryBlock(block) {
   if (block.type === 'thinking') return typeof block.thinking === 'string' && block.thinking
     ? [{ type: 'text', text: JSON.stringify({ type: 'thinking', thinking: block.thinking }) }] : [];
   if (block.type === 'redacted_thinking') return [];
+  if (block.type === 'tool_result' && (typeof block.content === 'string' || Array.isArray(block.content))) {
+    const { content, ...metadata } = structuredClone(block);
+    const parts = typeof content === 'string' ? [{ type: 'text', text: content }] : content.map(part =>
+      ['text', 'image', 'document'].includes(part?.type) ? part : { type: 'text', text: JSON.stringify(part) });
+    // A screenshot is media, not a base64 paragraph. Keep result text verbatim
+    // too, rather than repeatedly JSON-escaping large file/command outputs.
+    return [{ type: 'text', text: `[Imported tool result ${JSON.stringify(metadata)}]` },
+      ...parts, { type: 'text', text: '[/Imported tool result]' }];
+  }
   return [{ type: 'text', text: JSON.stringify(block) }];
 }
 function initialInput(messages) {

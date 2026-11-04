@@ -158,6 +158,29 @@ test('local preflight failure releases without starting or charging an upstream 
   assert.equal(f.billing.account(f.user.id).balanceMicros, 1000);
 });
 
+test('upstream HTTP 402 without generation releases each hold without charging or retrying', async t => {
+  const f = await fixture(t, { source: () => Response.json({ error: { message: 'Remote source balance exhausted.' } }, { status: 402 }) });
+  for (let index = 0; index < 2; index++) {
+    const result = await f.send('/v1/responses', { model: MODEL, input: 'fixture' });
+    assert.equal(result.status, 402);
+    const account = f.billing.account(f.user.id);
+    assert.equal(account.reservedMicros, 0); assert.equal(account.balanceMicros, 1000); assert.equal(account.unresolvedCount, 0);
+    assert.equal(f.calls.length, index + 1);
+  }
+  assert.equal(f.billing.history(f.user.id).rows.filter(row => row.type === 'released').length, 2);
+  assert.equal(f.billing.history(f.user.id).rows.filter(row => row.type === 'settled').length, 0);
+});
+
+test('Claude source HTTP 402 stays a safe payment-required error instead of a retryable service outage', async t => {
+  const f = await fixture(t, { source: () => Response.json({ error: { message: 'PRIVATE_UPSTREAM_ADDRESS_AND_ACCOUNT' } }, { status: 402 }),
+    server: { getModels: () => [{ id: MODEL, name: 'Fixture Claude', channel: 'Claude' }] } });
+  const result = await f.send('/v1/messages', { model: MODEL, max_tokens: 20, messages: [{ role: 'user', content: 'fixture' }] });
+  assert.equal(result.status, 402); assert.equal(result.data.error.code, 'client_upstream_balance_exhausted');
+  assert.doesNotMatch(result.text, /PRIVATE_UPSTREAM_ADDRESS_AND_ACCOUNT/);
+  assert.equal(f.calls.length, 1); assert.equal(f.billing.account(f.user.id).reservedMicros, 0);
+  assert.equal(f.billing.account(f.user.id).balanceMicros, 1000);
+});
+
 test('missing usage retains a reviewable hold; administrator release is idempotent', async t => {
   const f = await fixture(t, { source: () => Response.json(completion(false)) });
   assert.equal((await f.send('/v1/responses', { model: MODEL, input: 'test' })).status, 200);
