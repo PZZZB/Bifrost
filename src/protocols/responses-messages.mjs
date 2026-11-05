@@ -19,9 +19,11 @@ const COMPACTION_PROMPT = 'Summarize the preceding conversation for another mode
 class AdapterError extends Error {
   constructor(message, status = 400, param = null, code = null, sourceDiagnostics = undefined) {
     const source = sourceError(code);
-    super(source?.message ?? message); this.status = status; this.param = param;
+    const diagnostic = normalizeCodeBuddySourceDiagnostics(source?.code, sourceDiagnostics);
+    const base = source?.message ?? message;
+    super(diagnostic?.kind === 'codebuddy_protocol_check' ? `${base.replace(/。$/, '')}：${diagnostic.description}` : base);
+    this.status = status; this.param = param;
     if (source) this.code = source.code;
-    const diagnostic = normalizeCodeBuddySourceDiagnostics(this.code, sourceDiagnostics);
     if (diagnostic) this.sourceDiagnostics = diagnostic;
   }
 }

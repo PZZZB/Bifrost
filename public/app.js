@@ -2522,6 +2522,13 @@ async function loadRequestDiagnostic(id) {
       ['缓存命中 Token', tokenCount(record.usage?.cachedInputTokens)], ['思考 Token', tokenCount(record.usage?.reasoningTokens)],
     ];
     const shape = record.sourceDiagnostics;
+    if (shape?.version === 1 && shape.kind === 'codebuddy_protocol_check' && typeof shape.description === 'string') {
+      fields.push(['协议校验项', shape.description]);
+      const observation = shape.observation;
+      if (observation) fields.push(['结构信息', [typeof observation.valueType === 'string' ? `类型 ${observation.valueType}` : '',
+        ...[['length', '长度'], ['count', '数量'], ['limit', '上限']].flatMap(([key, label]) =>
+          Number.isSafeInteger(observation[key]) && observation[key] >= 0 ? [`${label} ${observation[key]}`] : [])].filter(Boolean).join('；') || '未提供']);
+    }
     if (shape?.version === 1 && shape.kind === 'codebuddy_delta_shape' && Array.isArray(shape.fields)) {
       const describe = field => `${field.field} (${field.type}${Number.isSafeInteger(field.length) ? `, 长度 ${field.length}` : ''})`;
       fields.push(['未适配字段', shape.fields.slice(0, 8).map(field => `${describe(field)}${Array.isArray(field.children)

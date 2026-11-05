@@ -93,7 +93,10 @@ for (const [label, reply, code] of failures) for (const stream of [true, false])
     const events = stream ? wire.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6))) : null;
     const error = stream ? events.at(-1).response.error : JSON.parse(wire).error;
     assert.equal(error.code, code);
-    assert.equal(error.message, codeBuddySourceError(code).message);
+    const definition = codeBuddySourceError(code).message;
+    if (error.sourceDiagnostics?.kind === 'codebuddy_protocol_check') {
+      assert.equal(error.message, `${definition.replace(/。$/, '')}：${error.sourceDiagnostics.description}`);
+    } else assert.equal(error.message, definition);
     assert.doesNotMatch(wire, /PRIVATE_THINKING|PRIVATE_PROVIDER_TEXT|PRIVATE_CONNECTION_DETAILS|claude_rate_limited/);
     if (stream) {
       assert.equal(response.status, 200);

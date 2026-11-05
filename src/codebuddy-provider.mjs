@@ -6,7 +6,7 @@ import { thinkingOptions, thinkingText, ThinkingConversionError } from './codebu
 import { CodeBuddyThinkingState, CODEBUDDY_STATE_PREFIX, ThinkingStateError } from './codebuddy-thinking-state.mjs';
 import { CODEBUDDY_MODEL, codeBuddyModelAlias, resolveCodeBuddyAlias, isCodeBuddyOpus55 } from './codebuddy-models.mjs';
 import { codeBuddySourceError } from './codebuddy-source-errors.mjs';
-import { describeCodeBuddyDeltaFields, normalizeCodeBuddySourceDiagnostics } from './codebuddy-source-diagnostics.mjs';
+import { describeCodeBuddyDeltaFields, describeCodeBuddyProtocolCheck, normalizeCodeBuddySourceDiagnostics } from './codebuddy-source-diagnostics.mjs';
 
 export { CODEBUDDY_MODEL };
 
@@ -31,8 +31,15 @@ class AdapterError extends Error {
 }
 
 function invalid(message = 'CodeBuddy 适配器不支持此请求。') { throw new AdapterError(message); }
-function protocol(message = 'CodeBuddy 上游流不符合预期协议。', code = 'codebuddy_upstream_protocol_error', sourceDiagnostics = null) {
+function sourceFailure(message, code, sourceDiagnostics = null) {
   throw new AdapterError(message, 502, code, sourceDiagnostics);
+}
+function protocol(check, message = 'CodeBuddy 上游流不符合预期协议。', observation) {
+  sourceFailure(message, 'codebuddy_upstream_protocol_error', describeCodeBuddyProtocolCheck(check, observation));
+}
+function observed(value) {
+  const valueType = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  return { valueType, ...(['string', 'array'].includes(valueType) ? { length: value.length } : {}) };
 }
 function emptyLegacyFunctionCall(value) {
   // HY4 includes this deprecated field beside real tool_calls. An empty
@@ -46,21 +53,21 @@ function unsupportedDeltaFields(delta, fields) {
     const name = field === 'unknown_key' ? `unknown_key,keyLength=${keyLength},valueType=${type}` : `${field}:${type}`;
     return name + (length !== undefined ? `,length=${length}` : '');
   });
-  protocol(`CodeBuddy 返回了尚未支持的内容类型（${details.join(';')}）。`, 'codebuddy_unsupported_delta', diagnostics);
+  sourceFailure(`CodeBuddy 返回了尚未支持的内容类型（${details.join(';')}）。`, 'codebuddy_unsupported_delta', diagnostics);
 }
 function unsupportedFinishReason(value) {
   const known = ['error', 'content_filter', 'end_turn', 'max_tokens', 'tool_use', 'tool_call',
     'stop_sequence', 'pause_turn', 'refusal'];
   const detail = typeof value === 'string' && known.includes(value) ? `finish_reason=${value}`
     : `type=${Array.isArray(value) ? 'array' : typeof value}${typeof value === 'string' ? `,length=${value.length}` : ''}`;
-  protocol(`CodeBuddy 返回了未支持的结束原因（${detail}）。`, 'codebuddy_unsupported_finish');
+  sourceFailure(`CodeBuddy 返回了未支持的结束原因（${detail}）。`, 'codebuddy_unsupported_finish');
 }
 function upstreamFinishError(chunk) {
   const details = ['finish_reason=error'];
   for (const field of ['status_code', 'code']) {
     if (Number.isSafeInteger(chunk[field])) details.push(`${field}=${chunk[field]}`);
   }
-  protocol(`CodeBuddy 上游返回了失败结束原因（${details.join(',')}）。`, 'codebuddy_upstream_failed');
+  sourceFailure(`CodeBuddy 上游返回了失败结束原因（${details.join(',')}）。`, 'codebuddy_upstream_failed');
 }
 function keys(value, allowed) {
   if (!object(value) || Object.keys(value).some(key => !allowed.includes(key))) invalid();
@@ -351,8 +358,9 @@ class EventParser {
   text = '';
   constructor(onData) { this.onData = onData; }
   push(bytes) {
-    this.text += this.decoder.decode(bytes, { stream: true });
-    if (this.text.length > MAX_EVENT) protocol('CodeBuddy SSE 事件超过大小限制。');
+    try { this.text += this.decoder.decode(bytes, { stream: true }); }
+    catch { protocol('sse_utf8', 'CodeBuddy SSE 不是有效 UTF-8。'); }
+    if (this.text.length > MAX_EVENT) protocol('sse_event_size', 'CodeBuddy SSE 事件超过大小限制。', { length: this.text.length, limit: MAX_EVENT });
     let end;
     while ((end = this.text.search(/\r?\n\r?\n/)) !== -1) {
       const event = this.text.slice(0, end), delimiter = /^\r?\n\r?\n/.exec(this.text.slice(end))[0];
@@ -362,7 +370,11 @@ class EventParser {
       if (data) this.onData(data);
     }
   }
-  end() { this.text += this.decoder.decode(); if (this.text.trim()) protocol('CodeBuddy SSE 事件被截断。'); }
+  end() {
+    try { this.text += this.decoder.decode(); }
+    catch { protocol('sse_utf8', 'CodeBuddy SSE 不是有效 UTF-8。'); }
+    if (this.text.trim()) protocol('sse_event_truncated', 'CodeBuddy SSE 事件被截断。', { length: this.text.length });
+  }
 }
 
 class Completion {
@@ -415,8 +427,9 @@ class Completion {
       const json = JSON.stringify(value);
       if (typeof json !== 'string') throw new Error();
       bytes = Buffer.byteLength(json, 'utf8');
-    } catch { protocol('CodeBuddy extra_fields 接续状态无效或无法序列化（extra_fields:' + (Array.isArray(value) ? 'array' : typeof value) + '）。'); }
-    if (this.size - this.extraFieldsBytes + bytes > MAX_CONTENT) protocol('CodeBuddy extra_fields 接续状态超过大小限制。');
+    } catch { protocol('metadata_json', 'CodeBuddy extra_fields 接续状态无效或无法序列化（extra_fields:' + (Array.isArray(value) ? 'array' : typeof value) + '）。', observed(value)); }
+    if (this.size - this.extraFieldsBytes + bytes > MAX_CONTENT) protocol('metadata_size', 'CodeBuddy extra_fields 接续状态超过大小限制。',
+      { length: this.size - this.extraFieldsBytes + bytes, limit: MAX_CONTENT });
     // Validate the original value through the strict codec before retaining it;
     // JSON.stringify alone would silently turn a parsed 1e400 into null.
     const signature = this.sealThinking('', value);
@@ -436,21 +449,24 @@ class Completion {
     this.emit('content_block_stop', { index });
   }
   data(value) {
-    if (this.done) protocol('CodeBuddy 在结束标记后返回了其他数据。');
+    if (this.done) protocol('data_after_done', 'CodeBuddy 在结束标记后返回了其他数据。');
     if (value === '[DONE]') { this.done = true; return; }
     let chunk;
-    try { chunk = JSON.parse(value); } catch { protocol('CodeBuddy 返回了无效 SSE JSON。'); }
+    try { chunk = JSON.parse(value); } catch { protocol('sse_json', 'CodeBuddy 返回了无效 SSE JSON。', observed(value)); }
     if (!object(chunk) || chunk.error || chunk.type === 'error') {
       if (object(chunk) && Array.isArray(chunk.choices) && chunk.choices.some(choice => choice?.finish_reason === 'error')) {
         upstreamFinishError(chunk);
       }
-      protocol('CodeBuddy 上游返回了错误事件。', 'codebuddy_upstream_failed');
+      sourceFailure('CodeBuddy 上游返回了错误事件。', 'codebuddy_upstream_failed');
     }
     this.usage = normalizeUsage(chunk.usage, this.usage);
-    if (!Array.isArray(chunk.choices) || chunk.choices.length > 1) protocol();
-    if (!chunk.choices.length) { if (!object(chunk.usage)) protocol(); return; }
+    if (!Array.isArray(chunk.choices)) protocol('choices_shape', undefined, observed(chunk.choices));
+    if (chunk.choices.length > 1) protocol('choices_count', undefined, { count: chunk.choices.length, limit: 1 });
+    if (!chunk.choices.length) { if (!object(chunk.usage)) protocol('usage_only_chunk', undefined, observed(chunk.usage)); return; }
     const choice = chunk.choices[0];
-    if (!object(choice) || choice.index !== undefined && choice.index !== 0 || !object(choice.delta)) protocol();
+    if (!object(choice)) protocol('choice_shape', undefined, observed(choice));
+    if (choice.index !== undefined && choice.index !== 0) protocol('choice_index', undefined, observed(choice.index));
+    if (!object(choice.delta)) protocol('delta_shape', undefined, observed(choice.delta));
     // CodeBuddy uses an empty string on unfinished chunks; it is not a terminal reason.
     const finishReason = choice.finish_reason === '' ? null : choice.finish_reason;
     if (finishReason === 'error') upstreamFinishError(chunk);
@@ -462,17 +478,19 @@ class Completion {
       if (key === 'tool_calls') return !Array.isArray(delta.tool_calls) || delta.tool_calls.length !== 0;
       if (['content', 'reasoning_content', 'refusal'].includes(key)) return delta[key] !== null && delta[key] !== '';
       return true;
-    }) || finishReason !== null && finishReason !== undefined)) protocol();
+    }))) protocol('delta_after_finish');
+    if (this.finishReason !== null && finishReason !== null && finishReason !== undefined) protocol('duplicate_finish_reason');
     const unsupportedFields = Object.keys(delta).filter(key => !['role', 'content', 'tool_calls', 'refusal', 'reasoning_content', 'extra_fields'].includes(key)
       && !(key === 'function_call' && emptyLegacyFunctionCall(delta[key])) && delta[key] !== null && delta[key] !== '');
     if (unsupportedFields.length) unsupportedDeltaFields(delta, unsupportedFields);
-    if (delta.role !== undefined && delta.role !== 'assistant' || delta.refusal) protocol('CodeBuddy 上游未返回可用的 assistant 消息。');
+    if (delta.role !== undefined && delta.role !== 'assistant') protocol('assistant_role', 'CodeBuddy 上游未返回可用的 assistant 消息。', observed(delta.role));
+    if (delta.refusal) protocol('assistant_refusal', 'CodeBuddy 上游未返回可用的 assistant 消息。', observed(delta.refusal));
     this.captureExtraFields(delta.extra_fields);
     this.start();
     if (delta.reasoning_content !== undefined && delta.reasoning_content !== null) {
-      if (typeof delta.reasoning_content !== 'string') protocol('CodeBuddy 思考摘要格式无效。');
+      if (typeof delta.reasoning_content !== 'string') protocol('reasoning_type', 'CodeBuddy 思考摘要格式无效。', observed(delta.reasoning_content));
       this.size += Buffer.byteLength(delta.reasoning_content, 'utf8');
-      if (this.size > MAX_CONTENT) protocol('CodeBuddy 输出超过大小限制。');
+      if (this.size > MAX_CONTENT) protocol('output_size', 'CodeBuddy 输出超过大小限制。', { length: this.size, limit: MAX_CONTENT });
       if (delta.reasoning_content) {
         this.closeText();
         if (this.thinkingIndex === null) {
@@ -491,10 +509,11 @@ class Completion {
       }
     }
     if (delta.content !== undefined && delta.content !== null) {
-      if (typeof delta.content !== 'string') protocol();
+      if (typeof delta.content !== 'string') protocol('content_type', undefined, observed(delta.content));
       if (delta.content) {
         this.closeThinking();
-        this.size += Buffer.byteLength(delta.content, 'utf8'); if (this.size > MAX_CONTENT) protocol('CodeBuddy 输出超过大小限制。');
+        this.size += Buffer.byteLength(delta.content, 'utf8');
+        if (this.size > MAX_CONTENT) protocol('output_size', 'CodeBuddy 输出超过大小限制。', { length: this.size, limit: MAX_CONTENT });
         if (this.textIndex === null) {
           this.textIndex = this.blocks.length; this.blocks.push({ type: 'text', text: '' });
           this.emit('content_block_start', { index: this.textIndex, content_block: { type: 'text', text: '' } });
@@ -504,22 +523,30 @@ class Completion {
       }
     }
     if (delta.tool_calls !== undefined) {
-      if (!Array.isArray(delta.tool_calls) || this.request.forbidTools && delta.tool_calls.length) protocol();
+      if (!Array.isArray(delta.tool_calls)) protocol('tool_calls_type', undefined, observed(delta.tool_calls));
+      if (this.request.forbidTools && delta.tool_calls.length) protocol('tools_forbidden', undefined, { count: delta.tool_calls.length });
       if (delta.tool_calls.length) { this.closeText(); this.closeThinking(); }
       for (const item of delta.tool_calls) {
-        if (!object(item) || !Number.isSafeInteger(item.index) || item.index < 0 || item.index >= 128
-          || item.type !== undefined && item.type !== 'function' || item.function !== undefined && !object(item.function)) protocol();
+        if (!object(item)) protocol('tool_call_shape', undefined, observed(item));
+        if (!Number.isSafeInteger(item.index) || item.index < 0 || item.index >= 128) protocol('tool_call_index', undefined, observed(item.index));
+        if (item.type !== undefined && item.type !== 'function') protocol('tool_call_type', undefined, observed(item.type));
+        if (item.function !== undefined && !object(item.function)) protocol('tool_function_shape', undefined, observed(item.function));
         const call = this.calls.get(item.index) ?? { id: '', name: '', arguments: '' };
         if (item.id !== undefined) {
-          if (typeof item.id !== 'string') protocol();
+          if (typeof item.id !== 'string') protocol('tool_id_fragment_type', undefined, observed(item.id));
           if (call.id !== item.id) call.id += item.id;
         }
-        if (item.function?.name !== undefined) { if (typeof item.function.name !== 'string') protocol(); call.name += item.function.name; }
+        if (item.function?.name !== undefined) {
+          if (typeof item.function.name !== 'string') protocol('tool_name_fragment_type', undefined, observed(item.function.name));
+          call.name += item.function.name;
+        }
         if (item.function?.arguments !== undefined) {
-          if (typeof item.function.arguments !== 'string') protocol();
+          if (typeof item.function.arguments !== 'string') protocol('tool_arguments_fragment_type', undefined, observed(item.function.arguments));
           call.arguments += item.function.arguments; this.size += Buffer.byteLength(item.function.arguments, 'utf8');
         }
-        if (call.id.length > 256 || call.name.length > 128 || this.size > MAX_CONTENT) protocol('CodeBuddy 工具参数超过大小限制。');
+        if (call.id.length > 256) protocol('tool_id_size', 'CodeBuddy 工具参数超过大小限制。', { length: call.id.length, limit: 256 });
+        if (call.name.length > 128) protocol('tool_name_size', 'CodeBuddy 工具参数超过大小限制。', { length: call.name.length, limit: 128 });
+        if (this.size > MAX_CONTENT) protocol('output_size', 'CodeBuddy 工具参数超过大小限制。', { length: this.size, limit: MAX_CONTENT });
         this.calls.set(item.index, call);
       }
     }
@@ -529,16 +556,20 @@ class Completion {
     }
   }
   finish() {
-    if (!this.done || !this.started || this.finishReason === null) protocol('CodeBuddy 上游未完整结束。', 'codebuddy_upstream_truncated');
-    if (this.finishReason === 'tool_calls' && !this.calls.size || this.finishReason === 'stop' && this.calls.size
-      || this.request.requireTools && !this.calls.size && this.finishReason !== 'length') protocol('CodeBuddy 工具调用与结束原因不一致。');
+    if (!this.done || !this.started || this.finishReason === null) sourceFailure('CodeBuddy 上游未完整结束。', 'codebuddy_upstream_truncated');
+    if (this.finishReason === 'tool_calls' && !this.calls.size) protocol('tool_finish_without_calls', 'CodeBuddy 工具调用与结束原因不一致。');
+    if (this.finishReason === 'stop' && this.calls.size) protocol('stop_finish_with_calls', 'CodeBuddy 工具调用与结束原因不一致。', { count: this.calls.size });
+    if (this.request.requireTools && !this.calls.size && this.finishReason !== 'length') protocol('required_tool_missing', 'CodeBuddy 工具调用与结束原因不一致。');
     this.closeText(); this.closeThinking(); this.emitExtraFields(); const seen = new Set();
     for (const [expected, [index, call]] of [...this.calls.entries()].sort(([a], [b]) => a - b).entries()) {
-      if (index !== expected || !isId(call.id) || seen.has(call.id) || !this.request.toolNames.has(call.name)
-        || this.request.forcedTool && call.name !== this.request.forcedTool) protocol('CodeBuddy 返回了未声明或无效的工具调用。');
+      if (index !== expected) protocol('tool_index_sequence', 'CodeBuddy 返回了未声明或无效的工具调用。');
+      if (!isId(call.id)) protocol('tool_id_invalid', 'CodeBuddy 返回了未声明或无效的工具调用。', observed(call.id));
+      if (seen.has(call.id)) protocol('tool_id_duplicate', 'CodeBuddy 返回了未声明或无效的工具调用。');
+      if (!this.request.toolNames.has(call.name)) protocol('tool_not_declared', 'CodeBuddy 返回了未声明或无效的工具调用。', observed(call.name));
+      if (this.request.forcedTool && call.name !== this.request.forcedTool) protocol('forced_tool_mismatch', 'CodeBuddy 返回了未声明或无效的工具调用。');
       let input;
-      try { input = JSON.parse(call.arguments); } catch { protocol('CodeBuddy 工具参数不是完整 JSON。'); }
-      if (!object(input)) protocol('CodeBuddy 工具参数必须是对象。');
+      try { input = JSON.parse(call.arguments); } catch { protocol('tool_arguments_json', 'CodeBuddy 工具参数不是完整 JSON。', observed(call.arguments)); }
+      if (!object(input)) protocol('tool_arguments_object', 'CodeBuddy 工具参数必须是对象。', observed(input));
       seen.add(call.id);
       const blockIndex = this.blocks.length;
       this.blocks.push({ type: 'tool_use', id: call.id, name: call.name, input });
@@ -715,8 +746,10 @@ export class CodeBuddyProvider {
       try { return thinkingState.seal({ reasoning, identity, model: model.id,
         ...(clientScope !== null ? { client_scope: clientScope } : {}),
         ...(extraFields !== undefined ? { extra_fields: extraFields } : {}) }); }
-      catch { protocol(extraFields !== undefined ? 'CodeBuddy extra_fields 接续状态无效、超过大小限制或无法生成（extra_fields:'
-        + (Array.isArray(extraFields) ? 'array' : typeof extraFields) + '）。' : 'CodeBuddy 思考接续状态超过大小限制或无法生成。'); }
+      catch { protocol(extraFields !== undefined ? 'metadata_seal' : 'state_seal',
+        extraFields !== undefined ? 'CodeBuddy extra_fields 接续状态无效、超过大小限制或无法生成（extra_fields:'
+          + (Array.isArray(extraFields) ? 'array' : typeof extraFields) + '）。' : 'CodeBuddy 思考接续状态超过大小限制或无法生成。',
+        observed(extraFields !== undefined ? extraFields : reasoning)); }
     });
     let settleUsage;
     const bridgeUsage = new Promise(resolve => { settleUsage = () => resolve(structuredClone(state.usage)); });
@@ -725,7 +758,7 @@ export class CodeBuddyProvider {
       if (response.ok) response.bridgeSealCompaction = summary => {
         if (abort.signal.aborted || !state.done || state.stopReason !== 'end_turn' || state.calls.size
             || typeof summary !== 'string' || summary !== state.blocks.filter(block => block.type === 'text').map(block => block.text).join('')) {
-          protocol('CodeBuddy 未完整返回可验证的文本摘要，不能生成历史摘要状态。');
+          protocol('compaction_incomplete', 'CodeBuddy 未完整返回可验证的文本摘要，不能生成历史摘要状态。');
         }
         return thinkingState.sealCompaction({ summary, identity, model: compactionModel,
           ...(clientScope !== null ? { client_scope: clientScope } : {}) });

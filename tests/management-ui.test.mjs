@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { capabilitiesFromCatalog } from '../src/model-capabilities.mjs';
-import { describeCodeBuddyDeltaFields } from '../src/codebuddy-source-diagnostics.mjs';
+import { describeCodeBuddyDeltaFields, describeCodeBuddyProtocolCheck } from '../src/codebuddy-source-diagnostics.mjs';
 
 const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
@@ -2181,6 +2181,18 @@ test('request details expose sanitized rejected-field shapes without source fiel
   const fields = detailFields(page.elements.get('diagnostics-fields'));
   assert.match(fields['未适配字段'], /function_call \(object\).*name \(string, 长度 17\).*arguments/);
   assert.doesNotMatch(listText(page.elements.get('diagnostics-fields')), /PRIVATE_TOOL_NAME|PRIVATE_ARGUMENTS/);
+});
+
+test('request details show the fixed protocol check and bounded structural information', async () => {
+  const record = diagnosticRecord('protocol_check', { errorCode: 'codebuddy_upstream_protocol_error',
+    sourceDiagnostics: describeCodeBuddyProtocolCheck('tool_calls_type', { valueType: 'null', count: 0, limit: 128 }) });
+  const page = modernPage(call => call.path === '/api/request-diagnostics/protocol_check' ? json({ request: record }) : undefined,
+    { diagnostics: { recent: [record] } }); await settle();
+  page.elements.get('diagnostics-recent-body').querySelectorAll('button')[0].trigger('click'); await settle();
+  const fields = detailFields(page.elements.get('diagnostics-fields'));
+  assert.equal(fields['协议校验项'], '工具调用增量不是数组。');
+  assert.equal(fields['结构信息'], '类型 null；数量 0；上限 128');
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
 });
 
 test('invalid IDs, missing reports and mismatched records never produce a diagnostic export link', async () => {
