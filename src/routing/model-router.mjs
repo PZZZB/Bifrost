@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { BridgeError } from '../storage.mjs';
 import { modelCapabilities } from './model-capabilities.mjs';
+import { createConversationCompatibility } from '../protocols/conversation-compatibility.mjs';
 
 export const PROTOCOL_PATHS = Object.freeze({ 'chat-completions': '/v1/chat/completions',
   responses: '/v1/responses', messages: '/v1/messages' });
@@ -93,8 +94,14 @@ export class ModelRouter {
           || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(scope))) {
       throw fail('历史快照范围无效。', 400, 'desktop_state_mismatch');
     }
-    if (snapshot && context.provider.supportsSnapshotState?.(context.upstreamModel, context.protocol) !== true) {
-      throw fail('当前来源未声明可复制的历史快照。', 409, 'desktop_state_mismatch');
+    if (snapshot) {
+      const contract = createConversationCompatibility({ protocol: context.protocol, protocols: context.public.protocols,
+        provider: context.provider, model: context.upstreamModel });
+      // This checks only the route declaration. State authentication remains
+      // the provider's job; no caller-supplied evidence can authorize a replay.
+      if (!['supported', 'conditional'].includes(contract.states['authenticated-snapshot'].continue.status)) {
+        throw fail('当前来源未声明可复制的历史快照。', 409, 'desktop_state_mismatch');
+      }
     }
     // The only dispatch. Failures are never replayed against another provider.
     return context.provider.request(context.protocol, { body: { ...body, model: context.upstreamModel },

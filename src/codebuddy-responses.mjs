@@ -4,8 +4,10 @@ import { CODEBUDDY_MODEL } from './codebuddy-provider.mjs';
 import { CODEBUDDY_STATE_PREFIX, CODEBUDDY_COMPACTION_STATE_PREFIX } from './codebuddy-thinking-state.mjs';
 import { resolveCodeBuddyAlias } from './codebuddy-models.mjs';
 import { codeBuddySourceError } from './codebuddy-source-errors.mjs';
+import { normalizeCodeBuddySourceDiagnostics } from './codebuddy-source-diagnostics.mjs';
+import { deliverResponses } from './protocols/responses-delivery.mjs';
 import { translateResponses as translate, ResponsesConversion as Conversion, encodeResponsesEvent as sse,
-  AdapterError, errorData, errorResponse, MessagesSseParser as SseParser, messagesJsonEvents as jsonEvents } from './protocols/responses-messages.mjs';
+  AdapterError, errorResponse, MessagesSseParser as SseParser, messagesJsonEvents as jsonEvents } from './protocols/responses-messages.mjs';
 
 // A bridge-owned, opaque envelope containing real, already encrypted CodeBuddy
 // continuation markers. This is not an OpenAI token and must never reach A/B.
@@ -13,6 +15,7 @@ export const CODEBUDDY_RESPONSES_STATE_PREFIX = 'bifrost-codebuddy-responses-v1:
 export const CODEBUDDY_RESPONSES_CAPABILITIES = Object.freeze({
   hostedWebSearch: false, clientTools: true, images: true, reasoningSummaries: false,
   continuation: 'bridge-owned-opaque-encrypted-state', previousResponseId: false, remoteCompaction: 'v2',
+  conversation: Object.freeze({ fullHistory: true, snapshotState: true, liveExecution: false, completedCheckpoint: false }),
 });
 export { sse as encodeResponsesEvent };
 const LIMIT = 64 * 1024 * 1024;
@@ -189,14 +192,16 @@ export class CodeBuddyResponsesProvider {
         clientScope,
         headers: new Headers({ 'content-type': 'application/json', 'anthropic-version': '2023-06-01' }), signal: abort.signal });
       if (!upstream?.ok) {
-        let message = 'CodeBuddy 上游请求失败。', code = null;
+        let message = 'CodeBuddy 上游请求失败。', code = null, sourceDiagnostics;
         try {
           const data = await upstream.json();
           if (typeof data.error?.message === 'string') message = data.error.message.slice(0, 1024);
           const source = codeBuddySourceError(data.error?.code);
-          if (source?.status === upstream.status) code = source.code;
+          if (source?.status === upstream.status) {
+            code = source.code; sourceDiagnostics = normalizeCodeBuddySourceDiagnostics(code, data.error?.sourceDiagnostics);
+          }
         } catch {}
-        const denied = errorResponse(new AdapterError(message, upstream?.status >= 400 && upstream.status <= 599 ? upstream.status : 502, null, code));
+        const denied = errorResponse(new AdapterError(message, upstream?.status >= 400 && upstream.status <= 599 ? upstream.status : 502, null, code, sourceDiagnostics));
         denied.bridgeUsage = upstream?.bridgeUsage ?? Promise.resolve(null); denied.bridgeModel = upstream?.bridgeModel;
         cleanup(); return denied;
       }
@@ -224,65 +229,29 @@ export class CodeBuddyResponsesProvider {
     };
     const events = async function* () {
       const checkAbort = () => { if (abort.signal.aborted) throw new AdapterError('CodeBuddy 请求已取消。', 499); };
-      try {
-        const isJson = upstream.headers.get('content-type')?.includes('application/json');
-        const parser = new SseParser(); let json = '', decoder;
-        if (isJson) decoder = new TextDecoder('utf-8', { fatal: true });
-        while (true) {
-          checkAbort(); const { value, done } = await reader.read(); checkAbort();
-          if (isJson) {
-            try { json += decoder.decode(value, { stream: !done }); } catch { protocol('CodeBuddy JSON 不是有效 UTF-8。'); }
-            if (Buffer.byteLength(json, 'utf8') > LIMIT) protocol('CodeBuddy JSON 超过大小限制。');
-          } else for (const source of parser.push(value, done)) for (const converted of conversion.accept(source)) { checkAbort(); yield converted; }
-          if (done) break;
-        }
+      const isJson = upstream.headers.get('content-type')?.includes('application/json');
+      const parser = new SseParser(); let json = '', decoder;
+      if (isJson) decoder = new TextDecoder('utf-8', { fatal: true });
+      while (true) {
+        checkAbort(); const { value, done } = await reader.read(); checkAbort();
         if (isJson) {
-          let message;
-          try { message = JSON.parse(json); } catch { protocol('CodeBuddy Messages JSON 无效。'); }
-          for (const source of jsonEvents(message)) for (const converted of conversion.accept(source)) { checkAbort(); yield converted; }
-        }
-        checkAbort();
-        const usage = await (upstream.bridgeUsage ?? null); checkAbort();
-        const commit = [...conversion.finishEvents(usage)]; checkAbort();
-        yield commit;
-      } finally {
-        await dispose();
+          try { json += decoder.decode(value, { stream: !done }); } catch { protocol('CodeBuddy JSON 不是有效 UTF-8。'); }
+          if (Buffer.byteLength(json, 'utf8') > LIMIT) protocol('CodeBuddy JSON 超过大小限制。');
+        } else for (const source of parser.push(value, done)) for (const converted of conversion.accept(source)) { checkAbort(); yield converted; }
+        if (done) break;
       }
+      if (isJson) {
+        let message;
+        try { message = JSON.parse(json); } catch { protocol('CodeBuddy Messages JSON 无效。'); }
+        for (const source of jsonEvents(message)) for (const converted of conversion.accept(source)) { checkAbort(); yield converted; }
+      }
+      checkAbort();
+      const usage = await (upstream.bridgeUsage ?? null); checkAbort();
+      const commit = [...conversion.finishEvents(usage)]; checkAbort();
+      yield commit;
     };
-    const iterator = events();
-    if (request.original.stream !== true) {
-      try {
-        let complete;
-        for await (const value of iterator) for (const event of Array.isArray(value) ? value : [value]) {
-          if (['response.completed', 'response.incomplete'].includes(event.type)) complete = event.response;
-        }
-        return decorate(Response.json(complete));
-      } catch (error) { return decorate(errorResponse(error)); }
-    }
-    const stream = new ReadableStream({
-      async pull(controller) {
-        try {
-          const next = await iterator.next();
-          if (next.done) controller.close();
-          else {
-            controller.enqueue(sse(next.value));
-            if (Array.isArray(next.value)) {
-              controller.close();
-              void iterator.return().catch(() => {});
-            }
-          }
-        } catch (error) {
-          controller.enqueue(sse(conversion.event('response.failed', { response: conversion.response('failed', null, errorData(error)) })));
-          controller.close();
-        }
-      },
-      async cancel() {
-        abort.abort(); cleanup(); cancelRead();
-        void dispose();
-        // Do not wait for a slow provider while a consumer is cancelling.
-        void iterator.return().catch(() => {});
-      },
-    }, { highWaterMark: 0 });
-    return decorate(new Response(stream, { headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store' } }));
+    return deliverResponses({ events: events(), conversion, stream: request.original.stream === true,
+      signal: abort.signal, decorate, cancelledError: () => new AdapterError('CodeBuddy 请求已取消。', 499),
+      cancel: () => { abort.abort(); cleanup(); cancelRead(); }, dispose });
   }
 }

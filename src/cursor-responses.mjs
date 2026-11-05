@@ -3,7 +3,8 @@ import { clientScope as validateClientScope } from './client-scope.mjs';
 import { mkdir, readFile, writeFile, unlink, lstat, realpath, readdir, rm } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { cursorEffortParameter, resolveCursorModel, cursorImageCapability, cursorModelAvailability } from './cursor-service.mjs';
-import { translateResponses, ResponsesConversion, encodeResponsesEvent } from './protocols/responses-messages.mjs';
+import { translateResponses, ResponsesConversion } from './protocols/responses-messages.mjs';
+import { deliverResponses } from './protocols/responses-delivery.mjs';
 import { imagePart, ImageConversionError } from './codebuddy-images.mjs';
 import { writeJson } from './storage.mjs';
 import { describeCursorError } from './cursor-errors.mjs';
@@ -16,6 +17,7 @@ export const CURSOR_RESPONSES_CAPABILITIES = Object.freeze({
   reasoningEffort: 'catalog-parameter-or-cursor-default', nativeInteractiveRequests: false,
   continuation: 'live-sdk-run-and-finished-checkpoint', restartRecovery: 'completed-sdk-checkpoints-only', cacheEquivalence: false,
   usage: 'reported-and-attributable-to-current-http-only',
+  conversation: Object.freeze({ fullHistory: false, snapshotState: false, liveExecution: true, completedCheckpoint: true }),
 });
 const LIMIT = 64 * 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -539,14 +541,11 @@ export class CursorResponsesProvider {
     const bridgeUsage = new Promise(resolveValue => { resolveUsage = resolveValue; });
     let finishedHttp = false, timeout;
     const stop = () => { if (!finishedHttp) return this.#stop(record, new CursorError('Cursor 请求已取消。', 499, 'request_cancelled')); };
-    signal?.addEventListener('abort', stop, { once: true });
-    if (signal?.aborted) stop();
-    const cleanup = () => { clearTimeout(timeout); signal?.removeEventListener('abort', stop); };
+    const cleanup = () => { clearTimeout(timeout); };
     const profile = { idPrefix: 'bifrost_cursor', defaultReasoning: {}, sealState: block => block.signature };
     const conversion = new ResponsesConversion(translated, profile);
     const sourceEvent = event => conversion.accept(event);
     const self = this;
-    let terminalError = null;
     const events = async function* () {
       let index = 0, usage = null, finalUsage = null;
       const reported = [], emitted = [];
@@ -644,58 +643,25 @@ export class CursorResponsesProvider {
         if (callId) record.crossHttp = true;
         for (const event of sourceEvent({ type: 'message_delta', delta: { stop_reason: callId ? 'tool_use' : 'end_turn' } })) yield event;
         for (const event of sourceEvent({ type: 'message_stop' })) yield event;
-        record.busy = false; finishedHttp = true; cleanup(); self.#expire(record);
         resolveUsage(usage);
         yield [...conversion.finishEvents(usage)];
       } catch (error) {
         resolveUsage(usage); await self.#stop(record, error);
-        const safe = safeError(error); terminalError = safe;
-        yield conversion.event('response.failed', { response: conversion.response('failed', null,
-          { message: safe.message, type: safe.status >= 500 ? 'server_error' : 'invalid_request_error', code: safe.code, param: null }) });
+        throw error;
       } finally { cleanup(); if (!finishedHttp) { resolveUsage(usage); await self.#stop(record); } }
     };
-    const iterator = events();
-    if (parsed.stream !== true) {
-      let complete;
-      for await (const value of iterator) for (const event of Array.isArray(value) ? value : [value]) {
-        if (['response.completed', 'response.failed'].includes(event.type)) complete = event.response;
-      }
-      const response = complete?.status === 'failed' ? denied(terminalError) : Response.json(complete);
-      response.bridgeUsage = bridgeUsage; response.bridgeModel = model.upstream; return response;
-    }
-    let firstNext = null, firstConsumed = false, cancelled = false, preflight = null;
-    const first = () => firstNext ??= iterator.next();
-    const stream = new ReadableStream({
-      async pull(controller) {
-        const next = firstConsumed ? await iterator.next() : await first();
-        firstConsumed = true;
-        if (next.done) controller.close();
-        else {
-          controller.enqueue(encodeResponsesEvent(next.value));
-          if (Array.isArray(next.value)) {
-            controller.close();
-            void iterator.return().catch(() => {});
-          }
-        }
+    return deliverResponses({ events: events(), conversion, stream: parsed.stream === true,
+      signal, preflight: true,
+      decorate: response => { response.bridgeUsage = bridgeUsage; response.bridgeModel = model.upstream; return response; },
+      cancelledError: () => new CursorError('Cursor 请求已取消。', 499, 'request_cancelled'),
+      formatFailure: error => {
+        const safe = safeError(error);
+        return { response: denied(safe), data: { message: safe.message,
+          type: safe.status >= 500 ? 'server_error' : 'invalid_request_error', code: safe.code, param: null } };
       },
-      async cancel() { cancelled = true; const stopping = stop(); cleanup(); resolveUsage(null); await stopping; await iterator.return().catch(() => {}); },
-    }, { highWaterMark: 0 });
-    const response = new Response(stream, { headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store' } });
-    response.bridgeUsage = bridgeUsage; response.bridgeModel = model.upstream;
-    // The gateway calls this before committing HTTP headers. Direct callers
-    // retain lazy startup until they read the stream or explicitly preflight.
-    response.bridgePreflight = () => preflight ??= (async () => {
-      if (firstConsumed || response.bodyUsed || response.body.locked) return response;
-      const next = cancelled ? null : await first();
-      if (terminalError || cancelled || next?.done) {
-        const failure = denied(terminalError ?? new CursorError('Cursor 请求已取消。', 499, 'request_cancelled'));
-        failure.bridgeUsage = bridgeUsage; failure.bridgeModel = model.upstream;
-        if (!response.body.locked) await response.body.cancel();
-        return failure;
-      }
-      return response;
-    })();
-    return response;
+      cancel: () => { const stopping = stop(); cleanup(); resolveUsage(null); return stopping; },
+      dispose: cleanup,
+      committed: () => { record.busy = false; finishedHttp = true; cleanup(); self.#expire(record); } });
   }
   async close() {
     this.#closed = true;

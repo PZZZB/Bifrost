@@ -2,6 +2,25 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { capabilitiesFromCatalog, verificationFromRecord } from '../src/model-capabilities.mjs';
 
+test('conversation compatibility comes from the adapter contract rather than arbitrary model flags', () => {
+  const hostile = { supportsTools: true, snapshotState: true, liveExecution: true,
+    conversation: { allFeatures: true, secret: 'PRIVATE_SOURCE_VALUE' } };
+  const buddy = capabilitiesFromCatalog(hostile, { channel: 'CodeBuddy' }).compatibility.conversation;
+  assert.equal(buddy.states['plain-history'].fork.status, 'conditional');
+  assert.equal(buddy.states['authenticated-snapshot'].fork.status, 'conditional');
+  assert.equal(buddy.states['authenticated-snapshot']['switch-source'].status, 'unsupported');
+  assert.equal(buddy.states['live-execution'].continue.status, 'unsupported');
+  const cursor = capabilitiesFromCatalog(hostile, { channel: 'Cursor' }).compatibility.conversation;
+  assert.equal(cursor.states['completed-checkpoint']['restart-recovery'].status, 'conditional');
+  assert.equal(cursor.states['live-execution']['restart-recovery'].status, 'unsupported');
+  assert.equal(cursor.states['live-execution'].fork.status, 'unsupported');
+  for (const channel of ['Bifrost', 'Claude']) {
+    const remote = capabilitiesFromCatalog(hostile, { channel }).compatibility.conversation;
+    for (const state of Object.values(remote.states)) for (const operation of Object.values(state)) assert.equal(operation.status, 'unknown');
+  }
+  assert.equal(JSON.stringify([buddy, cursor]).includes('PRIVATE_SOURCE_VALUE'), false);
+});
+
 test('managed Claude distinguishes adapter support, runtime context and cache metering from untested model features', () => {
   const { capabilities: caps } = capabilitiesFromCatalog({ contextWindow: 1000000, contextSource: 'official-cli-runtime',
     supportsReasoning: true, efforts: ['low', 'high'] }, { channel: 'Claude' });

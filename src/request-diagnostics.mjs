@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { claudeSourceError } from './claude-source-errors.mjs';
 import { codeBuddySourceError } from './codebuddy-source-errors.mjs';
+import { normalizeCodeBuddySourceDiagnostics } from './codebuddy-source-diagnostics.mjs';
 
 const ACCOUNTS = new Set(['A', 'B', 'CodeBuddy', 'Cursor', 'Claude', 'With', 'Bifrost']);
 const STATUSES = new Set(['completed', 'tool_pending', 'incomplete', 'failed', 'interrupted']);
@@ -57,7 +58,9 @@ export function classifyDiagnosticFailure(error, { httpStatus = null, stage = 'u
     ['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET'].includes(error?.cause?.code)) code = 'network_failed';
   else if (status >= 400 && status < 500) code = ['authentication', 'validation', 'routing'].includes(stage) ? 'invalid_request' : 'payload_rejected';
   else if (status >= 500 && status <= 599) code = 'upstream_failed';
-  return { errorCode: code, message: diagnosticMessage(code), failureStage: STAGES.has(stage) ? stage : 'upstream_request' };
+  const sourceDiagnostics = normalizeCodeBuddySourceDiagnostics(code, error?.sourceDiagnostics);
+  return { errorCode: code, message: diagnosticMessage(code), failureStage: STAGES.has(stage) ? stage : 'upstream_request',
+    ...(sourceDiagnostics ? { sourceDiagnostics } : {}) };
 }
 
 function token(value) { return Number.isSafeInteger(value) && value >= 0 ? value : null; }
@@ -102,6 +105,7 @@ export function normalizeDiagnosticRecord(raw) {
       : status === 'interrupted' ? 'request_interrupted' : diagnosticMessage(raw.errorCode) ? raw.errorCode
         : status === 'incomplete' ? 'incomplete_response' : 'unknown_error';
     const durationMs = milliseconds(raw.durationMs), first = milliseconds(raw.firstResponseMs);
+    const sourceDiagnostics = status === 'failed' ? normalizeCodeBuddySourceDiagnostics(errorCode, raw.sourceDiagnostics) : null;
     return {
       requestId: raw.requestId.toLowerCase(), time: time.toISOString(),
       account: ACCOUNTS.has(raw.account) ? raw.account : raw.account === 'CB' ? 'CodeBuddy' : null,
@@ -110,6 +114,7 @@ export function normalizeDiagnosticRecord(raw) {
       durationMs, firstResponseMs: first !== null && durationMs !== null ? Math.min(first, durationMs) : first,
       failureStage: status === 'completed' || status === 'tool_pending' ? null : STAGES.has(raw.failureStage) ? raw.failureStage : null,
       errorCode, message: errorCode ? diagnosticMessage(errorCode) : '请求已完整返回。', usage: normalizeDiagnosticUsage(raw.usage),
+      ...(sourceDiagnostics ? { sourceDiagnostics } : {}),
     };
   } catch { return null; }
 }

@@ -520,7 +520,8 @@ export class Gateway {
         const data = JSON.parse(Buffer.concat(jsonChunks).toString('utf8'));
         usage = data.usage ?? null; responseId = data.id ?? null;
         if (typeof data.error?.message === 'string') requestError = redact(data.error.message);
-        if (diagnostic && data.error) diagnostic.failure = classifyDiagnosticFailure({ code: data.error.code ?? data.error.type },
+        if (diagnostic && data.error) diagnostic.failure = classifyDiagnosticFailure({ code: data.error.code ?? data.error.type,
+          sourceDiagnostics: data.error.sourceDiagnostics },
           { httpStatus, stage: 'upstream_response' });
         if (updateCompletion) complete = path === '/responses/compact'
           ? httpStatus >= 200 && httpStatus < 300 : data.status === 'completed';
@@ -626,7 +627,8 @@ export class Gateway {
           if (!response?.bridgeUsage) this.metrics.lastUsage = event.response.usage ?? null;
         }
         if (['error', 'response.failed'].includes(event.type)) {
-          if (diagnostic) diagnostic.failure = classifyDiagnosticFailure({ code: event.error?.code ?? event.error?.type ?? event.response?.error?.code },
+          if (diagnostic) diagnostic.failure = classifyDiagnosticFailure({ code: event.error?.code ?? event.error?.type ?? event.response?.error?.code,
+            sourceDiagnostics: event.error?.sourceDiagnostics ?? event.response?.error?.sourceDiagnostics },
             { httpStatus, stage: 'stream' });
           requestError = redact(event.error?.message ?? event.response?.error?.message ?? '模型请求失败');
           this.metrics.lastError = requestError;

@@ -383,7 +383,8 @@ export class AnthropicGateway {
       }
       if (event.type === 'error') {
         streamError = true; complete = false;
-        if (diagnostic) diagnostic.failure = classifyDiagnosticFailure({ code: event.error?.code ?? event.error?.type }, { httpStatus, stage: 'stream' });
+        if (diagnostic) diagnostic.failure = classifyDiagnosticFailure({ code: event.error?.code ?? event.error?.type,
+          sourceDiagnostics: event.error?.sourceDiagnostics }, { httpStatus, stage: 'stream' });
         metrics.lastError = this.safeError(event.error?.message || `${account} 上游返回错误事件。`);
       }
     };
@@ -400,7 +401,8 @@ export class AnthropicGateway {
           ['end_turn', 'stop_sequence'].includes(stopReason) && !toolPending;
         if (updateCompletion) complete = message.type === 'message' && typeof message.stop_reason === 'string' && Boolean(message.stop_reason);
         if (message.type === 'error') {
-          if (diagnostic) diagnostic.failure = classifyDiagnosticFailure({ code: message.error?.code ?? message.error?.type }, { httpStatus, stage: 'upstream_response' });
+          if (diagnostic) diagnostic.failure = classifyDiagnosticFailure({ code: message.error?.code ?? message.error?.type,
+            sourceDiagnostics: message.error?.sourceDiagnostics }, { httpStatus, stage: 'upstream_response' });
           metrics.lastError = this.safeError(message.error?.message || `${account} 上游请求失败。`);
         }
       } catch { /* Incomplete JSON has unknown usage. */ }

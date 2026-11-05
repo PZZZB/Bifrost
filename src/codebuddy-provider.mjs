@@ -6,6 +6,7 @@ import { thinkingOptions, thinkingText, ThinkingConversionError } from './codebu
 import { CodeBuddyThinkingState, CODEBUDDY_STATE_PREFIX, ThinkingStateError } from './codebuddy-thinking-state.mjs';
 import { CODEBUDDY_MODEL, codeBuddyModelAlias, resolveCodeBuddyAlias, isCodeBuddyOpus55 } from './codebuddy-models.mjs';
 import { codeBuddySourceError } from './codebuddy-source-errors.mjs';
+import { describeCodeBuddyDeltaFields, normalizeCodeBuddySourceDiagnostics } from './codebuddy-source-diagnostics.mjs';
 
 export { CODEBUDDY_MODEL };
 
@@ -21,15 +22,17 @@ const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 const aborted = signal => signal?.aborted === true;
 
 class AdapterError extends Error {
-  constructor(message, status = 400, code = null) {
+  constructor(message, status = 400, code = null, sourceDiagnostics = null) {
     super(message); this.status = status;
     if (codeBuddySourceError(code)) this.code = code;
+    const diagnostics = normalizeCodeBuddySourceDiagnostics(this.code, sourceDiagnostics);
+    if (diagnostics) this.sourceDiagnostics = diagnostics;
   }
 }
 
 function invalid(message = 'CodeBuddy 适配器不支持此请求。') { throw new AdapterError(message); }
-function protocol(message = 'CodeBuddy 上游流不符合预期协议。', code = 'codebuddy_upstream_protocol_error') {
-  throw new AdapterError(message, 502, code);
+function protocol(message = 'CodeBuddy 上游流不符合预期协议。', code = 'codebuddy_upstream_protocol_error', sourceDiagnostics = null) {
+  throw new AdapterError(message, 502, code, sourceDiagnostics);
 }
 function emptyLegacyFunctionCall(value) {
   // HY4 includes this deprecated field beside real tool_calls. An empty
@@ -38,15 +41,12 @@ function emptyLegacyFunctionCall(value) {
     ['name', 'arguments'].includes(key) && (value[key] === '' || value[key] === null));
 }
 function unsupportedDeltaFields(delta, fields) {
-  const publicNames = ['name', 'tool_call_id', 'audio', 'reasoning', 'reasoning_details', 'reasoning_signature', 'extra_fields',
-    'extra_content', 'thinking', 'signature', 'annotations', 'function_call', 'metadata', 'content_type',
-    'type', 'usage', 'logprobs', 'index'];
-  const details = fields.slice(0, 8).map(key => {
-    const value = delta[key], type = Array.isArray(value) ? 'array' : typeof value;
-    const name = publicNames.includes(key) ? `${key}:${type}` : `unknown_key,keyLength=${key.length},valueType=${type}`;
-    return name + (typeof value === 'string' || Array.isArray(value) ? `,length=${value.length}` : '');
+  const diagnostics = describeCodeBuddyDeltaFields(delta, fields);
+  const details = (diagnostics?.fields ?? []).map(({ field, type, keyLength, length }) => {
+    const name = field === 'unknown_key' ? `unknown_key,keyLength=${keyLength},valueType=${type}` : `${field}:${type}`;
+    return name + (length !== undefined ? `,length=${length}` : '');
   });
-  protocol(`CodeBuddy 返回了尚未支持的内容类型（${details.join(';')}）。`, 'codebuddy_unsupported_delta');
+  protocol(`CodeBuddy 返回了尚未支持的内容类型（${details.join(';')}）。`, 'codebuddy_unsupported_delta', diagnostics);
 }
 function unsupportedFinishReason(value) {
   const known = ['error', 'content_filter', 'end_turn', 'max_tokens', 'tool_use', 'tool_call',
@@ -82,9 +82,11 @@ function errorResponse(error) {
     (Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 502);
   const type = ({ 400: 'invalid_request_error', 401: 'authentication_error', 403: 'permission_error',
     404: 'not_found_error', 429: 'rate_limit_error', 499: 'api_error', 501: 'not_implemented_error' })[status] || 'api_error';
+  const sourceDiagnostics = normalizeCodeBuddySourceDiagnostics(error?.code, error?.sourceDiagnostics);
   return Response.json({ type: 'error', error: { type,
     message: inputError ? error.message : 'CodeBuddy 请求失败。',
-    ...(codeBuddySourceError(error?.code) ? { code: error.code } : {}) } }, { status });
+    ...(codeBuddySourceError(error?.code) ? { code: error.code } : {}),
+    ...(sourceDiagnostics ? { sourceDiagnostics } : {}) } }, { status });
 }
 
 function cacheHint(value, onHint) {
@@ -738,14 +740,26 @@ export class CodeBuddyProvider {
       if (abort.signal.aborted) throw new AdapterError('CodeBuddy 请求已取消。', 499);
       upstream = await this.client.chatCompletions({ body: request.body, signal: abort.signal, expectedIdentity: identity });
       if (!upstream?.ok) {
-        await upstream?.body?.cancel().catch(() => {}); cleanup();
+        void upstream?.body?.cancel().catch(() => {}); cleanup();
         return decorate(errorResponse(new AdapterError(`CodeBuddy 上游请求失败（HTTP ${upstream?.status ?? 502}）。`, upstream?.status >= 400 && upstream.status <= 599 ? upstream.status : 502)));
       }
       if (!upstream.body) throw new AdapterError('CodeBuddy 上游未返回内容。', 502);
     } catch (error) { cleanup(); return decorate(errorResponse(abort.signal.aborted ? new AdapterError('CodeBuddy 请求已取消。', 499) : error)); }
     const reader = upstream.body.getReader();
-    const cancelRead = () => { void reader.cancel().catch(() => {}); };
+    let disposed = false;
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      abort.signal.removeEventListener('abort', cancelRead);
+      // Cancellation resolves outstanding reads immediately; its underlying
+      // transport cleanup may still stall. Neither errors nor usage wait for it.
+      void reader.cancel().catch(() => {});
+      try { reader.releaseLock(); } catch {}
+      cleanup();
+    };
+    const cancelRead = () => dispose();
     abort.signal.addEventListener('abort', cancelRead, { once: true });
+    if (abort.signal.aborted) dispose();
     const events = async function* () {
       const parser = new EventParser(data => state.data(data));
       try {
@@ -766,10 +780,7 @@ export class CodeBuddyProvider {
           if (abort.signal.aborted) throw new AdapterError('CodeBuddy 请求已取消。', 499);
           yield state.events.shift();
         }
-      } finally {
-        abort.signal.removeEventListener('abort', cancelRead);
-        await reader.cancel().catch(() => {}); reader.releaseLock(); cleanup();
-      }
+      } finally { dispose(); }
     };
     const iterator = events();
     if (!request.streaming) {
@@ -784,13 +795,14 @@ export class CodeBuddyProvider {
         } catch (error) {
           const source = codeBuddySourceError(abort.signal.aborted ? 'codebuddy_request_interrupted'
             : error instanceof AdapterError ? error.code : 'codebuddy_upstream_connection_error');
+          const sourceDiagnostics = normalizeCodeBuddySourceDiagnostics(source?.code, error?.sourceDiagnostics);
           controller.enqueue(sse({ type: 'error', error: { type: 'api_error', message: abort.signal.aborted
             ? 'CodeBuddy 请求已取消。' : error instanceof AdapterError ? error.message : 'CodeBuddy 上游连接已中断。',
-          ...(source ? { code: source.code } : {}) } }));
+          ...(source ? { code: source.code } : {}), ...(sourceDiagnostics ? { sourceDiagnostics } : {}) } }));
           controller.close();
         }
       },
-      async cancel() { abort.abort(); settleUsage(); void iterator.return().catch(() => {}); cleanup(); },
+      cancel() { abort.abort(); dispose(); void iterator.return().catch(() => {}); },
     }, { highWaterMark: 0 });
     return decorate(new Response(stream, { headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store' } }));
   }

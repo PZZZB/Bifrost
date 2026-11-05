@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { capabilitiesFromCatalog } from '../src/model-capabilities.mjs';
+import { describeCodeBuddyDeltaFields } from '../src/codebuddy-source-diagnostics.mjs';
 
 const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
@@ -2090,6 +2092,19 @@ test('missing model capability and validation metadata never become support or a
   assert.equal(page.calls.some(call => call.method === 'POST'), false);
 });
 
+test('model details distinguish completed history, copyable snapshots, checkpoints and active tool callbacks', async () => {
+  const models = completeModels(), target = models.models.find(model => model.id === 'cb-opus');
+  target.compatibility = capabilitiesFromCatalog({}, { channel: 'Cursor' }).compatibility;
+  const page = catalogPage(models); await settle();
+  const fields = detailFields(evidenceFor(page, 'cb-opus'));
+  assert.match(fields['完整明文历史'], /分叉：不支持/);
+  assert.match(fields['已完成检查点'], /重启恢复：有条件/);
+  assert.match(fields['执行中的工具回合'], /续聊：有条件.*分叉：不支持.*重启恢复：不支持/);
+  assert.match(fields['加密历史快照'], /换来源：不支持/);
+  assert.match(fields['会话条件'], /来源校验/);
+  assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
 test('model capability detail separates explicit support, precise effort levels and compatibility from a completed call', async () => {
   const models = completeModels(), target = models.models.find(model => model.id === 'cb-opus');
   target.capabilities = { images: { support: false, source: 'remote', note: '目录不支持图片' }, tools: { support: true, source: 'remote' },
@@ -2155,6 +2170,17 @@ test('request diagnostics poll read-only, limit visible records and export only 
   assert.equal(link.hidden, false); assert.equal(link.href, '/api/request-diagnostics/request_0/export');
   assert.equal(new URL(link.href, page.location).origin, page.location.origin);
   assert.equal(page.calls.some(call => call.method === 'POST'), false);
+});
+
+test('request details expose sanitized rejected-field shapes without source field values', async () => {
+  const record = diagnosticRecord('shape_error', { errorCode: 'codebuddy_unsupported_delta',
+    sourceDiagnostics: describeCodeBuddyDeltaFields({ function_call: { name: 'PRIVATE_TOOL_NAME', arguments: 'PRIVATE_ARGUMENTS' } }, ['function_call']) });
+  const page = modernPage(call => call.path === '/api/request-diagnostics/shape_error' ? json({ request: record }) : undefined,
+    { diagnostics: { recent: [record] } }); await settle();
+  page.elements.get('diagnostics-recent-body').querySelectorAll('button')[0].trigger('click'); await settle();
+  const fields = detailFields(page.elements.get('diagnostics-fields'));
+  assert.match(fields['未适配字段'], /function_call \(object\).*name \(string, 长度 17\).*arguments/);
+  assert.doesNotMatch(listText(page.elements.get('diagnostics-fields')), /PRIVATE_TOOL_NAME|PRIVATE_ARGUMENTS/);
 });
 
 test('invalid IDs, missing reports and mismatched records never produce a diagnostic export link', async () => {

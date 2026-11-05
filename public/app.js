@@ -1483,6 +1483,18 @@ function modelEvidenceDetails(model) {
     : '尚未取得当前预算');
   appendField('指令处理', model.compatibility?.label || '尚未取得接入方式');
   if (typeof model.compatibility?.note === 'string') appendField('兼容说明', model.compatibility.note);
+  const conversation = model.compatibility?.conversation;
+  if (conversation?.version === 1 && conversation.states) {
+    const labels = { supported: '支持', conditional: '有条件', unsupported: '不支持', unknown: '未确认' };
+    const operations = [['continue', '续聊'], ['fork', '分叉'], ['switch-model', '换模型'],
+      ['switch-source', '换来源'], ['restart-recovery', '重启恢复']];
+    for (const [state, label] of [['plain-history', '完整明文历史'], ['authenticated-snapshot', '加密历史快照'],
+      ['completed-checkpoint', '已完成检查点'], ['live-execution', '执行中的工具回合']]) {
+      const row = conversation.states[state];
+      if (row) appendField(label, operations.map(([operation, name]) => `${name}：${labels[row[operation]?.status] || '未确认'}`).join('；'));
+    }
+    appendField('会话条件', '“有条件”需要完整历史、工具回传及来源校验。检查点与正在执行的回调分别处理；来源密文不能直接交给其他模型解码。');
+  }
   appendField('调用验证', verificationLabel);
   if (verification?.checkedAt) appendField('验证时间', `${tokenTime(verification.checkedAt, 'Asia/Shanghai')}（北京时间）`);
   if (typeof verification?.reason === 'string' && verification.reason) appendField('验证说明', verification.reason);
@@ -2509,6 +2521,12 @@ async function loadRequestDiagnostic(id) {
       ['输入 Token', tokenCount(record.usage?.inputTokens)], ['输出 Token', tokenCount(record.usage?.outputTokens)],
       ['缓存命中 Token', tokenCount(record.usage?.cachedInputTokens)], ['思考 Token', tokenCount(record.usage?.reasoningTokens)],
     ];
+    const shape = record.sourceDiagnostics;
+    if (shape?.version === 1 && shape.kind === 'codebuddy_delta_shape' && Array.isArray(shape.fields)) {
+      const describe = field => `${field.field} (${field.type}${Number.isSafeInteger(field.length) ? `, 长度 ${field.length}` : ''})`;
+      fields.push(['未适配字段', shape.fields.slice(0, 8).map(field => `${describe(field)}${Array.isArray(field.children)
+        ? ` · ${field.children.slice(0, 3).map(describe).join('、')}` : ''}`).join('；')]);
+    }
     elements['diagnostics-fields'].replaceChildren(...fields.map(([name, value]) => {
       const row = document.createElement('div'), label = document.createElement('dt'), content = document.createElement('dd');
       label.textContent = name; content.textContent = String(value); row.append(label, content); return row;

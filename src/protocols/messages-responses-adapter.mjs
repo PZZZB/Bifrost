@@ -3,8 +3,9 @@ import { ClientStateCodec } from '../client-state.mjs';
 import { clientScope as validateClientScope } from '../client-scope.mjs';
 import { meterClientResponse, getClientMeter } from '../client-meter.mjs';
 import { readClaudeSourceError } from '../claude-source-errors.mjs';
+import { deliverResponses } from './responses-delivery.mjs';
 import { translateResponses, ResponsesConversion, MessagesSseParser, messagesJsonEvents,
-  encodeResponsesEvent, AdapterError, errorData, errorResponse } from './responses-messages.mjs';
+  AdapterError, errorResponse } from './responses-messages.mjs';
 
 const MAX = 64 * 1024 * 1024;
 const COMPACTION_PREFIX = 'bifrost-messages-compaction-v1:';
@@ -148,66 +149,37 @@ export class MessagesResponsesAdapter {
     const cancelRead = () => { void reader.cancel().catch(() => {}); };
     linked.addEventListener('abort', cancelRead, { once: true });
     if (linked.aborted) cancelRead();
-    const dispose = async () => {
+    let disposing;
+    const dispose = () => disposing ??= (async () => {
       linked.removeEventListener('abort', cancelRead);
       await reader.cancel().catch(() => {}); try { reader.releaseLock(); } catch {}
-    };
+    })();
     const events = async function* () {
       const check = () => { if (linked.aborted) throw new AdapterError('请求已取消。', 499); };
-      try {
-        let json = ''; const jsonResponse = metered.headers.get('content-type')?.includes('application/json');
-        const decoder = new TextDecoder('utf-8', { fatal: true });
-        while (true) {
-          check(); const next = await reader.read(); check();
-          if (jsonResponse) {
-            json += decoder.decode(next.value, { stream: !next.done });
-            if (Buffer.byteLength(json) > MAX) throw new AdapterError('Messages 内容超过大小限制。', 502);
-          } else for (const event of parser.push(next.value, next.done)) yield* conversion.accept(event);
-          if (next.done) break;
-        }
+      let json = ''; const jsonResponse = metered.headers.get('content-type')?.includes('application/json');
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+      while (true) {
+        check(); const next = await reader.read(); check();
         if (jsonResponse) {
-          let message;
-          try { message = JSON.parse(json); } catch { throw new AdapterError('Messages JSON 无效。', 502); }
-          for (const event of messagesJsonEvents(message)) yield* conversion.accept(event);
-        }
-        const { usage } = await getClientMeter(metered).finish; check();
-        const wireUsage = usage ? { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens, total_tokens: usage.totalTokens,
-          input_tokens_details: { cached_tokens: usage.cachedInputTokens, cache_write_tokens: usage.cacheWriteTokens },
-          output_tokens_details: { reasoning_tokens: usage.reasoningTokens } } : null;
-        const commit = [...conversion.finishEvents(wireUsage)]; check();
-        yield commit;
-      } finally { await dispose(); }
+          json += decoder.decode(next.value, { stream: !next.done });
+          if (Buffer.byteLength(json) > MAX) throw new AdapterError('Messages 内容超过大小限制。', 502);
+        } else for (const event of parser.push(next.value, next.done)) yield* conversion.accept(event);
+        if (next.done) break;
+      }
+      if (jsonResponse) {
+        let message;
+        try { message = JSON.parse(json); } catch { throw new AdapterError('Messages JSON 无效。', 502); }
+        for (const event of messagesJsonEvents(message)) yield* conversion.accept(event);
+      }
+      const { usage } = await getClientMeter(metered).finish; check();
+      const wireUsage = usage ? { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens, total_tokens: usage.totalTokens,
+        input_tokens_details: { cached_tokens: usage.cachedInputTokens, cache_write_tokens: usage.cacheWriteTokens },
+        output_tokens_details: { reasoning_tokens: usage.reasoningTokens } } : null;
+      const commit = [...conversion.finishEvents(wireUsage)]; check();
+      yield commit;
     };
-    const iterator = events();
     const headers = { 'cache-control': 'no-store', ...(ignoredEffort ? { 'x-bifrost-reasoning-mode': 'upstream-default' } : {}) };
-    if (translated.original.stream !== true) {
-      try {
-        let result;
-        for await (const value of iterator) for (const event of Array.isArray(value) ? value : [value]) {
-          if (['response.completed', 'response.incomplete'].includes(event.type)) result = event.response;
-        }
-        return Response.json(result, { headers });
-      } catch (error) { return errorResponse(error); }
-    }
-    return new Response(new ReadableStream({
-      async pull(controller) {
-        try {
-          const next = await iterator.next();
-          if (next.done) controller.close();
-          else {
-            controller.enqueue(encodeResponsesEvent(next.value));
-            if (Array.isArray(next.value)) {
-              controller.close();
-              void iterator.return().catch(() => {});
-            }
-          }
-        }
-        catch (error) {
-          controller.enqueue(encodeResponsesEvent(conversion.event('response.failed', { response: conversion.response('failed', null, errorData(error)) })));
-          controller.close();
-        }
-      },
-      cancel() { abort.abort(); cancelRead(); void iterator.return().catch(() => {}); },
-    }, { highWaterMark: 0 }), { headers: { ...headers, 'content-type': 'text/event-stream; charset=utf-8' } });
+    return deliverResponses({ events: events(), conversion, stream: translated.original.stream === true,
+      signal: linked, headers, cancel: () => { abort.abort(); cancelRead(); }, dispose });
   }
 }

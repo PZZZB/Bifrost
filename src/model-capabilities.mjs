@@ -1,5 +1,8 @@
 import { cursorEffortParameter, cursorImageCapability } from './cursor-service.mjs';
 import { contextDeclaration } from './model-context.mjs';
+import { createConversationCompatibility } from './protocols/conversation-compatibility.mjs';
+import { CODEBUDDY_RESPONSES_CAPABILITIES } from './codebuddy-responses.mjs';
+import { CURSOR_RESPONSES_CAPABILITIES } from './cursor-responses.mjs';
 
 const EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
 const CHANNELS = new Set(['A', 'B', 'CodeBuddy', 'Cursor', 'Bifrost', 'Claude']);
@@ -60,6 +63,13 @@ export function capabilitiesFromCatalog(value, { channel, promptMode } = {}) {
     : source.defaultEffort;
   const context = contextDeclaration(source, { native }), tokens = context.tokens;
   const mode = compatibility(CHANNELS.has(channel) ? channel : null, promptMode);
+  if (!native && CHANNELS.has(channel)) {
+    const adapter = channel === 'CodeBuddy' ? CODEBUDDY_RESPONSES_CAPABILITIES
+      : channel === 'Cursor' ? CURSOR_RESPONSES_CAPABILITIES : {};
+    mode.conversation = createConversationCompatibility({ protocol: 'responses',
+      protocols: ['CodeBuddy', 'Cursor'].includes(channel) ? ['responses'] : undefined,
+      adapterCapabilities: adapter, declarations: adapter.conversation ?? {} });
+  }
   const declared = (support, label, origin = profileOrigin) => capability(support, support === null ? 'unknown' : origin,
     support === null ? `目录未明确返回${label}能力。` : legacy && origin === 'adapter-profile'
       ? `现有网关适配配置声明${label}；当前账号仍需真实验证。` : `来自目录的明确${label}声明；不等同于真实调用验证。`);
