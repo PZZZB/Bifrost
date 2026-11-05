@@ -34,7 +34,7 @@ async function fixture(t, options = {}) {
   const key = await access.createKey(user.id);
   await billing.setPrice(price);
   await billing.configureAccount(user.id, { enforceBalance: true });
-  await billing.adjustBalance(user.id, { operationId: randomUUID(), amountMicros: options.credit ?? 1000, note: 'Offline credit' });
+  if ((options.credit ?? 1000) !== 0) await billing.adjustBalance(user.id, { operationId: randomUUID(), amountMicros: options.credit ?? 1000, note: 'Offline credit' });
   const calls = [];
   const source = async value => { calls.push(value); return options.source ? options.source(value, { access, billing, user, key }) : Response.json(completion()); };
   const server = createClientServer({ access, billing, getModels: () => [{ id: MODEL, name: 'Offline model', channel: 'CodeBuddy' }],
@@ -58,6 +58,30 @@ async function fixture(t, options = {}) {
     request.on('error', reject); request.end(body === undefined ? undefined : JSON.stringify(body));
   });
   return { access, billing, user, key, calls, send, server };
+}
+
+const protocolRequests = [
+  ['/v1/chat/completions', { model: MODEL, messages: [{ role: 'user', content: 'fixture' }] }],
+  ['/v1/messages', { model: MODEL, max_tokens: 20, messages: [{ role: 'user', content: 'fixture' }] }],
+  ['/v1/responses', { model: MODEL, input: 'fixture' }],
+];
+for (const [path, body] of protocolRequests) {
+  test(`zero balance is rejected before dispatch for any client using ${path}`, async t => {
+    const f = await fixture(t, { credit: 0 });
+    const response = await f.send(path, body);
+    assert.equal(response.status, 402); assert.equal(response.data.error.code, 'client_billing_balance_exhausted');
+    assert.equal(f.calls.length, 0);
+    const account = f.billing.account(f.user.id);
+    assert.equal(account.balanceMicros, 0); assert.equal(account.reservedMicros, 0); assert.equal(account.unresolvedCount, 0);
+  });
+  for (const status of [402, 413]) test(`unbilled upstream HTTP ${status} releases the hold without a retry on ${path}`, async t => {
+    const f = await fixture(t, { source: () => Response.json({ error: { message: 'Offline rejection without generation.' } }, { status }) });
+    const response = await f.send(path, body);
+    assert.equal(response.status, status); assert.equal(f.calls.length, 1);
+    const account = f.billing.account(f.user.id);
+    assert.equal(account.balanceMicros, 1000); assert.equal(account.reservedMicros, 0); assert.equal(account.unresolvedCount, 0);
+    assert.equal(f.billing.history(f.user.id).rows.filter(row => row.type === 'settled').length, 0);
+  });
 }
 
 test('prepaid HTTP request reserves first, then deducts authoritative cached-token price once before completion', async t => {

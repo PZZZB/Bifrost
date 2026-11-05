@@ -49,7 +49,7 @@ test('JSON maps text, cache-inclusive usage and finish reason without invoking a
   const body = await result.json();
   assert.equal(body.choices[0].message.content, '你好 🌍');
   assert.equal(body.choices[0].finish_reason, 'stop');
-  assert.deepEqual(body.usage, { prompt_tokens: 15, completion_tokens: 4, total_tokens: 19, prompt_tokens_details: { cached_tokens: 3 } });
+  assert.deepEqual(body.usage, { prompt_tokens: 15, completion_tokens: 4, total_tokens: 19, prompt_tokens_details: { cached_tokens: 3, cache_write_tokens: 2 } });
   assert.equal(f.calls[0].body.model, 'fixture-sonnet');
   assert.equal(f.calls[0].body.thinking.type, 'disabled');
 });

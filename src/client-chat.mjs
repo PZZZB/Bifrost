@@ -272,8 +272,10 @@ function usage(value) {
   if (!object(value)) return null;
   const prompt = count(value.input_tokens), completion = count(value.output_tokens);
   const total = count(value.total_tokens) ?? (prompt !== null && completion !== null ? prompt + completion : null);
+  const details = Object.fromEntries(['cached_tokens', 'cache_write_tokens'].filter(key => count(value.input_tokens_details?.[key]) !== null)
+    .map(key => [key, value.input_tokens_details[key]]));
   return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total,
-    ...(count(value.input_tokens_details?.cached_tokens) !== null ? { prompt_tokens_details: { cached_tokens: value.input_tokens_details.cached_tokens } } : {}),
+    ...(Object.keys(details).length ? { prompt_tokens_details: details } : {}),
     ...(count(value.output_tokens_details?.reasoning_tokens) !== null ? { completion_tokens_details: { reasoning_tokens: value.output_tokens_details.reasoning_tokens } } : {}) };
 }
 

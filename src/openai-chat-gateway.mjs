@@ -80,7 +80,7 @@ function usage(value) {
   const prompt = number('input_tokens') + number('cache_read_input_tokens') + number('cache_creation_input_tokens');
   const output = number('output_tokens');
   return { prompt_tokens: prompt, completion_tokens: output, total_tokens: prompt + output,
-    prompt_tokens_details: { cached_tokens: number('cache_read_input_tokens') } };
+    prompt_tokens_details: { cached_tokens: number('cache_read_input_tokens'), cache_write_tokens: number('cache_creation_input_tokens') } };
 }
 function finishReason(reason) {
   const mapped = { end_turn: 'stop', stop_sequence: 'stop', tool_use: 'tool_calls', max_tokens: 'length', refusal: 'content_filter' }[reason];
