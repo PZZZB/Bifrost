@@ -3,6 +3,7 @@ import { CODEBUDDY_MODEL } from './codebuddy-provider.mjs';
 import { CODEBUDDY_EFFORTS } from './codebuddy-thinking.mjs';
 import { CURSOR_MODELS, resolveCursorModel, cursorEffortParameter, cursorImageCapability, cursorModelAvailability } from './cursor-service.mjs';
 import { resolveCodeBuddyAlias } from './codebuddy-models.mjs';
+import { contextDeclaration } from './model-context.mjs';
 
 // Retain the original two default selections and their public IDs.
 export const B_MODELS = [
@@ -149,11 +150,14 @@ export function appendCodeBuddyModel(data) {
     default_reasoning_summary: 'none',
     support_verbosity: false,
     default_verbosity: null,
-    apply_patch_tool_type: null,
+    // These tools run in Codex, not at the model provider. Omitting these
+    // declarations removes native patch editing and collaboration tools.
+    apply_patch_tool_type: 'freeform',
     web_search_tool_type: 'text',
     truncation_policy: { mode: 'tokens', limit: 10000 },
     supports_image_detail_original: false,
-    // Conservative bridge limits; CodeBuddy's native catalog advertises larger windows.
+    // Fallback only when no current account metadata is available. Discovered
+    // models use their own default window without a fixed bridge ceiling.
     context_window: 200000,
     max_context_window: 200000,
     effective_context_window_percent: 90,
@@ -167,7 +171,7 @@ export function appendCodeBuddyModel(data) {
     supports_reasoning_effort_updates: false,
     prefer_websockets: false,
     tool_mode: 'direct',
-    multi_agent_version: null,
+    multi_agent_version: 'v2',
   });
   return result;
 }
@@ -205,8 +209,8 @@ export function appendCodeBuddyModels(data, sources) {
     const efforts = [...new Set((source.efforts ?? (legacy ? CODEBUDDY_EFFORTS : []))
       .filter(effort => knownEfforts.has(effort)))];
     const preferred = source.defaultEffort ?? (legacy ? 'high' : null);
-    const contextWindow = Number.isSafeInteger(source.contextWindow) && source.contextWindow > 0
-      ? Math.min(source.contextWindow, 200000) : legacy ? 200000 : 128000;
+    const context = contextDeclaration(source), fallback = legacy ? 200000 : 128000;
+    const contextWindow = context.clientTokens ?? context.tokens ?? Math.min(fallback, context.maxTokens ?? fallback);
     Object.assign(value, { slug: alias.id, display_name: publicName(source.name, alias.id),
       description: 'CodeBuddy account model with Codex client tools. OpenAI hosted web search is unavailable.'
         + (efforts.length ? '' : ' Uses upstream default reasoning; Codex effort levels do not apply.'),
@@ -240,6 +244,8 @@ export function appendCursorModels(data, sdkSourceModels) {
     const images = cursorImageCapability(source);
     const efforts = [...new Set((parameter?.values ?? []).map(item => item.value).filter(value => knownEfforts.has(value)))];
     const preferred = source.variants?.find(variant => variant.isDefault)?.params?.find(item => item.id === parameter?.id)?.value;
+    const context = contextDeclaration(source);
+    const contextWindow = context.clientTokens ?? context.tokens ?? Math.min(128000, context.maxTokens ?? 128000);
     const instructions = 'You are a coding assistant using the Cursor Agent SDK. Follow the user instructions and configured tool permissions. '
       + 'Use only the provided client tools and client tool discovery. OpenAI hosted web search is unavailable. '
       + 'Do not claim to have browsed the web unless a client tool retrieved the information. '
@@ -256,10 +262,10 @@ export function appendCursorModels(data, sdkSourceModels) {
       base_instructions: instructions, model_messages: { instructions_template: instructions },
       include_skills_usage_instructions: true, include_plugin_usage_instructions: true, include_apps_usage_instructions: true,
       supports_reasoning_summary_parameter: false, default_reasoning_summary: 'none',
-      support_verbosity: false, default_verbosity: null, apply_patch_tool_type: null,
+      support_verbosity: false, default_verbosity: null, apply_patch_tool_type: 'freeform',
       web_search_tool_type: 'text', truncation_policy: { mode: 'tokens', limit: 10000 }, supports_image_detail_original: false,
-      // This is a conservative client history budget, not a claim about SDK raw-inference limits.
-      context_window: 128000, max_context_window: 128000, effective_context_window_percent: 90,
+      // Prefer an explicit account declaration. Unknown SDK windows keep a fallback budget.
+      context_window: contextWindow, max_context_window: contextWindow, effective_context_window_percent: 90,
       experimental_supported_tools: [],
       // The SDK's public model list omits per-model image capabilities. Preserve
       // that unknown value: Codex defaults an omitted modality list to text/image,
@@ -267,7 +273,7 @@ export function appendCursorModels(data, sdkSourceModels) {
       ...(images === null ? {} : { input_modalities: images ? ['text', 'image'] : ['text'] }),
       supports_parallel_tool_calls: false,
       supports_search_tool: true, supports_experimental_context: false, use_responses_lite: false,
-      supports_reasoning_effort_updates: false, prefer_websockets: false, tool_mode: 'direct', multi_agent_version: null,
+      supports_reasoning_effort_updates: false, prefer_websockets: false, tool_mode: 'direct', multi_agent_version: 'v2',
     });
   }
   return result;

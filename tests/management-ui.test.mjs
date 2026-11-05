@@ -95,8 +95,17 @@ function harness(overrides = {}) {
     if (path === '/api/status') return json(snapshot());
     if (path === '/api/service/status') return json(control);
     if (path === '/api/model-settings') {
-      if (call.method === 'POST') { models = { ...models, revision: models.revision + 1,
-        models: models.models.map(model => ({ ...model, enabled: !call.body.disabledModels.includes(model.id) })) }; }
+      if (call.method === 'POST') {
+        const windows = { ...models.contextWindows };
+        for (const [id, tokens] of Object.entries(call.body.contextWindows ?? {})) {
+          if (tokens === null) delete windows[id]; else windows[id] = tokens;
+        }
+        models = { ...models, revision: models.revision + 1, disabledModels: [...call.body.disabledModels],
+          ...(Object.hasOwn(call.body, 'contextWindows') ? { contextWindows: windows } : {}),
+          models: models.models.map(model => ({ ...model, enabled: !call.body.disabledModels.includes(model.id),
+            ...(model.contextSettings ? { contextSettings: { ...model.contextSettings,
+              selectedTokens: windows[model.id] ?? null, effectiveTokens: windows[model.id] ?? model.contextSettings.defaultTokens } } : {}) })) };
+      }
       return json(models);
     }
     if (path === '/api/cursor') return json(cursor);
@@ -541,7 +550,7 @@ test('model edits survive polling and are saved only by explicit button with exa
   assert.match(page.elements.get('model-settings-message').textContent, /已保存.*刷新模型目录/);
 });
 
-test('model revision conflict reloads actual server selection instead of silently overwriting another page', async () => {
+test('repeated model revision conflicts retain checkbox edits and the latest baseline without overwriting another page', async () => {
   const page = harness({ fetch(call, api) {
     if (call.path === '/api/model-settings' && call.method === 'POST') {
       api.models = { revision: 2, models: originalModels().models.map(model => ({ ...model, enabled: model.channel === 'A' })) };
@@ -551,9 +560,11 @@ test('model revision conflict reloads actual server selection instead of silentl
   const checkbox = page.elements.get('model-settings-list').querySelectorAll('input')[0];
   checkbox.checked = false; checkbox.trigger('change');
   page.elements.get('model-settings-save-button').trigger('click'); await settle();
-  assert.deepEqual(page.elements.get('model-settings-list').querySelectorAll('input').map(input => input.checked), [true, false]);
-  assert.match(page.elements.get('model-settings-message').textContent, /重新勾选后保存/);
-  assert.equal(page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'POST').length, 1);
+  assert.deepEqual(page.elements.get('model-settings-list').querySelectorAll('input').map(input => input.checked), [false, false]);
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  assert.equal(page.run('modelSettings.revision'), 2);
+  assert.match(page.elements.get('model-settings-message').textContent, /目录持续更新.*草稿已保留/);
+  assert.equal(page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'POST').length, 2);
 });
 
 test('Cursor authorization requires a click, checks exact official origin, and never displays credentials', async () => {
@@ -603,7 +614,7 @@ function catalogPage(data = completeModels(), fetch) {
     if (call.path === '/api/codebuddy') return json({ configured: true, running: true, provider: { authenticated: true, ready: true, modelAvailable: true } });
   } });
 }
-const modelInputs = page => page.elements.get('model-settings-list').querySelectorAll('input');
+const modelInputs = page => page.elements.get('model-settings-list').querySelectorAll('input').filter(input => input.type === 'checkbox');
 const inputFor = (page, id) => modelInputs(page).find(input => input.value === id);
 const listText = element => [element.textContent, ...element.children.map(child => child instanceof Element ? listText(child) : String(child))].join(' ');
 const groupButton = (page, channel, title) => page.elements.get('model-settings-list').querySelectorAll('button')
@@ -611,6 +622,376 @@ const groupButton = (page, channel, title) => page.elements.get('model-settings-
 const modelGroups = page => page.elements.get('model-settings-list').querySelectorAll('details[data-model-channel]');
 const modelGroupFor = (page, channel) => modelGroups(page).find(group => group.getAttribute('data-model-channel') === channel);
 const setModelGroupOpen = (group, open) => { group.open = open; group.trigger('toggle'); };
+
+const contextSettingsFixture = (overrides = {}) => ({ defaultTokens: 300000, maxTokens: 1000000,
+  options: [300000, 600000, 1000000], selectedTokens: null, effectiveTokens: 300000,
+  customAllowed: true, valid: true, note: '', minimumTokens: 1000, maximumTokens: 10000000, ...overrides });
+function contextModelCatalog(settings = contextSettingsFixture()) {
+  const data = completeModels();
+  data.contextWindows = settings.selectedTokens === null ? {} : { 'cb-opus': settings.selectedTokens };
+  data.models.find(model => model.id === 'cb-opus').contextSettings = settings;
+  return data;
+}
+const contextRowFor = (page, id = 'cb-opus') => page.elements.get('model-settings-list').querySelectorAll('[data-model-context]')
+  .find(row => row.getAttribute('data-model-context') === id);
+const contextChoiceFor = (page, id) => contextRowFor(page, id)?.querySelectorAll('select')[0];
+const customContextFor = (page, id) => contextRowFor(page, id)?.querySelectorAll('input')[0];
+
+test('metadata-only revision conflict retries once and merges the user delta without dropping newly disabled or hidden settings', async () => {
+  let posts = 0;
+  const original = contextModelCatalog();
+  original.disabledModels = ['inactive-hidden-model', ...original.models.filter(model => !model.enabled).map(model => model.id)];
+  original.contextWindows['remote/inactive/model'] = 750000;
+  const page = catalogPage(original, (call, api) => {
+    if (call.path !== '/api/model-settings' || call.method !== 'POST' || ++posts !== 1) return;
+    api.models = { ...api.models, revision: 8,
+      contextWindows: { ...api.models.contextWindows, 'remote/inactive/model': 800000 },
+      disabledModels: [...api.models.disabledModels.filter(id => id !== 'cursor-first'), 'new-default-disabled'],
+      models: [...api.models.models.map(model => model.id === 'cursor-first' ? { ...model, enabled: true } : model),
+        { id: 'new-default-disabled', name: 'New native model', channel: 'A', enabled: false, available: true }] };
+    return json({ error: { message: 'Metadata changed' } }, 409);
+  });
+  await settle();
+  contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+  const checkbox = inputFor(page, 'original-a'); checkbox.checked = false; checkbox.trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const attempts = page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].body.revision, 7); assert.equal(attempts[1].body.revision, 8);
+  assert.deepEqual(attempts[1].body.contextWindows, { 'cb-opus': 600000 });
+  for (const id of ['inactive-hidden-model', 'new-default-disabled', 'original-a']) assert.ok(attempts[1].body.disabledModels.includes(id));
+  assert.equal(attempts[1].body.disabledModels.includes('cursor-first'), false);
+  assert.equal(page.models.contextWindows['remote/inactive/model'], 800000);
+  assert.equal(page.models.models.find(model => model.id === 'new-default-disabled').enabled, false);
+  assert.equal(contextChoiceFor(page).value, '600000');
+  assert.match(listText(contextRowFor(page)), /目录默认 300K.*已保存预算 600K/);
+  assert.equal(detailFields(evidenceFor(page, 'cb-opus'))['客户端预算'], '600,000 Token（已保存）');
+  assert.match(page.elements.get('model-settings-message').textContent, /已保存并确认/);
+  assert.equal(page.elements.get('model-settings-save-button').disabled, true);
+});
+
+test('same-field context conflict preserves 600K and requires a second explicit save against the latest baseline', async () => {
+  let posts = 0;
+  const page = catalogPage(contextModelCatalog(), (call, api) => {
+    if (call.path !== '/api/model-settings' || call.method !== 'POST' || ++posts !== 1) return;
+    api.models = contextModelCatalog(contextSettingsFixture({ selectedTokens: 1000000, effectiveTokens: 1000000 }));
+    api.models.revision = 8;
+    return json({ error: { message: 'Another page changed this budget' } }, 409);
+  });
+  await settle(); contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  assert.equal(posts, 1); assert.equal(contextChoiceFor(page).value, '600000');
+  assert.equal(page.run('modelSettings.revision'), 8);
+  assert.equal(page.run('modelSettings.models.find(model => model.id === "cb-opus").contextSettings.selectedTokens'), 1000000);
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  assert.match(page.elements.get('model-settings-message').textContent, /其他页面修改.*600K 的上下文草稿已保留/);
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const latest = page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'POST').at(-1);
+  assert.equal(posts, 2); assert.equal(latest.body.revision, 8); assert.deepEqual(latest.body.contextWindows, { 'cb-opus': 600000 });
+  assert.equal(page.elements.get('model-settings-save-button').disabled, true);
+  assert.equal(contextChoiceFor(page).value, '600000');
+});
+
+test('repeated conflicts are bounded to two posts per click and retain the 600K draft for an explicit retry', async () => {
+  let posts = 0;
+  const page = catalogPage(contextModelCatalog(), (call, api) => {
+    if (call.path !== '/api/model-settings' || call.method !== 'POST') return;
+    if (++posts > 2) return;
+    api.models = { ...api.models, revision: api.models.revision + 1 };
+    return json({ error: { message: 'Directory is changing' } }, 409);
+  });
+  await settle(); contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  assert.equal(posts, 2); assert.equal(contextChoiceFor(page).value, '600000');
+  assert.equal(page.run('modelSettings.revision'), 9); assert.equal(page.run('modelSettingsDirty()'), true);
+  assert.match(page.elements.get('model-settings-message').textContent, /目录持续更新.*600K 的上下文草稿已保留/);
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  assert.equal(posts, 3); assert.equal(contextChoiceFor(page).value, '600000');
+  assert.equal(page.run('modelSettingsDirty()'), false);
+});
+
+test('confirmed 600K survives both immediate and later stale or inconsistent directory reads', async () => {
+  for (const mismatch of ['older-revision', 'same-revision-stale-row', 'same-revision-consistent-wrong-value']) {
+    let saved = false;
+    const acknowledgement = contextModelCatalog(contextSettingsFixture({ selectedTokens: 600000, effectiveTokens: 600000 }));
+    acknowledgement.revision = 8;
+    const page = catalogPage(contextModelCatalog(), call => {
+      if (call.path !== '/api/model-settings') return;
+      if (call.method === 'POST') { saved = true; return json(acknowledgement); }
+      if (saved) {
+        const stale = contextModelCatalog();
+        if (mismatch !== 'older-revision') stale.revision = 8;
+        if (mismatch === 'same-revision-stale-row') stale.contextWindows = { 'cb-opus': 600000 };
+        return json(stale);
+      }
+    });
+    await settle(); contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+    page.elements.get('model-settings-save-button').trigger('click'); await settle();
+    assert.equal(contextChoiceFor(page).value, '600000', mismatch);
+    assert.equal(page.run('modelSettings.revision'), 8, mismatch);
+    assert.equal(page.run('modelSettings.models.find(model => model.id === "cb-opus").contextSettings.selectedTokens'), 600000);
+    assert.match(page.elements.get('model-settings-message').textContent, /后台已确认保存.*回读尚未同步/);
+    assert.doesNotMatch(page.elements.get('model-settings-message').textContent, /^已保存并确认/);
+    await page.run('refreshModelSettings()'); await settle();
+    assert.equal(contextChoiceFor(page).value, '600000', `A later refresh must keep the confirmed budget: ${mismatch}`);
+    assert.equal(page.run('modelSettings.revision'), 8);
+    assert.equal(page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'POST').length, 1);
+  }
+});
+
+test('an acknowledgement missing fields uses consistent readback while an unconfirmed 200 response retains the context draft', async () => {
+  for (const committed of [false, true]) {
+    const page = catalogPage(contextModelCatalog(), (call, api) => {
+      if (call.path !== '/api/model-settings' || call.method !== 'POST') return;
+      if (committed) {
+        api.models = contextModelCatalog(contextSettingsFixture({ selectedTokens: 600000, effectiveTokens: 600000 }));
+        api.models.revision = 8;
+      }
+      return json({ ok: true });
+    });
+    await settle(); contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+    page.elements.get('model-settings-save-button').trigger('click'); await settle();
+    assert.equal(contextChoiceFor(page).value, '600000');
+    assert.equal(page.run('modelSettingsDirty()'), !committed);
+    if (committed) assert.match(page.elements.get('model-settings-message').textContent, /已保存并确认/);
+    else assert.match(page.elements.get('model-settings-message').textContent, /尚未得到一致确认.*600K 的上下文草稿已保留/);
+  }
+});
+
+test('confirmed field protection permits capability changes and newer saved preferences but rejects missing fields until a new service starts', async () => {
+  const page = catalogPage(contextModelCatalog()); await settle();
+  contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  assert.equal(page.run('modelSettingsRevisionFloor'), 8);
+  const narrower = contextModelCatalog(contextSettingsFixture({ selectedTokens: 600000, maxTokens: 300000,
+    options: [300000], effectiveTokens: 300000, valid: false, note: '目录已缩小，当前回退默认。' }));
+  narrower.revision = 8; page.models = narrower;
+  await page.run('refreshModelSettings()'); await settle();
+  assert.match(listText(contextRowFor(page)), /目录已缩小/);
+  assert.equal(page.run('modelSettings.models.find(model => model.id === "cb-opus").contextSettings.valid'), false);
+  const newer = contextModelCatalog(contextSettingsFixture({ selectedTokens: 1000000, effectiveTokens: 1000000 }));
+  newer.revision = 9; page.models = newer;
+  await page.run('refreshModelSettings()'); await settle();
+  assert.equal(contextChoiceFor(page).value, '1000000'); assert.equal(page.run('modelSettingsRevisionFloor'), 9);
+  const incomplete = completeModels(); incomplete.revision = 10; page.models = incomplete;
+  await page.run('refreshModelSettings()'); await settle();
+  assert.equal(contextChoiceFor(page).value, '1000000'); assert.equal(page.run('modelSettingsRevisionFloor'), 9);
+  assert.match(page.elements.get('model-settings-error').textContent, /回读与已确认设置不一致/);
+  const replacement = contextModelCatalog(); replacement.revision = 2; page.models = replacement; page.token = 'context-guard-new-service-csrf';
+  await page.run('refreshStatus()'); await settle();
+  assert.equal(contextChoiceFor(page).value, ''); assert.equal(page.run('modelSettingsRevisionFloor'), 2);
+  assert.equal(page.run('modelSettingsConfirmation'), null);
+});
+
+test('consistent saved preferences with a reduced same-revision capability retain the latest limit rather than restoring acknowledgement metadata', async () => {
+  let posted = false;
+  const acknowledgement = contextModelCatalog(contextSettingsFixture({ selectedTokens: 600000, effectiveTokens: 600000 }));
+  acknowledgement.revision = 8;
+  const narrower = contextModelCatalog(contextSettingsFixture({ selectedTokens: 600000, maxTokens: 500000,
+    options: [300000], effectiveTokens: 300000, valid: false, note: '上游上限已缩小，当前采用默认预算。' }));
+  narrower.revision = 8;
+  const page = catalogPage(contextModelCatalog(), call => {
+    if (call.path !== '/api/model-settings') return;
+    if (call.method === 'POST') { posted = true; return json(acknowledgement); }
+    if (posted) return json(narrower);
+  });
+  await settle(); contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  assert.equal(page.run('modelSettings.models.find(model => model.id === "cb-opus").contextSettings.selectedTokens'), 600000);
+  assert.equal(page.run('modelSettings.models.find(model => model.id === "cb-opus").contextSettings.maxTokens'), 500000);
+  assert.equal(page.run('modelSettings.models.find(model => model.id === "cb-opus").contextSettings.valid'), false);
+  assert.equal(page.run('modelSettings.models.find(model => model.id === "cb-opus").contextSettings.effectiveTokens'), 300000);
+  assert.match(page.elements.get('model-settings-message').textContent, /保存值已确认.*当前不能使用所选上下文预算.*已保留最新目录/);
+  assert.match(listText(contextRowFor(page)), /上游声明上限 500K.*上游上限已缩小/);
+});
+
+test('a model settings POST network failure preserves 600K without an automatic retry or false saved message', async () => {
+  const page = catalogPage(contextModelCatalog(), call => {
+    if (call.path === '/api/model-settings' && call.method === 'POST') throw new TypeError('Fixture network failure');
+  });
+  await settle(); contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  assert.equal(contextChoiceFor(page).value, '600000'); assert.equal(page.run('modelSettingsDirty()'), true);
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  assert.match(page.elements.get('model-settings-message').textContent, /未能确认保存.*网络|未能确认保存.*network/);
+  assert.match(page.elements.get('model-settings-message').textContent, /600K 的上下文草稿已保留/);
+  assert.equal(page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'POST').length, 1);
+});
+
+test('a late old-service save acknowledgement cannot restore its revision or confirmation after service replacement', async () => {
+  const waiting = deferred(); let posted = false;
+  const page = catalogPage(contextModelCatalog(), call => {
+    if (call.path === '/api/model-settings' && call.method === 'POST') { posted = true; return waiting.promise; }
+  });
+  await settle(); contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle(); assert.equal(posted, true);
+  const current = contextModelCatalog(); current.revision = 2;
+  current.models.push({ id: 'new-service-model', name: 'Fresh service model', channel: 'A', enabled: false });
+  page.models = current; page.token = 'new-model-save-service-csrf';
+  await page.run('refreshStatus()'); await settle();
+  const oldAck = contextModelCatalog(contextSettingsFixture({ selectedTokens: 600000, effectiveTokens: 600000 })); oldAck.revision = 999;
+  const before = page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'GET').length;
+  waiting.resolve(json(oldAck)); await settle();
+  assert.equal(page.run('modelSettingsConfirmation'), null);
+  assert.equal(page.run('modelSettingsRevisionFloor'), 2);
+  assert.notEqual(page.run('modelSettings.revision'), 999);
+  assert.equal(contextChoiceFor(page).value, '600000'); assert.ok(inputFor(page, 'new-service-model'));
+  assert.match(page.elements.get('model-settings-message').textContent, /服务已重新连接.*旧保存结果未确认/);
+  assert.equal(page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'GET').length, before);
+});
+
+test('model context tiers save per-model changes alongside checkboxes and reset to the source default', async () => {
+  const page = catalogPage(contextModelCatalog()); await settle();
+  const choice = contextChoiceFor(page);
+  assert.deepEqual(choice.options.map(option => [option.value, option.textContent]), [
+    ['', '跟随模型默认（300K）'], ['300000', '300K'], ['600000', '600K'], ['1000000', '1M'], ['custom', '自定义'],
+  ]);
+  assert.equal(choice.value, ''); assert.equal(customContextFor(page).hidden, true);
+  assert.equal(modelInputs(page).length, 8);
+  assert.equal(page.elements.get('model-settings-save-button').disabled, true);
+  choice.value = '1000000'; choice.trigger('change');
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  assert.equal(inputFor(page, 'cb-opus').checked, true);
+  groupButton(page, 'CodeBuddy', '全选可用项').trigger('click');
+  assert.equal(contextChoiceFor(page).value, '1000000');
+  assert.equal(inputFor(page, 'cb-other').checked, true);
+  assert.equal(modelInputs(page).some(input => input.value === '1000000'), false);
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const save = page.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.deepEqual(save.body, { revision: 7, disabledModels: ['original-b', 'cursor-first', 'cursor-second', 'cursor-unavailable'],
+    contextWindows: { 'cb-opus': 1000000 } });
+  assert.equal(page.elements.get('model-settings-save-button').disabled, true);
+  assert.equal(contextChoiceFor(page).value, '1000000');
+  contextChoiceFor(page).value = ''; contextChoiceFor(page).trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const latest = page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'POST').at(-1);
+  assert.deepEqual(latest.body.contextWindows, { 'cb-opus': null });
+  assert.deepEqual(page.models.contextWindows, {});
+  assert.equal(page.models.models.find(model => model.id === 'cb-opus').contextSettings.effectiveTokens, 300000);
+});
+
+test('custom context accepts bounded integer budgets and rejects incomplete, fractional and oversized values before saving', async () => {
+  const page = catalogPage(contextModelCatalog()); await settle();
+  const choice = contextChoiceFor(page); choice.value = 'custom'; choice.trigger('change');
+  const input = customContextFor(page);
+  assert.equal(input.hidden, false); assert.equal(input.value, '300000');
+  assert.equal(input.min, '1000'); assert.equal(input.max, '1000000');
+  assert.equal(input.getAttribute('aria-label'), 'Opus：自定义上下文 Token 数');
+  for (const raw of ['', '0', '999', '300000.5', '1e6', '-20000', '1000001']) {
+    input.value = raw; input.trigger('input');
+    assert.equal(input.getAttribute('aria-invalid'), 'true', raw);
+    assert.equal(page.elements.get('model-settings-save-button').disabled, true, raw);
+    assert.equal(page.elements.get('model-settings-reset-button').disabled, false, raw);
+    assert.match(listText(contextRowFor(page)), /1,000–1,000,000 之间的整数/);
+    page.elements.get('model-settings-save-button').trigger('click');
+  }
+  assert.equal(page.calls.some(call => call.path === '/api/model-settings' && call.method === 'POST'), false);
+  input.value = '450000'; input.trigger('input');
+  assert.equal(input.getAttribute('aria-invalid'), 'false');
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const save = page.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.deepEqual(save.body.contextWindows, { 'cb-opus': 450000 });
+  assert.equal(contextChoiceFor(page).value, 'custom'); assert.equal(customContextFor(page).value, '450000');
+});
+
+test('unknown model limits stay unknown while custom budgets retain the explicit application bound', async () => {
+  const data = contextModelCatalog(contextSettingsFixture({ defaultTokens: null, maxTokens: null, options: [], effectiveTokens: 32000 }));
+  const page = catalogPage(data); await settle();
+  assert.deepEqual(contextChoiceFor(page).options.map(option => option.value), ['', 'custom']);
+  assert.match(listText(contextRowFor(page)), /默认窗口未知.*上游未声明上限/);
+  contextChoiceFor(page).value = 'custom'; contextChoiceFor(page).trigger('change');
+  const input = customContextFor(page); assert.equal(input.max, '10000000');
+  input.value = '10000001'; input.trigger('input'); assert.equal(page.elements.get('model-settings-save-button').disabled, true);
+  input.value = '2000000'; input.trigger('input'); assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const save = page.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.deepEqual(save.body.contextWindows, { 'cb-opus': 2000000 });
+  assert.match(listText(contextRowFor(page)), /上游未声明上限/);
+});
+
+test('context drafts survive search and catalog refresh while a same-field conflict retains the desired budget', async () => {
+  const page = catalogPage(contextModelCatalog(), (call, api) => {
+    if (call.path === '/api/model-settings' && call.method === 'POST') {
+      return json({ error: { message: '模型列表或开关已更新，请刷新后重试。' } }, 409);
+    }
+  });
+  await settle(); setModelGroupOpen(modelGroupFor(page, 'CodeBuddy'), true);
+  contextChoiceFor(page).value = '1000000'; contextChoiceFor(page).trigger('change');
+  const search = page.elements.get('model-settings-search'); search.value = 'Cursor'; search.trigger('input');
+  assert.equal(contextRowFor(page), undefined);
+  search.value = ''; search.trigger('input'); assert.equal(contextChoiceFor(page).value, '1000000');
+  assert.equal(modelGroupFor(page, 'CodeBuddy').open, true);
+  const fresh = contextModelCatalog(contextSettingsFixture({ selectedTokens: 600000, effectiveTokens: 600000 })); fresh.revision = 8;
+  page.models = fresh; await page.run('refreshModelSettings()'); await settle();
+  assert.equal(contextChoiceFor(page).value, '1000000');
+  assert.equal(page.run('modelSettings.revision'), 7);
+  assert.equal(page.run('modelSettings.models.find(model => model.id === "cb-opus").contextSettings.selectedTokens'), null);
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const attempted = page.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.equal(attempted.body.revision, 7); assert.deepEqual(attempted.body.contextWindows, { 'cb-opus': 1000000 });
+  assert.equal(contextChoiceFor(page).value, '1000000');
+  assert.equal(page.run('modelSettings.models.find(model => model.id === "cb-opus").contextSettings.selectedTokens'), 600000);
+  assert.equal(page.run('modelSettings.revision'), 8);
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  assert.match(page.elements.get('model-settings-message').textContent, /上下文已由其他页面修改.*1M 的上下文草稿已保留/);
+  assert.equal(page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'POST').length, 1);
+});
+
+test('reduced source limits revalidate unsaved budgets and reset restores both settings without a write', async () => {
+  const page = catalogPage(contextModelCatalog()); await settle();
+  contextChoiceFor(page).value = '1000000'; contextChoiceFor(page).trigger('change');
+  const input = inputFor(page, 'original-a'); input.checked = false; input.trigger('change');
+  const fresh = contextModelCatalog(contextSettingsFixture({ maxTokens: 600000, options: [300000, 600000] }));
+  page.models = fresh; await page.run('refreshModelSettings()'); await settle();
+  assert.equal(contextChoiceFor(page).value, '1000000');
+  assert.match(contextChoiceFor(page).options.find(option => option.value === '1000000').textContent, /当前不可用/);
+  assert.equal(page.elements.get('model-settings-save-button').disabled, true);
+  contextChoiceFor(page).value = '600000'; contextChoiceFor(page).trigger('change');
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  page.elements.get('model-settings-reset-button').trigger('click');
+  assert.equal(contextChoiceFor(page).value, ''); assert.equal(inputFor(page, 'original-a').checked, true);
+  assert.equal(page.elements.get('model-settings-save-button').disabled, true);
+  assert.equal(page.calls.some(call => call.path === '/api/model-settings' && call.method === 'POST'), false);
+});
+
+test('unchanged and inactive source context settings are omitted from the patch and legacy backends receive only checkbox fields', async () => {
+  const data = contextModelCatalog(contextSettingsFixture({ selectedTokens: 600000, effectiveTokens: 600000 }));
+  data.contextWindows['remote/offline/model'] = 750000;
+  const page = catalogPage(data); await settle();
+  contextChoiceFor(page).value = 'custom'; contextChoiceFor(page).trigger('change');
+  assert.equal(customContextFor(page).value, '600000');
+  assert.equal(page.elements.get('model-settings-save-button').disabled, true, 'Changing how the same saved number is entered is not a budget change.');
+  const input = inputFor(page, 'original-a'); input.checked = false; input.trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const save = page.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.equal(Object.hasOwn(save.body, 'contextWindows'), false);
+  assert.equal(page.models.contextWindows['remote/offline/model'], 750000);
+  const legacy = catalogPage(); await settle();
+  assert.equal(legacy.elements.get('model-settings-list').querySelectorAll('select').length, 0);
+  const oldInput = inputFor(legacy, 'original-a'); oldInput.checked = false; oldInput.trigger('change');
+  legacy.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const oldSave = legacy.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.deepEqual(Object.keys(oldSave.body).sort(), ['disabledModels', 'revision']);
+});
+
+test('a saved budget invalidated by source changes can be reset without blocking unrelated checkbox changes', async () => {
+  const page = catalogPage(contextModelCatalog(contextSettingsFixture({ selectedTokens: 1000000, maxTokens: 600000,
+    options: [300000, 600000], effectiveTokens: 300000, valid: false, note: '上游上限已变化，当前采用默认预算。' })));
+  await settle();
+  assert.equal(contextChoiceFor(page).value, 'custom');
+  assert.match(listText(contextRowFor(page)), /上游上限已变化，当前采用默认预算/);
+  assert.equal(page.elements.get('model-settings-save-button').disabled, true);
+  const input = inputFor(page, 'original-a'); input.checked = false; input.trigger('change');
+  assert.equal(page.elements.get('model-settings-save-button').disabled, false);
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const save = page.calls.find(call => call.path === '/api/model-settings' && call.method === 'POST');
+  assert.equal(Object.hasOwn(save.body, 'contextWindows'), false);
+  contextChoiceFor(page).value = ''; contextChoiceFor(page).trigger('change');
+  page.elements.get('model-settings-save-button').trigger('click'); await settle();
+  const reset = page.calls.filter(call => call.path === '/api/model-settings' && call.method === 'POST').at(-1);
+  assert.deepEqual(reset.body.contextWindows, { 'cb-opus': null });
+});
 
 test('account model groups start collapsed with native summaries, counts and separate bulk actions', async () => {
   const page = catalogPage(); await settle();
@@ -1720,7 +2101,7 @@ test('model capability detail separates explicit support, precise effort levels 
   const evidence = evidenceFor(page, 'cb-opus'), fields = detailFields(evidence);
   assert.match(fields['图片'], /^不支持/); assert.equal(fields['客户端工具'], '支持');
   assert.match(fields['思考'], /medium、xhigh/); assert.equal(fields['缓存'], '目录未声明');
-  assert.equal(fields['上下文'], '300,000 Token'); assert.equal(fields['指令处理'], '协议适配');
+  assert.equal(fields['上下文'], '目录默认 300,000 Token'); assert.equal(fields['指令处理'], '协议适配');
   assert.equal(fields['调用验证'], '已完成真实调用'); assert.ok(fields['验证时间']);
   assert.match(listText(evidence), /一次调用完成不代表图片、工具和缓存均已验证/);
   assert.equal(page.calls.some(call => call.method === 'POST'), false);

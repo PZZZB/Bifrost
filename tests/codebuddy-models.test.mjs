@@ -18,7 +18,39 @@ test('complete descriptors preserve explicit capabilities and never export arbit
   assert.equal(value.contextWindow, 300000); assert.equal(value.maxOutputTokens, 32000);
   assert.equal(JSON.stringify(value).includes('PRIVATE'), false);
   const minimal = codeBuddyModelAlias({ id: 'unknown-capabilities', name: 'Unknown' });
-  for (const field of ['efforts', 'inputModalities', 'contextWindow', 'supportsToolCall', 'supportsReasoning']) assert.equal(Object.hasOwn(minimal, field), false);
+  for (const field of ['efforts', 'inputModalities', 'contextWindow', 'contextWindowOptions', 'supportsToolCall', 'supportsReasoning']) assert.equal(Object.hasOwn(minimal, field), false);
+});
+
+test('context tiers preserve the declared default and survive public descriptor round trips', () => {
+  const value = codeBuddyModelAlias({ id: 'claude-opus-5.5', name: 'Claude-Opus-5.5',
+    contextWindow: { defaultLength: 300000, supportedLengths: [1000000, 300000, 600000, 300000], apiKey: 'PRIVATE_CONTEXT' },
+    maxInputTokens: 1000000, maxOutputTokens: 128000 });
+  assert.equal(value.contextWindow, 300000);
+  assert.deepEqual(value.contextWindowOptions, [300000, 600000, 1000000]);
+  assert.equal(value.maxInputTokens, 1000000); assert.equal(value.maxOutputTokens, 128000);
+  assert.deepEqual(publicCodeBuddyModel(value), value);
+  assert.equal(JSON.stringify(value).includes('PRIVATE_CONTEXT'), false);
+
+  const flattened = publicCodeBuddyModel({ ...value, contextWindowOptions: [600000, 300000, 600000] });
+  assert.deepEqual(flattened.contextWindowOptions, [300000, 600000]);
+  assert.equal(flattened.contextWindow, 300000);
+  assert.equal(Object.hasOwn(codeBuddyModelAlias({ id: 'no-tiers', contextWindow: 300000 }), 'contextWindowOptions'), false);
+});
+
+test('malformed or excessive context tier arrays are omitted without losing the default', () => {
+  const invalid = [null, {}, '1000000', [], [300000, '1000000'], [300000, { apiKey: 'PRIVATE_CONTEXT' }],
+    [300000, null], [300000, false], [300000, 0], [300000, -1], [300000, 1.5], [300000, 1000000001],
+    [300000, Number.NaN], [300000, Number.POSITIVE_INFINITY], [300000, Number.MAX_SAFE_INTEGER],
+    [300000, ...new Array(1)], Array.from({ length: 33 }, () => 300000)];
+  for (const options of invalid) {
+    const value = codeBuddyModelAlias({ id: 'bounded-context', contextWindow: { defaultLength: 300000, supportedLengths: options } });
+    assert.equal(value.contextWindow, 300000); assert.equal(Object.hasOwn(value, 'contextWindowOptions'), false);
+    assert.equal(Object.hasOwn(publicCodeBuddyModel({ ...value, contextWindowOptions: options }), 'contextWindowOptions'), false);
+    assert.equal(JSON.stringify(value).includes('PRIVATE_CONTEXT'), false);
+  }
+  const boundary = codeBuddyModelAlias({ id: 'bounded-context', contextWindow: { supportedLengths: [1000000000, 1] } });
+  assert.deepEqual(boundary.contextWindowOptions, [1, 1000000000]);
+  assert.equal(Object.hasOwn(boundary, 'contextWindow'), false);
 });
 
 test('specialized and explicitly disabled models remain visible with fixed safe reasons', () => {

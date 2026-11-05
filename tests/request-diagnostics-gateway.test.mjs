@@ -233,6 +233,22 @@ test('Anthropic streamed completion requires message_stop and end_turn; fixed er
   assert.doesNotMatch(JSON.stringify(state.records), /private|secret|reflected/);
 });
 
+for (const stream of [false, true]) {
+  test(`Anthropic ${stream ? 'SSE' : 'JSON'} diagnostics prefer a defined CodeBuddy code over api_error`, async t => {
+    const data = { type: 'error', error: { type: 'api_error', code: 'codebuddy_unsupported_delta', message: 'private reflected provider data' } };
+    const bytes = stream ? event('error', { error: data.error }) : JSON.stringify(data);
+    const state = await anthropicFixture(t, { request: async () => new Response(bytes, { status: stream ? 200 : 502,
+      headers: { 'content-type': stream ? 'text/event-stream' : 'application/json' } }) });
+    assert.equal(await (await state.send()).text(), bytes); await settle();
+    assert.equal(state.records.length, 1);
+    assert.equal(state.records[0].status, 'failed');
+    assert.equal(state.records[0].errorCode, 'codebuddy_unsupported_delta');
+    assert.equal(state.records[0].failureStage, stream ? 'stream' : 'upstream_response');
+    assert.equal(state.records[0].terminalVerified, false);
+    assert.doesNotMatch(JSON.stringify(state.records), /private|reflected|provider data/);
+  });
+}
+
 test('Anthropic diagnostics isolate unknown account names and skip metadata/token-count endpoints', async t => {
   const state = await anthropicFixture(t, { account: 'private person@example.test' });
   await (await state.send()).text(); await settle(); assert.equal(state.records[0].account, null);

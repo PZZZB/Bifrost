@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { ModelPolicy } from '../src/model-policy.mjs';
 import { appendCursorModels } from '../src/models.mjs';
 import { BridgeError } from '../src/storage.mjs';
+import { publicClientModel } from '../src/client-model-catalog.mjs';
 
 const A = 'gpt-original-fixture', B = 'B-gpt-6-astra', CB = 'claude-codebuddy-opus-5-5';
 const catalog = () => ({ catalog_version: 'original', metadata: { order: ['unchanged'] }, models: [
@@ -378,4 +379,157 @@ test('Claude call observations follow the authenticated account, accumulate feat
   assert.equal(policy.snapshot().models.find(m => m.id === 'Claude-sonnet').verification.state, 'unverified');
   await policy.observe({ models: [{ id: 'Claude-sonnet', name: 'Sonnet', available: true }] }, 'Claude', { authorizationVersion: version });
   row = policy.snapshot().models.find(m => m.id === 'Claude-sonnet'); assert.equal(row.capabilities.contextWindow.tokens, null);
+});
+
+const contextCatalog = (extra = {}) => ({ models: [{ id: CB, name: 'CodeBuddy · Opus 5.5', available: true,
+  contextWindow: 300000, contextWindowOptions: [300000, 600000, 1000000], maxInputTokens: 1000000, ...extra }] });
+
+test('legacy version-one policies load context defaults without rewriting saved switches', async t => {
+  const { path } = await fixture(t);
+  const legacy = JSON.stringify({ version: 1, revision: 7, disabledModels: [A], models: [
+    { id: A, name: 'Original', channel: 'A' }, { id: CB, name: 'Opus', channel: 'CodeBuddy' },
+  ] });
+  await writeFile(path, legacy);
+  const policy = await ModelPolicy.open({ path }), snapshot = policy.snapshot();
+  assert.equal(snapshot.available, true); assert.equal(snapshot.revision, 7);
+  assert.deepEqual(snapshot.disabledModels, [A]); assert.deepEqual(snapshot.contextWindows, {});
+  assert.ok(snapshot.models.every(model => model.contextSettings.selectedTokens === null));
+  assert.equal(await readFile(path, 'utf8'), legacy);
+  assert.deepEqual(policy.filterCatalog(catalog()).models.map(model => model.slug), [B, CB]);
+});
+
+test('a selected one-million-token CodeBuddy budget survives restart without becoming verified source metadata', async t => {
+  const { policy, path } = await fixture(t);
+  await policy.observe(contextCatalog(), 'CodeBuddy');
+  const result = await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [CB]: 1000000 } });
+  const selected = result.models.find(model => model.id === CB);
+  assert.equal(selected.contextSettings.effectiveTokens, 1000000); assert.equal(selected.contextSettings.defaultTokens, 300000);
+  assert.equal(selected.capabilities.contextWindow.tokens, 300000); assert.equal(selected.verification.state, 'unverified');
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(saved.version, 2); assert.deepEqual(saved.contextWindows, { [CB]: 1000000 });
+  assert.doesNotMatch(JSON.stringify(saved), /contextWindowOptions|capabilities|verification|instructions/);
+
+  const reopened = await ModelPolicy.open({ path }), afterRestart = reopened.snapshot().models.find(model => model.id === CB);
+  assert.deepEqual(reopened.snapshot().contextWindows, { [CB]: 1000000 });
+  assert.equal(afterRestart.contextSettings.selectedTokens, 1000000);
+  assert.equal(afterRestart.capabilities.contextWindow.support, null); assert.equal(afterRestart.capabilities.contextWindow.tokens, null);
+  assert.equal(afterRestart.verification.state, 'unverified');
+  await reopened.observe(contextCatalog(), 'CodeBuddy');
+  assert.equal(reopened.snapshot().models.find(model => model.id === CB).contextSettings.effectiveTokens, 1000000);
+});
+
+test('remote client budgets do not become source window guarantees or verification after model discovery', async t => {
+  const { policy } = await fixture(t), id = 'remote/bifrost/unknown-window';
+  const source = publicClientModel({ id, name: 'Unknown source', protocols: ['responses'],
+    capabilities: { contextWindow: { support: null, tokens: null, maxTokens: null, options: [] } },
+    contextSettings: { valid: true, selectedTokens: 1000000, effectiveTokens: 1000000 } });
+  await policy.observe({ models: [source] }, 'Bifrost');
+  const row = policy.snapshot().models.find(model => model.id === id);
+  assert.equal(row.capabilities.contextWindow.support, null); assert.equal(row.capabilities.contextWindow.tokens, null);
+  assert.equal(row.capabilities.contextWindow.maxTokens, null); assert.equal(row.capabilities.contextWindow.clientTokens, 1000000);
+  assert.equal(row.verification.state, 'unverified');
+  assert.equal(row.contextSettings.defaultTokens, 1000000); assert.equal(row.contextSettings.effectiveTokens, 1000000);
+  assert.equal(row.contextSettings.selectedTokens, null);
+});
+
+test('context updates are patches, preserve old switch clients and reset to source defaults with null', async t => {
+  const { policy } = await fixture(t);
+  await policy.observe(catalog()); await policy.observe(contextCatalog(), 'CodeBuddy');
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [B], contextWindows: { [CB]: 1000000, [A]: 128000 } });
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [A] });
+  assert.deepEqual(policy.snapshot().contextWindows, { [CB]: 1000000, [A]: 128000 });
+  assert.deepEqual(policy.snapshot().disabledModels, [A]);
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [CB]: 450000 } });
+  assert.deepEqual(policy.snapshot().contextWindows, { [CB]: 450000, [A]: 128000 });
+  assert.equal(policy.snapshot().models.find(model => model.id === CB).contextSettings.effectiveTokens, 450000);
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [CB]: null } });
+  assert.deepEqual(policy.snapshot().contextWindows, { [A]: 128000 });
+  const restored = policy.snapshot().models.find(model => model.id === CB).contextSettings;
+  assert.equal(restored.selectedTokens, null); assert.equal(restored.effectiveTokens, 300000);
+});
+
+test('invalid context selections reject the entire combined update without changing switches or saved configuration', async t => {
+  const { policy, path } = await fixture(t);
+  await policy.observe(catalog()); await policy.observe(contextCatalog(), 'CodeBuddy');
+  const before = policy.snapshot(), saved = await readFile(path, 'utf8');
+  for (const contextWindows of [null, [], { unknown: 300000 }, { 'bad\nmodel': 300000 },
+    ...[-1, 0, 999, 300000.5, Number.NaN, Number.POSITIVE_INFINITY, '1000000', true, {}, 1000001]
+      .map(tokens => ({ [CB]: tokens }))]) {
+    await assert.rejects(policy.update({ revision: before.revision, disabledModels: [A], contextWindows }), isError(400, 'invalid_model_policy'));
+  }
+  assert.deepEqual(policy.snapshot(), before); assert.equal(await readFile(path, 'utf8'), saved);
+});
+
+test('context updates use the same revision boundary and copy queued patch values', async t => {
+  const { policy } = await fixture(t);
+  await policy.observe(contextCatalog(), 'CodeBuddy');
+  const revision = policy.snapshot().revision;
+  const input = { revision, disabledModels: [], contextWindows: { [CB]: 600000 } };
+  const updating = policy.update(input); input.contextWindows[CB] = 1000000;
+  const competing = policy.update({ revision, disabledModels: [CB], contextWindows: { [CB]: 1000000 } });
+  await updating; await assert.rejects(competing, isError(409, 'model_policy_conflict'));
+  assert.deepEqual(policy.snapshot().contextWindows, { [CB]: 600000 });
+  assert.deepEqual(policy.snapshot().disabledModels, []);
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [CB]: 450000 } });
+  assert.deepEqual(policy.snapshot().contextWindows, { [CB]: 450000 });
+});
+
+test('a failed context save leaves both live preferences and last persisted policy intact', async t => {
+  const { policy, path, directory } = await fixture(t);
+  await policy.observe(contextCatalog(), 'CodeBuddy');
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [CB]: 600000 } });
+  const before = policy.snapshot(), saved = await readFile(path, 'utf8'), previousPath = join(directory, 'saved-context.json');
+  await rename(path, previousPath); await mkdir(path);
+  await assert.rejects(policy.update({ revision: before.revision, disabledModels: [CB], contextWindows: { [CB]: 1000000 } }),
+    isError(503, 'model_policy_write_failed'));
+  assert.deepEqual(policy.snapshot(), before); assert.equal(await readFile(previousPath, 'utf8'), saved);
+});
+
+test('source context reductions keep the saved preference visible but never publish an out-of-range budget', async t => {
+  const { policy, path } = await fixture(t);
+  await policy.observe(contextCatalog(), 'CodeBuddy');
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [CB]: 1000000 } });
+  await policy.observe(contextCatalog({ contextWindow: 128000, contextWindowOptions: [128000, 256000], maxInputTokens: 256000 }), 'CodeBuddy');
+  const row = policy.snapshot().models.find(model => model.id === CB);
+  assert.equal(row.contextSettings.valid, false); assert.equal(row.contextSettings.selectedTokens, 1000000);
+  assert.equal(row.contextSettings.effectiveTokens, 128000); assert.equal(row.capabilities.contextWindow.maxTokens, 256000);
+  const client = policy.filterCatalog({ models: [{ slug: CB, context_window: 128000, max_context_window: 128000 }] });
+  assert.equal(client.models[0].context_window, 128000);
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')).contextWindows, { [CB]: 1000000 });
+});
+
+test('a lowered explicit source maximum invalidates saved budgets even while old tiers remain advertised', async t => {
+  const { policy } = await fixture(t);
+  await policy.observe(contextCatalog(), 'CodeBuddy');
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [CB]: 1000000 } });
+  await policy.observe(contextCatalog({ maxInputTokens: 500000 }), 'CodeBuddy');
+  const row = policy.snapshot().models.find(model => model.id === CB);
+  assert.equal(row.capabilities.contextWindow.tokens, 300000); assert.equal(row.capabilities.contextWindow.maxTokens, 500000);
+  assert.deepEqual(row.capabilities.contextWindow.options, [300000]);
+  assert.equal(row.contextSettings.valid, false); assert.equal(row.contextSettings.selectedTokens, 1000000);
+  assert.equal(row.contextSettings.effectiveTokens, 300000);
+  assert.equal(policy.filterCatalog({ models: [{ slug: CB, context_window: 300000, max_context_window: 300000 }] }).models[0].context_window, 300000);
+  await assert.rejects(policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [CB]: 1000000 } }),
+    isError(400, 'invalid_model_policy'));
+  assert.deepEqual(policy.snapshot().contextWindows, { [CB]: 1000000 });
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [CB]: 450000 } });
+  assert.equal(policy.snapshot().models.find(model => model.id === CB).contextSettings.effectiveTokens, 450000);
+});
+
+test('native A and B defaults remain exact while explicit budgets discard only their old fixed compaction threshold', async t => {
+  const { policy } = await fixture(t);
+  const native = { models: [{ slug: A, display_name: 'A', context_window: 240000, max_context_window: 1000000,
+    effective_context_window_percent: 95, auto_compact_token_limit: 210000, model_messages: { instructions_template: 'A instructions' } },
+  { slug: B, display_name: 'B', context_window: 272000, max_context_window: 1000000,
+    effective_context_window_percent: 95, auto_compact_token_limit: 250000, model_messages: { instructions_template: 'B instructions' } }] };
+  const before = structuredClone(native);
+  await policy.observe(native);
+  assert.deepEqual(policy.filterCatalog(native), native);
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [A]: 128000, [B]: 300000 } });
+  const selected = policy.filterCatalog(native);
+  assert.deepEqual(selected.models.map(model => [model.context_window, model.max_context_window, model.auto_compact_token_limit]),
+    [[128000, 128000, null], [300000, 300000, null]]);
+  assert.deepEqual(selected.models.map(model => model.model_messages), native.models.map(model => model.model_messages));
+  assert.ok(selected.models.every(model => model.effective_context_window_percent === 95));
+  assert.deepEqual(native, before);
 });

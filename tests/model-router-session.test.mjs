@@ -31,3 +31,25 @@ test('Desktop retains its default source pin after a Server-only untracked resol
   assert.equal(resolve('opus').scope, original.scope);
   assert.throws(() => resolve('opus', { trackSession: 'false' }), { code: 'desktop_session_invalid', status: 400 });
 });
+
+test('read-only snapshots share owner/model/authorization while execution sessions remain independent', async () => {
+  const { router, provider, resolve } = fixture(), calls = [];
+  const parent = resolve('opus', { trackSession: false }), child = resolve('opus', { trackSession: false, session: 'side-chat' });
+  assert.notEqual(parent.scope, child.scope); assert.equal(parent.snapshotScope, child.snapshotScope);
+  assert.notEqual(parent.snapshotScope, parent.scope);
+  assert.notEqual(parent.snapshotScope, resolve('sonnet', { trackSession: false }).snapshotScope);
+  assert.notEqual(parent.snapshotScope, resolve('opus', { trackSession: false, owner: 'other-owner' }).snapshotScope);
+  provider.request = async (protocol, value) => { calls.push({ protocol, ...value }); return Response.json({}); };
+  await assert.rejects(router.request(child, { body: { model: child.id }, snapshot: true }), { code: 'desktop_state_mismatch' });
+  assert.equal(calls.length, 0);
+  provider.supportsSnapshotState = () => true;
+  await router.request(parent, { body: { model: parent.id }, snapshot: true });
+  await router.request(child, { body: { model: child.id }, snapshot: true });
+  assert.equal(calls[0].scope, calls[1].scope); assert.equal(calls[0].scope, parent.snapshotScope);
+  assert.equal(calls[0].session, parent.scope); assert.equal(calls[1].session, child.scope);
+  provider.generation = 'changed-authorization';
+  const reauthorized = resolve('opus', { trackSession: false });
+  assert.notEqual(reauthorized.snapshotScope, parent.snapshotScope);
+  await assert.rejects(router.request(parent, { body: { model: parent.id }, snapshot: true }), { code: 'desktop_source_changed' });
+  assert.equal(calls.length, 2);
+});

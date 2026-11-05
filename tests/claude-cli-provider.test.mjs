@@ -17,6 +17,7 @@ class Events {
   values = [];
   readers = [];
   ended = false;
+  failure = null;
   push(value) {
     const reader = this.readers.shift();
     if (reader) reader({ value, done: false }); else this.values.push(value);
@@ -25,8 +26,13 @@ class Events {
     this.ended = true;
     for (const reader of this.readers.splice(0)) reader({ done: true });
   }
+  fail(error) {
+    this.failure = error; this.ended = true;
+    for (const reader of this.readers.splice(0)) reader(Promise.reject(error));
+  }
   next() {
     if (this.values.length) return Promise.resolve({ value: this.values.shift(), done: false });
+    if (this.failure) return Promise.reject(this.failure);
     if (this.ended) return Promise.resolve({ done: true });
     return new Promise(resolve => this.readers.push(resolve));
   }
@@ -632,6 +638,85 @@ test('tool results from another client identity cannot resume a pending tool ses
   assert.equal([...state.hub.runs.values()][0].expected.size, 1);
 });
 
+test('foreign tool-result probes cannot reveal known pending IDs or release their MCP result', async t => {
+  const state = await fixture(t), first = await toolTurn(state), run = [...state.hub.runs.values()][0];
+  let released = false;
+  const returned = rpc(first.worker, 'tools/call', toolParams('tool-one')).then(value => { released = true; return value; });
+  await until(() => run.calls.size === 1);
+  const body = continuation(first.body, first.message, [{ type: 'tool_result', tool_use_id: 'tool-one', content: 'Verified owner result.' }]);
+  let expected;
+  for (const callId of ['tool-one', 'unknown-tool-id']) {
+    const probe = structuredClone(body); probe.messages.at(-1).content[0].tool_use_id = callId;
+    const response = await state.request(probe, { identity: 'another-client' });
+    assert.equal(response.status, 409); const data = await response.json();
+    assert.equal(data.error.code, 'claude_tool_session_missing');
+    if (!expected) expected = data; else assert.deepEqual(data, expected);
+    assert.equal(first.worker.sends.length, 1); assert.equal(run.calls.size, 1); assert.equal(run.expected.size, 1); assert.equal(released, false);
+  }
+  const otherModel = await state.request({ ...body, model: 'another-model' });
+  assert.equal(otherModel.status, 409); assert.deepEqual(await otherModel.json(), expected);
+  assert.equal(first.worker.sends.length, 1); assert.equal(run.calls.size, 1); assert.equal(released, false);
+  const pending = state.request(body);
+  assert.deepEqual((await returned).value.result.content, [{ type: 'text', text: 'Verified owner result.' }]);
+  answer(first.worker); assert.equal((await pending).status, 200); assert.equal(state.workers.length, 1);
+});
+
+test('an error before the continued message start keeps its safe source category and a retry identifies the missing tool session', async t => {
+  const state = await fixture(t), first = await toolTurn(state), privateText = 'PRIVATE_CONTINUATION_ERROR_sk-secret_/Users/private';
+  const returned = rpc(first.worker, 'tools/call', toolParams('tool-one'));
+  await until(() => [...state.hub.runs.values()][0].calls.size === 1);
+  const body = continuation(first.body, first.message, [{ type: 'tool_result', tool_use_id: 'tool-one', content: 'Verified client result.' }]);
+  const response = await state.request({ ...body, stream: true }); assert.equal(response.status, 200);
+  assert.deepEqual((await returned).value.result.content, [{ type: 'text', text: 'Verified client result.' }]);
+  first.worker.emit({ type: 'error', error: { type: 'invalid_request_error', message: privateText } });
+  const wire = await response.text();
+  assert.match(wire, /"code":"claude_invalid_request"/); assert.doesNotMatch(wire, /PRIVATE_CONTINUATION_ERROR|sk-secret|消息起止顺序|message_start/);
+  assert.equal(state.hub.runs.size, 0); assert.equal(first.worker.closes, 1);
+  const retry = await state.request({ ...body, stream: true }); assert.equal(retry.status, 409);
+  const error = (await retry.json()).error; assert.equal(error.code, 'claude_tool_session_missing');
+  assert.match(error.message, /此前的来源错误/); assert.equal(state.workers.length, 1); assert.equal(first.worker.sends.length, 1);
+  const recovered = state.request({ ...body, messages: [...body.messages,
+    { role: 'user', content: 'Continue using the tool result already returned.' }] });
+  await until(() => state.workers[1]?.sends.length);
+  const rebuilt = state.workers[1], imported = JSON.stringify(rebuilt.sends[0]);
+  assert.equal(rebuilt.options.resumeSessionId, undefined); assert.notEqual(rebuilt.sessionId, first.worker.sessionId);
+  assert.equal(rebuilt.sends.length, 1); assert.equal(first.worker.sends.length, 1); assert.equal(state.workers.length, 2);
+  assert.equal((imported.match(/Verified client result\./g) ?? []).length, 1); assert.match(imported, /tool_result/);
+  assert.match(imported, /tool_use/); assert.match(imported, /Read fixture\.|Fixture question\./);
+  assert.ok(rebuilt.sends[0].every(block => block.type === 'text'));
+  assert.equal(rebuilt.sends[0].at(-1).text, 'Continue using the tool result already returned.');
+  answer(rebuilt, 'Continued from the preserved tool result.');
+  const continued = await recovered; assert.equal(continued.status, 200);
+  assert.equal((await continued.json()).content[0].text, 'Continued from the preserved tool result.');
+});
+
+for (const [packet, code, status] of [
+  [{ type: 'assistant', error: 'rate_limit', parent_tool_use_id: null, message: { content: ['PRIVATE_SDK_BODY'] } }, 'claude_rate_limited', 429],
+  [{ type: 'assistant', error: 'PRIVATE_SDK_BODY', message: {} }, 'claude_upstream_error', 502],
+  [{ type: 'result', subtype: 'error_max_budget_usd', is_error: true, errors: ['PRIVATE_SDK_BODY'] }, 'claude_budget_limit', 402],
+  [{ type: 'result', subtype: 'PRIVATE_SDK_BODY', is_error: true, errors: ['PRIVATE_SDK_BODY'] }, 'claude_upstream_error', 502],
+]) test(`SDK ${packet.type} errors expose ${code} without reflecting source text`, async t => {
+  const state = await fixture(t), pending = state.request(input);
+  await until(() => state.workers[0]?.sends.length);
+  state.workers[0].events.push(packet);
+  const response = await pending, wire = await response.text(); assert.equal(response.status, status);
+  assert.equal(JSON.parse(wire).error.code, code); assert.doesNotMatch(wire, /PRIVATE_SDK_BODY/);
+  assert.equal(state.workers[0].closes, 1); assert.equal(state.workers.length, 1);
+});
+
+for (const [fields, code, status] of [[{ code: 'claude_rate_limited' }, 'claude_rate_limited', 429],
+  [{ status: 429 }, 'claude_rate_limited', 429], [{}, null, 502]]) {
+  test(`worker event queue exceptions preserve ${code ?? 'the existing generic failure'} without source text`, async t => {
+    const state = await fixture(t), pending = state.request(input);
+    await until(() => state.workers[0]?.sends.length);
+    state.workers[0].events.fail(Object.assign(new Error('PRIVATE_QUEUE_EXCEPTION_sk-secret_/Users/private'), fields));
+    const response = await pending, wire = await response.text(); assert.equal(response.status, status);
+    assert.equal(JSON.parse(wire).error.code ?? null, code);
+    assert.doesNotMatch(wire, /PRIVATE_QUEUE_EXCEPTION|sk-secret|\/Users\/private/);
+    assert.equal(state.workers.length, 1); assert.equal(state.workers[0].closes, 1);
+  });
+}
+
 test('missing native tool-use identity fails closed and stops the affected run', async t => {
   const state = await fixture(t);
   const first = await toolTurn(state);
@@ -769,8 +854,8 @@ test('SDK errors after a model stop do not produce a successful JSON message', a
   const worker = state.workers[0]; startMessage(worker);
   worker.emit({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 0 } });
   worker.emit({ type: 'message_stop' }); worker.result({ subtype: 'error_max_turns', is_error: true });
-  const response = await pending; assert.equal(response.status, 502);
-  assert.equal((await response.json()).type, 'error');
+  const response = await pending; assert.equal(response.status, 400);
+  const body = await response.json(); assert.equal(body.type, 'error'); assert.equal(body.error.code, 'claude_turn_limit');
   assert.equal(worker.closes, 1);
 });
 

@@ -168,6 +168,33 @@ test('configuration paths with links and relative injected paths are rejected', 
   assert.throws(() => createFileModelControl({ ...f.options, configPath: 'relative.json' }), TypeError);
 });
 
+test('a linked ancestor is rejected without inspecting a descendant that the host cannot stat', async t => {
+  const f = await fixture(t), link = join(f.root, 'linked'), configPath = join(link, 'models.json'), inspected = [];
+  const control = createFileModelControl({ ...f.options, configPath, fs: { async lstat(path) {
+    inspected.push(path);
+    if (path === link) return { isSymbolicLink: () => true };
+    if (path === configPath) throw Object.assign(new Error('PRIVATE junction diagnostic'), { code: 'UNKNOWN' });
+    return fs.lstat(path);
+  } } });
+  await assert.rejects(control.setMode('gateway', { models }), e => e.code === 'client_config_link');
+  assert.equal(inspected.includes(link), true); assert.equal(inspected.includes(configPath), false);
+  await assert.rejects(fs.stat(configPath), e => e.code === 'ENOENT');
+  await assert.rejects(fs.stat(f.statePath), e => e.code === 'ENOENT');
+});
+
+test('an unreadable ancestor remains a failure and cannot write configuration or recovery state', async t => {
+  const f = await fixture(t, { retained: 'original' }), before = await fs.readFile(f.configPath), inspected = [];
+  const control = createFileModelControl({ ...f.options, fs: { async lstat(path) {
+    inspected.push(path);
+    if (path === dirname(f.configPath)) throw Object.assign(new Error('PRIVATE storage diagnostic'), { code: 'UNKNOWN' });
+    return fs.lstat(path);
+  } } });
+  await assert.rejects(control.setMode('gateway', { models }), e => e.code === 'client_config_write_failed' && !e.message.includes('PRIVATE'));
+  assert.equal(inspected.includes(f.configPath), false);
+  assert.deepEqual(await fs.readFile(f.configPath), before);
+  await assert.rejects(fs.stat(f.statePath), e => e.code === 'ENOENT');
+});
+
 test('a merge exceeding the complete model limit fails before writing any recovery state', async t => {
   const f = await fixture(t, { models: Array.from({ length: 2048 }, (_, i) => ({ id: `foreign-${i}` })) });
   const before = await fs.readFile(f.configPath);

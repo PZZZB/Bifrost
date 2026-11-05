@@ -2,7 +2,11 @@ const EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'm
 /** A source-owned, data-only capability description; never contains credentials or endpoints. */
 export function modelCapabilities(value = {}) {
   const result = {};
-  for (const field of ['contextWindow', 'maxOutputTokens']) if (Number.isSafeInteger(value[field]) && value[field] > 0 && value[field] <= 10_000_000) result[field] = value[field];
+  for (const field of ['contextWindow', 'clientContextWindow', 'maxInputTokens', 'maxOutputTokens']) if (Number.isSafeInteger(value[field]) && value[field] > 0 && value[field] <= 10_000_000) result[field] = value[field];
+  if (Array.isArray(value.contextWindowOptions) && value.contextWindowOptions.length <= 32
+    && Array.from(value.contextWindowOptions).every(tokens => Number.isSafeInteger(tokens) && tokens > 0 && tokens <= 10_000_000)) {
+    result.contextWindowOptions = [...new Set(value.contextWindowOptions)].sort((a, b) => a - b);
+  }
   if (Array.isArray(value.inputModalities)) result.inputModalities = [...new Set(value.inputModalities.filter(item => ['text', 'image'].includes(item)))];
   if (Array.isArray(value.reasoningEfforts)) result.reasoningEfforts = [...new Set(value.reasoningEfforts.filter(item => EFFORTS.has(item)))];
   if (result.reasoningEfforts?.includes(value.defaultReasoningEffort)) result.defaultReasoningEffort = value.defaultReasoningEffort;

@@ -26,7 +26,8 @@ export class CodeBuddyLocal {
         if (generation !== this.generation || this.#abort.signal.aborted) return;
         this.#models = models.filter(model => model.available).map(model => ({ id: model.id, name: model.name,
           available: true, protocols: ['chat-completions', 'responses', 'messages'],
-          capabilities: { contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens,
+          capabilities: { contextWindow: model.contextWindow, contextWindowOptions: model.contextWindowOptions,
+            maxInputTokens: model.maxInputTokens, maxOutputTokens: model.maxOutputTokens,
             inputModalities: model.inputModalities, reasoningEfforts: model.efforts,
             defaultReasoningEffort: model.defaultEffort, reasoningSummaries: model.supportsReasoningSummary === true } }));
         this.#version = generation; this.#state = 'ready';

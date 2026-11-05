@@ -39,7 +39,7 @@
 
       <section class="workspace-panel" id="panel-console" role="tabpanel" aria-labelledby="tab-console" tabindex="0">
         <section class="panel pool-overview" id="pool-overview" aria-label="当前网关概览"><p class="panel-copy">正在读取当前网关的账号与模型…</p></section>
-        <section class="world-tree" aria-labelledby="world-tree-title" data-legacy-overview hidden>
+        <section class="world-tree" aria-labelledby="world-tree-title">
           <div class="world-tree-heading"><div><span class="eyebrow">YGGDRASIL / THE WORLD TREE</span><h2 id="world-tree-title">万千枝叶，一座彩虹桥。</h2></div><span class="world-map-label"><span class="map-spark" aria-hidden="true"></span>渠道配置视图</span></div>
           <div class="world-tree-layout">
             <div class="world-map">
@@ -127,13 +127,13 @@
 
           <section class="panel model-settings-panel" aria-labelledby="model-settings-title">
             <div class="panel-heading"><div><div class="eyebrow">PUBLISHED MODELS</div><h2 id="model-settings-title">模型选择</h2></div><span class="pill pending" id="model-settings-state">读取中</span></div>
-            <p class="panel-copy" id="model-settings-description">按账号目录管理当前网关开放的模型；不可用或尚未适配的模型会显示原因。保存后在客户端刷新模型目录，或重开客户端。</p>
+            <p class="panel-copy" id="model-settings-description">按账号目录选择模型，并设置每个模型的上下文档位或自定义预算。设置不会提高模型本身的上限；保存后请刷新客户端模型目录，或重开客户端。</p>
             <p class="footnote">模型显示前缀与账号排列顺序可在<a href="#accounts">账号池</a>设置。原生模型固定在前，同一账号的模型连续排列。</p>
             <label class="model-search-label" for="model-settings-search">搜索模型或账号<input type="search" id="model-settings-search" placeholder="输入模型名称、ID 或账号" autocomplete="off" disabled></label>
             <p class="model-settings-summary" id="model-settings-summary" role="status" aria-live="polite"></p>
             <p class="gateway-error" id="model-settings-discovery" role="status" hidden></p>
             <div class="model-settings-list" id="model-settings-list" aria-label="账号模型目录"><p class="model-settings-empty">正在读取模型目录…</p></div>
-            <div class="button-row model-settings-actions"><button class="button primary" id="model-settings-save-button" type="button" disabled>保存模型选择</button><button class="button quiet" id="model-settings-reset-button" type="button" disabled>恢复勾选</button><button class="button quiet" id="model-settings-refresh-button" type="button" disabled>刷新账号目录</button></div>
+            <div class="button-row model-settings-actions"><button class="button primary" id="model-settings-save-button" type="button" disabled>保存模型设置</button><button class="button quiet" id="model-settings-reset-button" type="button" disabled>撤销未保存更改</button><button class="button quiet" id="model-settings-refresh-button" type="button" disabled>刷新账号目录</button></div>
             <p class="footnote">批量选择仅作用于本账号当前搜索结果中的可用模型。目录在打开页面、授权变更或手动刷新时更新；模型功能取决于入口协议与上游适配。</p>
             <p class="inline-status management-message" id="model-settings-message" role="status" aria-live="polite"></p>
             <div class="gateway-error" id="model-settings-error" role="status" hidden></div>

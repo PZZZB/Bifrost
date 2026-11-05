@@ -165,7 +165,7 @@ const clientModels = () => {
     ? account.kind === 'bifrost' && model.id.startsWith(`remote/${account.binding.sourceId}/`) : account.binding.slot === model.channel))
   .map(model => ({ id: model.id, name: model.name, channel: model.channel, ...(Number.isInteger(model.priority) ? { priority: model.priority } : {}),
     enabled: model.enabled !== false && sourceAllowed(model.channel, model.id) && !modelPolicy.snapshot().disabledModels.includes(model.id), available: model.available,
-    capabilities: model.capabilities,
+    capabilities: model.capabilities, contextSettings: model.contextSettings,
     protocols: model.protocols ?? (model.channel === 'Claude' ? ['chat-completions', 'messages']
       : ['chat-completions', 'responses', ...(model.channel === 'CodeBuddy' ? ['messages'] : [])]) }));
   return accountPool ? accountPool.presentModels(models) : models;

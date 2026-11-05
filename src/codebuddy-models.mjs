@@ -5,6 +5,8 @@ const EFFORT = /^[A-Za-z0-9_-]{1,64}$/;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const text = (value, limit = 256) => typeof value === 'string' && value.length > 0 && value.length <= limit && !/[\x00-\x1f\x7f]/.test(value);
 const positive = value => Number.isSafeInteger(value) && value > 0 && value <= 1_000_000_000;
+const contextOptions = value => Array.isArray(value) && value.length > 0 && value.length <= 32
+  && Array.from(value).every(positive) ? [...new Set(value)].sort((a, b) => a - b) : null;
 const specialized = Object.freeze({ 'completion-gf': '此条目用于代码补全，尚未适配文本工具对话。',
   'codewise-rewrite': '此条目用于代码重写，尚未适配文本工具对话。',
   'codewise-jump': '此条目用于代码跳转，尚未适配文本工具对话。',
@@ -44,6 +46,8 @@ function capabilities(source) {
   if (typeof reasoning.canDisableThinking === 'boolean') result.canDisableThinking = reasoning.canDisableThinking;
   const context = positive(source.contextWindow) ? source.contextWindow : source.contextWindow?.defaultLength;
   if (positive(context)) result.contextWindow = context;
+  const options = contextOptions(object(source.contextWindow) ? source.contextWindow.supportedLengths : source.contextWindowOptions);
+  if (options) result.contextWindowOptions = options;
   for (const field of ['maxInputTokens', 'maxOutputTokens']) if (positive(source[field])) result[field] = source[field];
   return result;
 }

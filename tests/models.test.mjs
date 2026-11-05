@@ -253,7 +253,7 @@ test('CodeBuddy declares the adapter capabilities and does not inherit GPT-speci
     additional_speed_tiers: ['fast'],
     comp_hash: 'gpt-only-compaction',
     model_specialty: 'gpt-only-specialty',
-    multi_agent_version: 'v2',
+    multi_agent_version: 'disabled',
     auto_review_model_override: 'gpt-only-reviewer',
   });
   const model = appendCodeBuddyModel(aData).models.at(-1);
@@ -262,6 +262,7 @@ test('CodeBuddy declares the adapter capabilities and does not inherit GPT-speci
   assert.deepEqual(model.input_modalities, ['text', 'image']);
   assert.equal(model.supports_parallel_tool_calls, true);
   assert.equal(model.tool_mode, 'direct');
+  assert.equal(model.apply_patch_tool_type, 'freeform');
   assert.equal(model.context_window, 200000);
   assert.equal(model.max_context_window, 200000);
   assert.equal(model.supports_search_tool, true);
@@ -272,7 +273,7 @@ test('CodeBuddy declares the adapter capabilities and does not inherit GPT-speci
   assert.equal(model.support_verbosity, false);
   assert.deepEqual(model.experimental_supported_tools, []);
   assert.deepEqual(model.additional_speed_tiers, []);
-  assert.equal(model.multi_agent_version, null);
+  assert.equal(model.multi_agent_version, 'v2');
   assert.equal(model.upgrade, null);
   assert.equal(model.availability_nux, null);
   for (const key of ['guardian', 'comp_hash', 'model_specialty', 'auto_review_model_override']) {
@@ -332,6 +333,8 @@ test('Cursor independent catalog declares default SDK reasoning and serialized c
   assert.match(value.description, /Cursor default reasoning/); assert.match(value.description, /Codex effort levels do not apply/);
   assert.equal(value.supports_reasoning_summary_parameter, false); assert.equal(value.supports_parallel_tool_calls, false);
   assert.equal(value.supports_search_tool, true); assert.equal(value.use_responses_lite, false);
+  assert.equal(value.apply_patch_tool_type, 'freeform'); assert.equal(value.multi_agent_version, 'v2');
+  assert.equal(value.tool_mode, 'direct');
   assert.equal(Object.hasOwn(value, 'input_modalities'), false, 'An SDK descriptor without image metadata must not become text-only.');
   assert.equal(value.model_messages.instructions_template, value.base_instructions);
   assert.match(value.base_instructions, /Native Cursor approval requests cannot be forwarded/);
@@ -368,8 +371,43 @@ test('CodeBuddy publishes all usable account aliases with their actual capabilit
   assert.deepEqual(added.map(item => item.slug), sources.slice(0, 2).map(item => item.id));
   assert.deepEqual(added[1].input_modalities, ['text']); assert.equal(added[1].context_window, 64000);
   assert.deepEqual(added[1].supported_reasoning_levels.map(item => item.effort), ['low', 'high']);
+  assert.ok(added.every(model => model.apply_patch_tool_type === 'freeform' && model.multi_agent_version === 'v2'));
   assert.equal(added[1].default_reasoning_level, null); assert.equal(added[1].supports_parallel_tool_calls, false);
   assert.deepEqual(original, before); assert.equal(JSON.stringify(added).includes('original instructions'), false);
+});
+
+test('CodeBuddy account defaults above 200K remain intact instead of being capped or replaced by the largest tier', () => {
+  const sources = [{ id: CODEBUDDY_MODEL.id, name: 'Opus', available: true, contextWindow: 300000,
+    contextWindowOptions: [300000, 600000, 1000000], maxInputTokens: 1000000 },
+  { id: 'CodeBuddy-long-model', name: 'Long model', available: true, contextWindow: 1000000 }];
+  const before = structuredClone(sources), added = appendCodeBuddyModels({ models: [] }, sources).models;
+  assert.deepEqual(added.map(model => [model.context_window, model.max_context_window]), [[300000, 300000], [1000000, 1000000]]);
+  assert.ok(added.every(model => model.effective_context_window_percent === 90));
+  assert.deepEqual(sources, before);
+});
+
+test('Cursor uses its own declared context window and retains a fallback only when the directory omits it', () => {
+  const sources = [{ id: 'large-window', contextWindow: 1000000 }, { id: 'medium-window', contextWindow: 500000 }, { id: 'unknown-window' }];
+  const added = appendCursorModels({ models: [] }, sources).models;
+  assert.deepEqual(added.map(model => [model.context_window, model.max_context_window]),
+    [[1000000, 1000000], [500000, 500000], [128000, 128000]]);
+});
+
+test('CodeBuddy and Cursor default and fallback budgets cannot exceed an explicit input maximum', () => {
+  const codeBuddy = appendCodeBuddyModels({ models: [] }, [
+    { id: CODEBUDDY_MODEL.id, name: 'Opus', available: true, contextWindow: 900000,
+      contextWindowOptions: [300000, 600000, 1000000], maxInputTokens: 500000 },
+    { id: 'CodeBuddy-no-default', name: 'No default', available: true, maxInputTokens: 64000 },
+  ]).models;
+  const cursor = appendCursorModels({ models: [] }, [
+    { id: 'oversized-default', contextWindow: 900000, contextWindowOptions: [300000, 600000, 1000000], maxInputTokens: 500000 },
+    { id: 'no-default', maxInputTokens: 64000 },
+  ]).models;
+  for (const models of [codeBuddy, cursor]) for (const [index, model] of models.entries()) {
+    const maximum = index === 0 ? 500000 : 64000;
+    assert.ok(model.context_window > 0 && model.context_window <= maximum);
+    assert.ok(model.max_context_window > 0 && model.max_context_window <= maximum);
+  }
 });
 
 test('new CodeBuddy models default to upstream reasoning and cannot inherit Opus image or effort claims', () => {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join, parse } from 'node:path';
+import { classifyClaudeSourceException } from './claude-source-errors.mjs';
 
 // Keep the dependency pinned with the separately verified official CLI release.
 export const CLAUDE_AGENT_SDK_VERSION = '0.3.304';
@@ -265,8 +266,12 @@ export class ClaudeSdkWorker {
         if (typeof message?.session_id === 'string' && message.session_id) this.#sessionId = message.session_id;
         await this.#output.push(message);
       }
-    } catch {
-      if (!this.#closed) error = new Error(STREAM_ERROR);
+    } catch (cause) {
+      if (!this.#closed) {
+        const source = classifyClaudeSourceException(cause);
+        error = new Error(source?.message ?? STREAM_ERROR);
+        if (source) error.code = source.code;
+      }
     } finally {
       this.#input.end(null, true);
       this.#output.end(error);

@@ -16,12 +16,18 @@ import { CodeBuddyResponsesProvider } from '../src/codebuddy-responses.mjs';
 import { CodeBuddyThinkingState } from '../src/codebuddy-thinking-state.mjs';
 import { appendCodeBuddyModel } from '../src/models.mjs';
 import { startServerRemotes } from '../src/runtime/server-remotes.mjs';
+import { ModelPolicy } from '../src/model-policy.mjs';
 
 // Actual native Codex, synthetic credentials, canned loopback inference only.
 // No existing login/configuration, real model, production gateway or user thread.
-const args = process.argv.slice(2);
-if (args.length && (args.length !== 2 || args[0] !== '--binary' || !args[1])) throw new Error('Expected [--binary /path/to/codex].');
-const binary = args[1] ?? await resolveCodexBinary();
+const args = process.argv.slice(2), options = new Map();
+for (let index = 0; index < args.length; index += 2) {
+  if (!['--binary', '--context-window'].includes(args[index]) || !args[index + 1] || options.has(args[index])) throw new Error('Expected [--binary /path/to/codex] [--context-window TOKENS].');
+  options.set(args[index], args[index + 1]);
+}
+const contextWindow = options.has('--context-window') ? Number(options.get('--context-window')) : null;
+if (contextWindow !== null && (!Number.isSafeInteger(contextWindow) || contextWindow < 1000 || contextWindow > 1000000)) throw new Error('Fixture context window must be an integer from 1000 to 1000000.');
+const binary = options.get('--binary') ?? await resolveCodexBinary();
 const work = fileURLToPath(new URL(`../.state/codebuddy-compaction-offline-${Date.now()}-${randomBytes(3).toString('hex')}/`, import.meta.url));
 const home = join(work, 'home'); await mkdir(home, { recursive: true, mode: 0o700 });
 const marker = `OFFLINE_CONTEXT_${randomBytes(12).toString('hex')}`;
@@ -128,7 +134,15 @@ const server = http.createServer(async (req, res) => {
 server.on('connect', (_req, socket) => { socket.on('error', () => {}); socket.end('HTTP/1.1 502 Offline\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); });
 server.listen(0, '127.0.0.1'); await once(server, 'listening');
 const origin = `http://127.0.0.1:${server.address().port}`;
-const baseModel = appendCodeBuddyModel({ models: [] }).models[0];
+let baseModel = appendCodeBuddyModel({ models: [] }).models[0];
+if (contextWindow !== null) {
+  const policy = await ModelPolicy.open({ path: join(work, 'model-settings.json') });
+  await policy.observe({ models: [{ id: model, name: 'Offline Opus', available: true,
+    contextWindow: 300000, contextWindowOptions: [300000, 600000, 1000000], maxInputTokens: 1000000 }] }, 'CodeBuddy');
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: [], contextWindows: { [model]: contextWindow } });
+  baseModel = policy.filterCatalog({ models: [baseModel] }).models[0];
+}
+const observedWindows = [];
 const catalogPath = join(work, 'catalog.json');
 await writeFile(catalogPath, JSON.stringify({ models: [baseModel,
   ...['gpt-6.1-sol', 'B-gpt-6.1-sol', 'remote/fixture/Claude-opus', 'remote/fixture/Claude-sonnet'].map((slug, index) => ({ ...baseModel, slug, display_name: slug, priority: index + 1 }))] }));
@@ -146,6 +160,9 @@ const serialize = value => value && typeof value === 'object' ? '{' + Object.ent
 rpc = new CodexRpc({ binary, home, cwd: work, spawnImpl: (file, args, options) => spawn(file,
   [...args, ...Object.entries(config).flatMap(([key, value]) => ['-c', `${key}=${serialize(value)}`])], { ...options, env, windowsHide: true }) });
 rpc.on('notification', (method, params) => {
+  if (method === 'thread/tokenUsage/updated' && Number.isSafeInteger(params.tokenUsage?.modelContextWindow)) {
+    observedWindows.push({ phase, tokens: params.tokenUsage.modelContextWindow });
+  }
   if (method === 'item/completed' || method === 'turn/completed') notifications.push({ phase, method, type: params.item?.type, status: params.turn?.status });
   if (method === 'turn/completed') waiter?.(params.turn);
 });
@@ -180,11 +197,15 @@ try {
   assert.ok(requests.find(item => item.phase === 'remote-continue').types.includes('compaction'));
   assert.equal(upstreamRequests.length, steps.length, 'Each client inference must make exactly one model request.');
   assert.equal(errors.length, 0);
+  if (contextWindow !== null) {
+    const expectedWindow = Math.floor(contextWindow * baseModel.effective_context_window_percent / 100);
+    assert.ok(observedWindows.some(value => value.phase === 'initial' && value.tokens === expectedWindow), 'Native Codex must use the configured effective context window.');
+  }
 } catch (error) { errors.push({ phase, message: error.message }); process.exitCode = 1; }
 finally {
   clearTimeout(timer); await rpc.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await remotes.close();
   const proof = { passed: errors.length === 0, nativeVersion, realInference: false, existingAuthLoaded: false, userConfigModified: false,
-    sameThread: true, summaryHash: hash(summary), steps, requests, upstreamRequests, notifications, usageRecords: usage.length, errors };
+    sameThread: true, contextWindow, observedWindows, summaryHash: hash(summary), steps, requests, upstreamRequests, notifications, usageRecords: usage.length, errors };
   const path = join(work, 'proof.json'); await writeFile(path, JSON.stringify(proof, null, 2), { mode: 0o600 });
   console.log(JSON.stringify({ passed: proof.passed, nativeVersion, realInference: false, steps, evidencePath: path, errors }, null, 2));
 }

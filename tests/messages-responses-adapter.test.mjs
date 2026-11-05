@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { MessagesResponsesAdapter } from '../src/protocols/messages-responses-adapter.mjs';
+import { claudeSourceError } from '../src/claude-source-errors.mjs';
 
 const scope = '203cc356-cb05-4a8e-8f5e-363b768eb97e';
 const request = { model: 'plain-provider-model', input: 'hello', store: false };
@@ -183,4 +184,53 @@ test('an upstream rejection causes exactly one dispatch and preserves a retry de
   } });
   const response = await adapter.request({ body: request, scope }); assert.equal(response.status, 429);
   assert.equal(response.headers.get('retry-after'), '8'); assert.equal(calls, 1); assert.doesNotMatch(await response.text(), /PRIVATE_ERROR/);
+});
+
+for (const stream of [false, true]) test(`a source error before message_start preserves only its safe category over ${stream ? 'SSE' : 'JSON'}`, async () => {
+  let calls = 0;
+  const adapter = new MessagesResponsesAdapter({ stateSecret: randomBytes(32).toString('base64url'), requestMessages: async () => {
+    calls++;
+    const event = { type: 'error', error: { type: 'api_error', code: 'claude_rate_limited',
+      message: 'PRIVATE_ERROR_BODY_sk-secret_/Users/private' } };
+    return new Response(`event: error\ndata: ${JSON.stringify(event)}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  } });
+  const response = await adapter.request({ body: { ...request, stream }, scope }), wire = await response.text();
+  assert.equal(response.status, stream ? 200 : 429); assert.equal(calls, 1);
+  const data = stream ? JSON.parse(wire.split('\n').find(line => line.startsWith('data:')).slice(5)).response : JSON.parse(wire);
+  assert.equal(data.error.code, 'claude_rate_limited'); assert.equal(data.error.message, claudeSourceError('claude_rate_limited').message);
+  assert.doesNotMatch(wire, /PRIVATE_ERROR_BODY|sk-secret|\/Users\/private/);
+  if (stream) { assert.equal(data.status, 'failed'); assert.doesNotMatch(wire, /response.completed/); }
+});
+
+test('unknown stream error codes remain generic without copying their type or private message', async () => {
+  const adapter = new MessagesResponsesAdapter({ stateSecret: randomBytes(32).toString('base64url'), requestMessages: async () =>
+    new Response('event: error\ndata: ' + JSON.stringify({ type: 'error', error: { type: 'PRIVATE_ERROR_TYPE',
+      code: 'PRIVATE_ERROR_CODE', message: 'PRIVATE_ERROR_MESSAGE' } }) + '\n\n', { headers: { 'content-type': 'text/event-stream' } }) });
+  const response = await adapter.request({ body: request, scope }), wire = await response.text();
+  assert.equal(response.status, 502); assert.equal(JSON.parse(wire).error.code, 'upstream_protocol_error');
+  assert.doesNotMatch(wire, /PRIVATE_ERROR/);
+});
+
+test('HTTP rejection preserves a whitelisted source code with the original status and retry delay', async () => {
+  let calls = 0;
+  const adapter = new MessagesResponsesAdapter({ stateSecret: randomBytes(32).toString('base64url'), requestMessages: async () => {
+    calls++; return Response.json({ type: 'error', error: { code: 'claude_tool_session_missing',
+      message: 'PRIVATE_HTTP_ERROR_sk-secret_/Users/private' } }, { status: 409, headers: { 'retry-after': '8' } });
+  } });
+  const response = await adapter.request({ body: request, scope }), wire = await response.text();
+  assert.equal(response.status, 409); assert.equal(response.headers.get('retry-after'), '8'); assert.equal(calls, 1);
+  assert.equal(JSON.parse(wire).error.code, 'claude_tool_session_missing');
+  assert.equal(JSON.parse(wire).error.message, claudeSourceError('claude_tool_session_missing').message);
+  assert.doesNotMatch(wire, /PRIVATE_HTTP_ERROR|sk-secret|\/Users\/private/);
+});
+
+for (const mode of ['unknown', 'oversized']) test(`${mode} HTTP error details keep the generic status without retries or disclosure`, async () => {
+  let calls = 0;
+  const adapter = new MessagesResponsesAdapter({ stateSecret: randomBytes(32).toString('base64url'), requestMessages: async () => {
+    calls++; return Response.json({ error: { code: mode === 'unknown' ? 'PRIVATE_HTTP_ERROR' : 'claude_rate_limited',
+      message: 'PRIVATE_HTTP_ERROR' }, extra: mode === 'oversized' ? 'x'.repeat(9000) : '' }, { status: 400 });
+  } });
+  const response = await adapter.request({ body: request, scope }), wire = await response.text();
+  assert.equal(response.status, 400); assert.equal(calls, 1); assert.equal(JSON.parse(wire).error.code, 'invalid_request');
+  assert.equal(JSON.parse(wire).error.message, '模型来源拒绝了请求（HTTP 400）。'); assert.doesNotMatch(wire, /PRIVATE_HTTP_ERROR|claude_rate_limited/);
 });

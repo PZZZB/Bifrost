@@ -4,6 +4,7 @@ import { BridgeError, writeJson } from './storage.mjs';
 import { B_MODELS, resolveBModel, resolveCodeBuddyModel } from './models.mjs';
 import { CURSOR_MODELS } from './cursor-service.mjs';
 import { capabilitiesFromCatalog, hasCatalogCapabilityData, unverifiedModel, verificationFromRecord } from './model-capabilities.mjs';
+import { MIN_CONTEXT_TOKENS, MAX_CONTEXT_TOKENS, modelContextSettings, applyCodexContext } from './model-context.mjs';
 
 export const MODEL_POLICY_CHANNELS = Object.freeze(['A', 'B', 'CodeBuddy', 'Cursor', 'Bifrost', 'Claude']);
 const MAX_DISABLED = 2048;
@@ -51,6 +52,7 @@ export class ModelPolicy {
   #path;
   #models = new Map();
   #disabled = new Set();
+  #contextWindows = new Map();
   #availability = new Map();
   #details = new Map();
   #verifications = new Map();
@@ -81,7 +83,8 @@ export class ModelPolicy {
     try {
       if (bytes.byteLength > MAX_FILE_BYTES) throw new Error();
       const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-      if (!fields(data, ['version', 'revision', 'disabledModels', 'models']) || data.version !== 1
+      if (!(data.version === 1 && fields(data, ['version', 'revision', 'disabledModels', 'models'])
+          || data.version === 2 && fields(data, ['version', 'revision', 'disabledModels', 'models', 'contextWindows']))
         || !Number.isSafeInteger(data.revision) || data.revision < 0 || !Array.isArray(data.models)
         || !Array.isArray(data.disabledModels) || data.disabledModels.length > MAX_DISABLED) throw new Error();
       const models = new Map();
@@ -96,7 +99,16 @@ export class ModelPolicy {
         if (!safeId(id) || !models.has(id) || disabled.has(id)) throw new Error();
         disabled.add(id);
       }
-      this.#models = models; this.#disabled = disabled; this.#revision = data.revision;
+      const contextWindows = new Map();
+      if (data.version === 2) {
+        if (!object(data.contextWindows) || Object.keys(data.contextWindows).length > MAX_DISABLED) throw new Error();
+        for (const [id, tokens] of Object.entries(data.contextWindows)) {
+          if (!safeId(id) || !models.has(id) || !Number.isSafeInteger(tokens)
+            || tokens < MIN_CONTEXT_TOKENS || tokens > MAX_CONTEXT_TOKENS) throw new Error();
+          contextWindows.set(id, tokens);
+        }
+      }
+      this.#models = models; this.#disabled = disabled; this.#contextWindows = contextWindows; this.#revision = data.revision;
       this.#available = true; this.#error = null;
     } catch { this.#loadFailed(); }
   }
@@ -113,15 +125,16 @@ export class ModelPolicy {
     this.#queue = result.catch(() => {});
     return result;
   }
-  async #commit(models, disabled) {
+  async #commit(models, disabled, contextWindows = this.#contextWindows) {
     if (this.#revision === Number.MAX_SAFE_INTEGER) throw new BridgeError('模型开关配置版本已耗尽，无法保存。', 503, 'model_policy_unavailable');
     const revision = this.#revision + 1;
-    const data = { version: 1, revision, disabledModels: [...disabled].sort(), models: [...models.values()] };
+    const data = { version: contextWindows.size ? 2 : 1, revision, disabledModels: [...disabled].sort(), models: [...models.values()],
+      ...(contextWindows.size ? { contextWindows: Object.fromEntries(contextWindows) } : {}) };
     if (Buffer.byteLength(JSON.stringify(data), 'utf8') > MAX_FILE_BYTES) throw new BridgeError('已发现模型目录超过保存大小限制。', 503, 'model_policy_write_failed');
     try { await writeJson(this.#path, data); }
     catch { throw new BridgeError('模型开关配置保存失败，原有开关仍然生效。', 503, 'model_policy_write_failed'); }
     // Never expose an in-memory switch before its atomic file replacement succeeds.
-    this.#models = models; this.#disabled = disabled; this.#revision = revision;
+    this.#models = models; this.#disabled = disabled; this.#contextWindows = contextWindows; this.#revision = revision;
   }
   setAuthorizationVersionGetter(channel, getter) {
     if (!MODEL_POLICY_CHANNELS.includes(channel) || typeof getter !== 'function') throw new TypeError('Invalid model authorization source.');
@@ -248,7 +261,8 @@ export class ModelPolicy {
     this.#requireAvailable();
     catalogModels(catalog);
     const result = structuredClone(catalog);
-    result.models = result.models.filter(model => !this.#disabled.has(modelId(model)) && this.#modelAvailability(modelId(model))?.available !== false);
+    result.models = result.models.filter(model => !this.#disabled.has(modelId(model)) && this.#modelAvailability(modelId(model))?.available !== false)
+      .map(model => applyCodexContext(model, this.#contextSettings(modelId(model))));
     return result;
   }
 
@@ -266,28 +280,47 @@ export class ModelPolicy {
 
   snapshot() {
     return { available: this.#available, discoveryOnly: true, revision: this.#revision,
-      disabledModels: [...this.#disabled].sort(),
+      disabledModels: [...this.#disabled].sort(), contextWindows: Object.fromEntries(this.#contextWindows),
       models: [...this.#models.values()].map(model => ({ ...model, enabled: !this.#disabled.has(model.id),
-        ...this.#modelAvailability(model.id), ...this.#modelDetails(model.id) })),
+        ...this.#modelAvailability(model.id), ...this.#modelDetails(model.id), contextSettings: this.#contextSettings(model.id) })),
       error: this.#error ? { ...this.#error } : null };
+  }
+
+  #contextSettings(id, selectedTokens = this.#contextWindows.get(id) ?? null) {
+    return modelContextSettings(this.#modelDetails(id).capabilities.contextWindow, selectedTokens);
   }
 
   async update(input) {
     this.#requireAvailable();
-    if (!fields(input, ['revision', 'disabledModels']) || !Number.isSafeInteger(input.revision) || input.revision < 0
+    const hasContext = object(input) && Object.hasOwn(input, 'contextWindows');
+    if (!fields(input, ['revision', 'disabledModels', ...(hasContext ? ['contextWindows'] : [])]) || !Number.isSafeInteger(input.revision) || input.revision < 0
       || !Array.isArray(input.disabledModels) || input.disabledModels.length > MAX_DISABLED
       || input.disabledModels.some(id => !safeId(id)) || new Set(input.disabledModels).size !== input.disabledModels.length) throw invalid();
+    if (hasContext && (!object(input.contextWindows) || Object.keys(input.contextWindows).length > MAX_DISABLED)) throw invalid('上下文预算配置无效。');
+    const patch = hasContext ? Object.entries(input.contextWindows) : [];
+    if (patch.some(([id, tokens]) => !safeId(id) || tokens !== null && (!Number.isSafeInteger(tokens)
+      || tokens < MIN_CONTEXT_TOKENS || tokens > MAX_CONTEXT_TOKENS))) throw invalid('上下文预算须为有效的整数 Token 数。');
     const revision = input.revision, ids = [...input.disabledModels];
     return this.#serialize(async () => {
       this.#requireAvailable();
       if (revision !== this.#revision) throw new BridgeError('模型列表或开关已更新，请刷新后重试。', 409, 'model_policy_conflict');
       if (ids.some(id => !this.#models.has(id))) throw invalid('禁用列表包含尚未发现的模型。');
       const disabled = new Set(ids);
+      const contextWindows = new Map(this.#contextWindows);
+      for (const [id, tokens] of patch) {
+        if (!this.#models.has(id)) throw invalid('上下文配置包含尚未发现的模型。');
+        if (tokens === null) { contextWindows.delete(id); continue; }
+        if (!this.#contextSettings(id, tokens).valid) throw invalid('上下文预算超过当前模型声明的上限。');
+        if (this.#modelAvailability(id)?.available === false && tokens !== contextWindows.get(id)) throw invalid('模型当前不可用，请刷新账号目录后设置上下文。');
+        contextWindows.set(id, tokens);
+      }
+      if (contextWindows.size > MAX_DISABLED) throw invalid('上下文配置数量超过保存限制。');
       for (const id of this.#disabled) if (!disabled.has(id) && this.#modelAvailability(id)?.available === false) {
         throw invalid('当前账号不可用的模型不能启用，请先刷新账号目录。');
       }
-      if (disabled.size !== this.#disabled.size || [...disabled].some(id => !this.#disabled.has(id))) {
-        await this.#commit(new Map(this.#models), disabled);
+      if (disabled.size !== this.#disabled.size || [...disabled].some(id => !this.#disabled.has(id))
+        || contextWindows.size !== this.#contextWindows.size || [...contextWindows].some(([id, tokens]) => this.#contextWindows.get(id) !== tokens)) {
+        await this.#commit(new Map(this.#models), disabled, contextWindows);
       }
       return this.snapshot();
     });

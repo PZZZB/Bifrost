@@ -154,9 +154,13 @@ let modelSettings = null;
 let modelCatalogModels = null;
 let modelSettingsRequest = null;
 let modelSettingsGeneration = 0;
+let modelSettingsRevisionFloor = -1;
+let modelSettingsConfirmation = null;
 let modelSettingsUnavailable = false;
 let modelSettingsError = '';
 let modelDraft = new Map();
+let modelContextDraft = new Map();
+let modelContextControls = [];
 let modelGroupActions = [];
 const modelGroupExpanded = new Map();
 let modelGroupViews = [];
@@ -1125,8 +1129,201 @@ async function refreshServiceStatus() {
   return serviceRequest;
 }
 
+const contextTokenCount = value => Number.isSafeInteger(value) && value > 0 && value <= 1_000_000_000;
+const contextTokenLabel = value => value % 1_000_000 === 0 ? `${value / 1_000_000}M`
+  : value % 1000 === 0 ? `${value / 1000}K` : value.toLocaleString('zh-CN');
+function modelContextSettings(model) {
+  const value = model.contextSettings;
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !contextTokenCount(value.minimumTokens) || !contextTokenCount(value.maximumTokens)
+    || value.minimumTokens > value.maximumTokens
+    || ![null, undefined].includes(value.defaultTokens) && !contextTokenCount(value.defaultTokens)
+    || ![null, undefined].includes(value.maxTokens) && !contextTokenCount(value.maxTokens)
+    || ![null, undefined].includes(value.selectedTokens) && !contextTokenCount(value.selectedTokens)
+    || !Array.isArray(value.options) || value.options.length > 64 || value.options.some(token => !contextTokenCount(token))) return null;
+  return value;
+}
+function savedModelContextDraft(model) {
+  const context = modelContextSettings(model), tokens = context?.selectedTokens ?? null;
+  return { selection: tokens === null ? '' : context.options.includes(tokens) ? String(tokens) : 'custom',
+    customValue: tokens === null ? '' : String(tokens) };
+}
+function modelContextDraftValue(model) {
+  const context = modelContextSettings(model);
+  if (!context) return { value: null, error: '' };
+  const draft = modelContextDraft.get(model.id) ?? savedModelContextDraft(model);
+  if (draft.selection === '') return { value: null, error: '' };
+  const raw = draft.selection === 'custom' ? draft.customValue.trim() : draft.selection;
+  const tokens = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  const maximum = Math.min(context.maxTokens ?? context.maximumTokens, context.maximumTokens);
+  if (!Number.isSafeInteger(tokens) || tokens < context.minimumTokens || tokens > maximum) {
+    return { value: null, error: `请输入 ${context.minimumTokens.toLocaleString('zh-CN')}–${maximum.toLocaleString('zh-CN')} 之间的整数 Token。` };
+  }
+  if (draft.selection === 'custom' ? context.customAllowed !== true : !context.options.includes(tokens)) {
+    return { value: null, error: '当前模型不支持此上下文选项，请重新选择。' };
+  }
+  return { value: tokens, error: '' };
+}
+function modelContextDirty(model) {
+  if (!modelContextSettings(model)) return false;
+  const saved = model.contextSettings.selectedTokens ?? null;
+  const draft = modelContextDraft.get(model.id) ?? savedModelContextDraft(model);
+  const raw = draft.selection === 'custom' ? draft.customValue.trim() : draft.selection;
+  if (draft.selection === '' && saved === null || /^\d+$/.test(raw) && Number(raw) === saved) return false;
+  const parsed = modelContextDraftValue(model);
+  return Boolean(parsed.error) || parsed.value !== saved;
+}
+function resetModelContextDraft() {
+  modelContextDraft = new Map((modelSettings?.models ?? []).filter(model => modelContextSettings(model))
+    .map(model => [model.id, savedModelContextDraft(model)]));
+}
+function validateModelSettingsSnapshot(data) {
+  if (!data || !Number.isSafeInteger(data.revision) || data.revision < 0 || !Array.isArray(data.models)
+    || data.models.some(model => typeof model?.id !== 'string' || typeof model.enabled !== 'boolean'
+      || model.available !== undefined && typeof model.available !== 'boolean' || model.reason !== undefined && typeof model.reason !== 'string')
+    || data.disabledModels !== undefined && (!Array.isArray(data.disabledModels) || data.disabledModels.some(id => typeof id !== 'string'))) {
+    throw new Error('服务返回的模型列表格式无效。');
+  }
+  return data;
+}
+function captureModelSettingsChanges() {
+  const checkboxes = new Map(), contexts = new Map(), originals = new Map();
+  for (const model of modelSettings.models) {
+    originals.set(model.id, model);
+    if (modelDraft.get(model.id) !== model.enabled) checkboxes.set(model.id, { from: model.enabled, to: modelDraft.get(model.id) === true });
+    if (modelContextDirty(model)) {
+      const parsed = modelContextDraftValue(model);
+      if (parsed.error) throw new Error(`${model.name || model.id}：${parsed.error}`);
+      contexts.set(model.id, { from: model.contextSettings.selectedTokens ?? null, to: parsed.value,
+        draft: { ...(modelContextDraft.get(model.id) ?? savedModelContextDraft(model)) } });
+    }
+  }
+  return { checkboxes, contexts, originals };
+}
+function adoptModelSettingsSnapshot(data, changes = null) {
+  const known = new Set(data.models.map(model => model.id));
+  const missing = changes ? [...new Set([...changes.checkboxes.keys(), ...changes.contexts.keys()])].filter(id => !known.has(id)) : [];
+  modelSettings = { ...data, models: [...data.models, ...missing.map(id => ({ ...changes.originals.get(id), available: false,
+    reason: '当前目录已移除此模型，未保存的设置仍保留；请刷新目录后重试。' }))] };
+  modelCatalogModels = data.models;
+  modelDraft = new Map(modelSettings.models.map(model => [model.id, model.enabled]));
+  resetModelContextDraft();
+  if (changes) {
+    for (const [id, change] of changes.checkboxes) modelDraft.set(id, change.to);
+    for (const [id, change] of changes.contexts) {
+      const model = modelSettings.models.find(model => model.id === id), context = model && modelContextSettings(model);
+      if (!context) continue;
+      const draft = { ...change.draft };
+      if (draft.selection !== '' && draft.selection !== 'custom' && !context.options.includes(change.to)) {
+        draft.selection = 'custom'; draft.customValue = String(change.to);
+      }
+      modelContextDraft.set(id, draft);
+    }
+  }
+  renderModelSettingsList();
+}
+function modelSettingField(snapshot, id, kind) {
+  const model = Array.isArray(snapshot?.models) ? snapshot.models.find(model => model?.id === id) : null;
+  let rowKnown, rowValue, rootKnown = false, rootValue;
+  if (kind === 'context') {
+    const settings = model?.contextSettings;
+    rowKnown = settings && Object.hasOwn(settings, 'selectedTokens')
+      && (settings.selectedTokens === null || contextTokenCount(settings.selectedTokens));
+    rowValue = settings?.selectedTokens;
+    const windows = snapshot?.contextWindows;
+    if (windows && typeof windows === 'object' && !Array.isArray(windows)) {
+      rootValue = Object.hasOwn(windows, id) ? windows[id] : null;
+      rootKnown = rootValue === null || contextTokenCount(rootValue);
+    }
+  } else {
+    rowKnown = typeof model?.enabled === 'boolean'; rowValue = model?.enabled;
+    if (Array.isArray(snapshot?.disabledModels) && snapshot.disabledModels.every(value => typeof value === 'string')) {
+      rootKnown = true; rootValue = !snapshot.disabledModels.includes(id);
+    }
+  }
+  return { known: Boolean(rowKnown || rootKnown), consistent: !(rowKnown && rootKnown && rowValue !== rootValue),
+    value: rowKnown ? rowValue : rootValue };
+}
+function modelSettingsConfirmed(snapshot, changes) {
+  if (!snapshot || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 || snapshot.available === false) return false;
+  return [...changes.checkboxes].every(([id, change]) => {
+    const field = modelSettingField(snapshot, id, 'checkbox'); return field.known && field.consistent && field.value === change.to;
+  }) && [...changes.contexts].every(([id, change]) => {
+    const field = modelSettingField(snapshot, id, 'context'); return field.known && field.consistent && field.value === change.to;
+  });
+}
+function rememberModelSettingsConfirmation(snapshot, changes) {
+  const previous = modelSettingsConfirmation?.changes;
+  const checks = { checkboxes: new Map(), contexts: new Map() };
+  for (const [kind, field] of [['checkboxes', 'checkbox'], ['contexts', 'context']]) {
+    for (const id of new Set([...(previous?.[kind]?.keys() ?? []), ...changes[kind].keys()])) {
+      const current = modelSettingField(snapshot, id, field);
+      if (current.known && current.consistent) checks[kind].set(id, { to: current.value });
+    }
+  }
+  modelSettingsRevisionFloor = Math.max(modelSettingsRevisionFloor, snapshot.revision);
+  modelSettingsConfirmation = { revision: snapshot.revision, changes: checks };
+}
+function acceptModelSettingsRevision(data) {
+  if (data.revision < modelSettingsRevisionFloor) throw new Error('目录回读仍为较旧版本，已保留当前设置，请稍后刷新。');
+  const confirmed = modelSettingsConfirmation;
+  if (confirmed) {
+    const fields = [...confirmed.changes.checkboxes.keys()].map(id => modelSettingField(data, id, 'checkbox'))
+      .concat([...confirmed.changes.contexts.keys()].map(id => modelSettingField(data, id, 'context')));
+    if (fields.some(field => !field.known || !field.consistent) || data.revision === confirmed.revision && !modelSettingsConfirmed(data, confirmed.changes)) {
+      throw new Error('目录回读与已确认设置不一致，已保留确认值，请稍后刷新。');
+    }
+    if (data.revision > confirmed.revision) rememberModelSettingsConfirmation(data, confirmed.changes);
+  }
+  modelSettingsRevisionFloor = Math.max(modelSettingsRevisionFloor, data.revision);
+}
+function modelSettingsMergeConflict(snapshot, changes) {
+  const rows = new Map(snapshot.models.map(model => [model.id, model]));
+  for (const [id, change] of changes.checkboxes) {
+    const model = rows.get(id), field = modelSettingField(snapshot, id, 'checkbox');
+    if (!model || !field.known || !field.consistent || field.value !== change.from && field.value !== change.to
+      || change.to && model.available === false) return `${model?.name || id} 的模型开关或可用状态已变化。`;
+  }
+  for (const [id, change] of changes.contexts) {
+    const model = rows.get(id), field = modelSettingField(snapshot, id, 'context'), settings = model && modelContextSettings(model);
+    if (!model || !settings || !field.known || !field.consistent) return `${model?.name || id} 的上下文配置暂时无法核对。`;
+    if (field.value !== change.from && field.value !== change.to) return `${model.name || id} 的上下文已由其他页面修改。`;
+    if (change.to !== null && (change.to < settings.minimumTokens || change.to > Math.min(settings.maxTokens ?? settings.maximumTokens, settings.maximumTokens)
+      || settings.customAllowed !== true && !settings.options.includes(change.to) || model.available === false)) {
+      return `${model.name || id} 当前不能使用所选上下文预算。`;
+    }
+  }
+  return '';
+}
+function modelSettingsPayload(snapshot, changes) {
+  const disabled = new Set(snapshot.disabledModels ?? snapshot.models.filter(model => !model.enabled).map(model => model.id));
+  for (const [id, change] of changes.checkboxes) {
+    if (change.to) disabled.delete(id); else disabled.add(id);
+  }
+  const windows = Object.fromEntries([...changes.contexts].filter(([id, change]) => {
+    const field = modelSettingField(snapshot, id, 'context');
+    return !field.known || !field.consistent || field.value !== change.to;
+  }).map(([id, change]) => [id, change.to]));
+  const visible = new Set(snapshot.models.map(model => model.id));
+  const disabledModels = [...[...disabled].filter(id => !visible.has(id)), ...snapshot.models.filter(model => disabled.has(model.id)).map(model => model.id)];
+  return { revision: snapshot.revision, disabledModels, ...(Object.keys(windows).length ? { contextWindows: windows } : {}) };
+}
+function confirmedModelSettingsSnapshot(base, acknowledgement) {
+  const rows = new Map((Array.isArray(acknowledgement.models) ? acknowledgement.models : []).map(model => [model.id, model]));
+  return { ...base, revision: acknowledgement.revision,
+    ...(Array.isArray(acknowledgement.disabledModels) ? { disabledModels: acknowledgement.disabledModels } : {}),
+    ...(acknowledgement.contextWindows && typeof acknowledgement.contextWindows === 'object' && !Array.isArray(acknowledgement.contextWindows)
+      ? { contextWindows: acknowledgement.contextWindows } : {}),
+    models: base.models.map(model => {
+      const checkbox = modelSettingField(acknowledgement, model.id, 'checkbox'), context = modelSettingField(acknowledgement, model.id, 'context');
+      return { ...model, ...(checkbox.known && checkbox.consistent ? { enabled: checkbox.value } : {}),
+        ...(model.contextSettings && context.known && context.consistent ? { contextSettings: { ...model.contextSettings,
+          ...rows.get(model.id)?.contextSettings, selectedTokens: context.value,
+          effectiveTokens: context.value ?? model.contextSettings.defaultTokens } } : {}) };
+    }) };
+}
 function modelSettingsDirty() {
-  return modelSettings?.models.some(model => modelDraft.get(model.id) !== model.enabled) === true;
+  return modelSettings?.models.some(model => modelDraft.get(model.id) !== model.enabled || modelContextDirty(model)) === true;
 }
 
 function completeModelDiscoverySupported() {
@@ -1163,14 +1360,26 @@ function renderChannelModelCounts() {
 function renderModelSettingsControls() {
   const dirty = modelSettingsDirty();
   const available = modelSettingsEditable();
-  elements['model-settings-save-button'].disabled = !available || !dirty;
+  const invalidContext = (modelSettings?.models ?? []).some(model => modelContextDirty(model) && modelContextDraftValue(model).error);
+  elements['model-settings-save-button'].disabled = !available || !dirty || invalidContext;
   elements['model-settings-reset-button'].disabled = !available || !dirty;
   elements['model-settings-refresh-button'].disabled = !managementConnected || Boolean(busyAction) || restartInProgress || Boolean(modelSettingsRequest);
-  text('model-settings-save-button', busyAction === 'model-settings-save' ? '正在保存…' : '保存模型选择');
+  text('model-settings-save-button', busyAction === 'model-settings-save' ? '正在保存…' : '保存模型设置');
   text('model-settings-refresh-button', modelSettingsRequest ? '正在刷新目录…' : '刷新账号目录');
   elements['model-settings-search'].disabled = !modelSettings || restartInProgress;
   const byModelId = new Map((modelSettings?.models ?? []).map(model => [model.id, model]));
-  elements['model-settings-list'].querySelectorAll('input').forEach(input => { input.disabled = !available || byModelId.get(input.value)?.available === false; });
+  elements['model-settings-list'].querySelectorAll('input[data-model-choice]').forEach(input => { input.disabled = !available || byModelId.get(input.value)?.available === false; });
+  for (const control of modelContextControls) {
+    const model = byModelId.get(control.model.id), draft = modelContextDraft.get(control.model.id) ?? savedModelContextDraft(control.model);
+    const disabled = !available || model?.available === false;
+    control.select.disabled = disabled;
+    control.custom.hidden = draft.selection !== 'custom';
+    control.custom.disabled = disabled || draft.selection !== 'custom' || control.model.contextSettings.customAllowed !== true;
+    const error = modelContextDraftValue(control.model).error;
+    control.custom.setAttribute('aria-invalid', draft.selection === 'custom' && error ? 'true' : 'false');
+    control.error.textContent = error || '';
+    control.error.hidden = !error;
+  }
   for (const { button, ids, enabled } of modelGroupActions) {
     button.disabled = !available || !ids.some(id => modelDraft.get(id) !== enabled);
   }
@@ -1190,6 +1399,55 @@ function renderModelSettingsControls() {
   }
   text('model-settings-error', modelSettingsUnavailable ? '重启服务后可用。当前服务尚未提供模型选择接口。' : modelSettingsError);
   elements['model-settings-error'].hidden = !modelSettingsUnavailable && !modelSettingsError;
+}
+
+function modelContextFields(model) {
+  const context = modelContextSettings(model);
+  if (!context) return null;
+  const draft = modelContextDraft.get(model.id) ?? savedModelContextDraft(model);
+  const row = document.createElement('div'); row.className = 'model-context'; row.setAttribute('data-model-context', model.id);
+  const label = document.createElement('label'); label.textContent = '上下文';
+  const select = document.createElement('select'); select.id = `model-context-choice-${modelContextControls.length}`;
+  label.setAttribute('for', select.id); select.setAttribute('aria-label', `${model.name || model.id}：上下文`);
+  const maximum = Math.min(context.maxTokens ?? context.maximumTokens, context.maximumTokens);
+  const choices = [...new Set(context.options)].filter(value => value >= context.minimumTokens && value <= maximum).sort((a, b) => a - b);
+  const options = [new Option(`跟随模型默认${context.defaultTokens ? `（${contextTokenLabel(context.defaultTokens)}）` : ''}`, ''),
+    ...choices.map(tokens => new Option(contextTokenLabel(tokens), String(tokens)))];
+  if (/^\d+$/.test(draft.selection) && contextTokenCount(Number(draft.selection)) && !choices.includes(Number(draft.selection))) {
+    const previous = new Option(`${contextTokenLabel(Number(draft.selection))}（当前不可用）`, draft.selection);
+    previous.disabled = true; options.push(previous);
+  }
+  if (context.customAllowed === true || draft.selection === 'custom') options.push(new Option('自定义', 'custom'));
+  select.replaceChildren(...options); select.value = draft.selection;
+  const custom = document.createElement('input'); custom.type = 'number'; custom.min = String(context.minimumTokens);
+  custom.max = String(maximum); custom.step = '1'; custom.inputMode = 'numeric'; custom.autocomplete = 'off';
+  custom.placeholder = 'Token 数'; custom.value = draft.customValue;
+  custom.setAttribute('aria-label', `${model.name || model.id}：自定义上下文 Token 数`);
+  const note = document.createElement('small'); note.className = 'model-context-note';
+  const effective = contextTokenCount(context.effectiveTokens) ? context.effectiveTokens : context.defaultTokens;
+  const source = `${context.defaultTokens ? `目录默认 ${contextTokenLabel(context.defaultTokens)}` : '默认窗口未知'} · ${effective
+    ? `已保存预算 ${contextTokenLabel(effective)}${context.selectedTokens === null ? '（跟随默认）' : ''}` : '尚未取得当前预算'} · ${context.maxTokens
+    ? `上游声明上限 ${contextTokenLabel(context.maxTokens)}` : '上游未声明上限，自定义值仅作为客户端预算'}`;
+  note.textContent = source + (context.valid === false && typeof context.note === 'string' && context.note ? ` · ${context.note}` : '');
+  const error = document.createElement('small'); error.className = 'model-context-error'; error.setAttribute('role', 'status');
+  error.id = `model-context-error-${modelContextControls.length}`;
+  select.setAttribute('aria-describedby', error.id); custom.setAttribute('aria-describedby', error.id);
+  const change = () => {
+    if (!modelSettingsEditable() || model.available === false || select.disabled) return;
+    modelContextDraft.set(model.id, { selection: select.value, customValue: custom.value });
+    renderModelSettingsControls();
+  };
+  select.addEventListener('change', () => {
+    if (select.value === 'custom' && !custom.value) {
+      const tokens = context.effectiveTokens ?? context.defaultTokens;
+      if (contextTokenCount(tokens)) custom.value = String(tokens);
+    }
+    change();
+  });
+  custom.addEventListener('input', change);
+  row.append(label, select, custom, note, error);
+  modelContextControls.push({ model, select, custom, error });
+  return row;
 }
 
 function modelEvidenceDetails(model) {
@@ -1218,7 +1476,11 @@ function modelEvidenceDetails(model) {
     appendField(label, `${observed ? key === 'cache' ? '已观察到缓存命中' : key === 'tools' ? '已记录工具回传后的完整调用' : '已记录含图片的成功调用' : support(value)}${efforts ? `（${efforts}）` : ''}${typeof note === 'string' && note ? ` · ${note}` : ''}`);
   }
   const context = capabilities?.contextWindow;
-  appendField('上下文', `${Number.isSafeInteger(context?.tokens) && context.tokens > 0 ? `${context.tokens.toLocaleString('zh-CN')} Token${context.source === 'official-cli-runtime' ? '（官方 CLI 当前上限）' : ''}` : '未取得当前模型上限'}${context?.note ? ` · ${context.note}` : ''}`);
+  appendField('上下文', `${Number.isSafeInteger(context?.tokens) && context.tokens > 0 ? `目录默认 ${context.tokens.toLocaleString('zh-CN')} Token${context.source === 'official-cli-runtime' ? '（官方 CLI 当前上限）' : ''}` : '未取得当前模型上限'}${context?.note ? ` · ${context.note}` : ''}`);
+  const settings = modelContextSettings(model);
+  if (settings) appendField('客户端预算', contextTokenCount(settings.effectiveTokens)
+    ? `${settings.effectiveTokens.toLocaleString('zh-CN')} Token（已保存${settings.selectedTokens === null ? '，跟随模型默认' : ''}）${settings.valid === false ? ' · 保存值已失效，当前采用默认预算。' : ''}`
+    : '尚未取得当前预算');
   appendField('指令处理', model.compatibility?.label || '尚未取得接入方式');
   if (typeof model.compatibility?.note === 'string') appendField('兼容说明', model.compatibility.note);
   appendField('调用验证', verificationLabel);
@@ -1244,6 +1506,7 @@ function renderModelSettingsList() {
     groups.get(key).push(model);
   }
   modelGroupActions = [];
+  modelContextControls = [];
   modelGroupViews = [];
   const nodes = [];
   for (const [key, models] of groups) {
@@ -1281,6 +1544,7 @@ function renderModelSettingsList() {
     for (const model of models) {
       const label = document.createElement('label'); label.className = 'model-option';
       const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = model.id; checkbox.checked = modelDraft.get(model.id) === true;
+      checkbox.setAttribute('data-model-choice', model.id);
       checkbox.addEventListener('change', () => {
         if (checkbox.disabled || model.available === false) return;
         modelDraft.set(model.id, checkbox.checked); renderModelSettingsControls();
@@ -1294,7 +1558,10 @@ function renderModelSettingsList() {
         reason.textContent = model.reason || '源端当前不可用或尚未适配。';
         details.append(reason);
       }
-      label.append(checkbox, details); content.append(label, modelEvidenceDetails(model));
+      label.append(checkbox, details); content.append(label);
+      const context = modelContextFields(model);
+      if (context) content.append(context);
+      content.append(modelEvidenceDetails(model));
     }
     nodes.push(group);
   }
@@ -1307,36 +1574,46 @@ function renderModelSettingsList() {
   renderModelSettingsControls();
 }
 
-async function refreshModelSettings({ replaceDraft = false } = {}) {
+async function refreshModelSettings({ replaceDraft = false, rebaseChanges = null } = {}) {
   if (modelSettingsRequest) return modelSettingsRequest;
   const generation = modelSettingsGeneration;
   const pending = (async () => {
     try {
-      const data = await request('/api/model-settings', { signal: AbortSignal.timeout(15000) });
+      const data = validateModelSettingsSnapshot(await request('/api/model-settings', { signal: AbortSignal.timeout(15000) }));
       if (generation !== modelSettingsGeneration) return;
-      if (data.revision == null || !Array.isArray(data.models) || data.models.some(model => typeof model?.id !== 'string' || typeof model.enabled !== 'boolean'
-        || model.available !== undefined && typeof model.available !== 'boolean' || model.reason !== undefined && typeof model.reason !== 'string')) throw new Error('服务返回的模型列表格式无效。');
+      acceptModelSettingsRevision(data);
       modelSettingsLoaded = true;
       modelCatalogModels = data.models;
       modelSettingsUnavailable = false; modelSettingsError = typeof data.error === 'string' ? data.error : data.error?.message || '';
       const changed = !modelSettings || JSON.stringify(data) !== JSON.stringify(modelSettings);
-      if (replaceDraft || !modelSettingsDirty()) {
+      if (rebaseChanges) {
+        adoptModelSettingsSnapshot(data, rebaseChanges);
+      } else if (replaceDraft || !modelSettingsDirty()) {
         modelSettings = data;
-        if (changed || replaceDraft) { modelDraft = new Map(data.models.map(model => [model.id, model.enabled])); renderModelSettingsList(); }
+        if (changed || replaceDraft) {
+          modelDraft = new Map(data.models.map(model => [model.id, model.enabled])); resetModelContextDraft(); renderModelSettingsList();
+        }
       } else if (changed) {
         const previous = modelSettings, prior = new Map(previous.models.map(model => [model.id, model]));
-        modelSettings = { ...data, revision: previous.revision, models: data.models.map(model => ({ ...model, enabled: prior.get(model.id)?.enabled ?? model.enabled })) };
+        modelSettings = { ...data, revision: previous.revision, contextWindows: previous.contextWindows,
+          models: data.models.map(model => ({ ...model, enabled: prior.get(model.id)?.enabled ?? model.enabled,
+            ...(modelContextSettings(model) && modelContextSettings(prior.get(model.id) ?? {}) ? {
+              contextSettings: { ...model.contextSettings, selectedTokens: prior.get(model.id).contextSettings.selectedTokens ?? null },
+            } : {}) })) };
         // A newly unavailable model cannot retain an unsaved enable request.
         // Already saved selections remain intact until the user changes them.
         modelDraft = new Map(data.models.map(model => [model.id, model.available === false && !model.enabled
           ? false : modelDraft.has(model.id) ? modelDraft.get(model.id) : model.enabled]));
+        modelContextDraft = new Map(data.models.filter(model => modelContextSettings(model))
+          .map(model => [model.id, modelContextDraft.get(model.id) ?? savedModelContextDraft(model)]));
         renderModelSettingsList();
-        if (data.revision !== previous.revision) text('model-settings-message', '账号目录已更新，未保存的勾选已保留。保存时会核对版本；发生冲突时请重新勾选。');
+        if (data.revision !== previous.revision) text('model-settings-message', '账号目录已更新，未保存的勾选和上下文设置已保留。保存时会核对版本；发生冲突时请重新选择。');
       }
       const discovery = Object.entries(data.discovery ?? {}).filter(([, value]) => value?.state === 'error')
         .map(([channel, value]) => `${modelChannelLabels[channel] || channel}：${typeof value.message === 'string' ? value.message : '目录暂不可用'}`);
       if (!completeModelDiscoverySupported()) discovery.unshift('当前后台尚未加载完整模型目录功能，下面仅显示旧目录中的已保存模型。请先重启网关服务，恢复后再刷新账号目录；仅刷新网页不会更新后台。');
       text('model-settings-discovery', discovery.join(' · ')); elements['model-settings-discovery'].hidden = !discovery.length;
+      return data;
     } catch (error) {
       if (generation !== modelSettingsGeneration) return;
       modelSettingsUnavailable = error.status === 404;
@@ -1346,6 +1623,7 @@ async function refreshModelSettings({ replaceDraft = false } = {}) {
         empty.textContent = modelSettingsUnavailable ? '重启服务后可用。' : '模型列表暂时无法读取。';
         elements['model-settings-list'].replaceChildren(empty);
       }
+      return null;
     } finally {
       if (modelSettingsRequest === pending) {
         modelSettingsRequest = null; renderChannelModelCounts(); renderModelSettingsControls();
@@ -1359,6 +1637,96 @@ async function refreshModelSettings({ replaceDraft = false } = {}) {
 async function refreshAuthorizedModelSettings() {
   if (modelSettingsRequest) await modelSettingsRequest;
   await refreshModelSettings();
+}
+async function readModelSettingsForSave(changes, generation) {
+  if (modelSettingsRequest) await modelSettingsRequest;
+  if (generation !== modelSettingsGeneration) return null;
+  return refreshModelSettings({ rebaseChanges: changes });
+}
+function retainedModelSettingsDraft(changes) {
+  if (changes.contexts.size === 1) {
+    const tokens = [...changes.contexts.values()][0].to;
+    return `${tokens === null ? '跟随默认的' : `${contextTokenLabel(tokens)} 的`}上下文草稿已保留`;
+  }
+  return '你的模型和上下文草稿已保留';
+}
+function modelSettingsSaveNotice(message, isError = false) {
+  text('model-settings-message', message);
+  if (isError) notify(message, true);
+}
+async function saveModelSettingsChanges() {
+  if (!modelSettings || !modelSettingsDirty()) return;
+  const changes = captureModelSettingsChanges(), generation = modelSettingsGeneration;
+  let baseline = modelSettings;
+  const initialConflict = modelSettingsMergeConflict(baseline, changes);
+  if (initialConflict) {
+    modelSettingsSaveNotice(`${initialConflict}${retainedModelSettingsDraft(changes)}，请刷新目录后核对。`, true);
+    return;
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let acknowledgement;
+    try { acknowledgement = await post('/api/model-settings', modelSettingsPayload(baseline, changes)); }
+    catch (error) {
+      if (generation !== modelSettingsGeneration) {
+        modelSettingsSaveNotice('服务已重新连接，旧保存结果未确认；请核对当前草稿后再次保存。', true);
+        return;
+      }
+      if (error.status !== 409) {
+        modelSettingsSaveNotice(`未能确认保存：${error.message || '网络请求失败'}。${retainedModelSettingsDraft(changes)}，请检查后再次保存。`, true);
+        return;
+      }
+      const fresh = await readModelSettingsForSave(changes, generation);
+      if (generation !== modelSettingsGeneration) return;
+      if (!fresh) {
+        modelSettingsSaveNotice(`配置版本已变化，暂时无法读取最新目录。${retainedModelSettingsDraft(changes)}，请刷新后再次保存。`, true);
+        return;
+      }
+      const conflict = modelSettingsMergeConflict(fresh, changes);
+      if (conflict) {
+        modelSettingsSaveNotice(`${conflict}${retainedModelSettingsDraft(changes)}，请核对后再次保存。`, true);
+        return;
+      }
+      if (modelSettingsConfirmed(fresh, changes)) {
+        rememberModelSettingsConfirmation(fresh, changes);
+        modelSettingsSaveNotice('已确认所选模型和上下文设置生效。请在客户端刷新模型目录，或重开客户端。');
+        return;
+      }
+      if (attempt === 1) {
+        modelSettingsSaveNotice(`目录持续更新，本次未完成保存。${retainedModelSettingsDraft(changes)}，请稍后再次保存。`, true);
+        return;
+      }
+      baseline = fresh;
+      continue;
+    }
+    if (generation !== modelSettingsGeneration) {
+      modelSettingsSaveNotice('服务已重新连接，旧保存结果未确认；请核对当前草稿后再次保存。', true);
+      return;
+    }
+    const acknowledged = modelSettingsConfirmed(acknowledgement, changes) && acknowledgement.revision >= modelSettingsRevisionFloor;
+    if (acknowledged) rememberModelSettingsConfirmation(acknowledgement, changes);
+    const confirmed = acknowledged ? confirmedModelSettingsSnapshot(baseline, acknowledgement) : null;
+    const fresh = await readModelSettingsForSave(changes, generation);
+    if (generation !== modelSettingsGeneration) return;
+    if (fresh && modelSettingsConfirmed(fresh, changes) && (!acknowledged || fresh.revision >= acknowledgement.revision)) {
+      rememberModelSettingsConfirmation(fresh, changes);
+      const changedCapability = modelSettingsMergeConflict(fresh, changes);
+      if (changedCapability) {
+        modelSettingsSaveNotice(`保存值已确认，但${changedCapability}已保留最新目录，请核对后重新选择。`, true);
+        return;
+      }
+      modelSettingsSaveNotice('已保存并确认所选模型和上下文。请在客户端刷新模型目录，或重开客户端。');
+      return;
+    }
+    if (confirmed && (!fresh || fresh.revision <= acknowledgement.revision
+      || [...changes.contexts.keys()].some(id => !modelSettingField(fresh, id, 'context').consistent)
+      || [...changes.checkboxes.keys()].some(id => !modelSettingField(fresh, id, 'checkbox').consistent))) {
+      adoptModelSettingsSnapshot(confirmed, changes);
+      modelSettingsSaveNotice('后台已确认保存，但目录回读尚未同步；已保留确认值，请刷新目录后核对。', true);
+      return;
+    }
+    modelSettingsSaveNotice(`${acknowledged ? '保存后设置又发生变化' : '保存结果尚未得到一致确认'}。${retainedModelSettingsDraft(changes)}，请核对后再次保存。`, true);
+    return;
+  }
 }
 
 async function bootstrapManagementSession(signal) {
@@ -1723,6 +2091,8 @@ async function refreshStatus({ duringRestart = false, signal } = {}) {
       status = incoming;
       if (previousToken && status.csrfToken && status.csrfToken !== previousToken) {
         modelSettingsGeneration++;
+        modelSettingsRevisionFloor = -1;
+        modelSettingsConfirmation = null;
         modelSettingsRequest = null;
         modelSettingsLoaded = false;
         worldServiceGeneration++;
@@ -2653,30 +3023,12 @@ elements['service-cancel-button'].addEventListener('click', () => {
   text('service-message', '已取消重启。'); renderServiceControl();
 });
 elements['model-settings-save-button'].addEventListener('click', () => {
-  void action('model-settings-save', async () => {
-    if (!modelSettings || !modelSettingsDirty()) return;
-    const visibleModels = new Set(modelSettings.models.map(model => model.id));
-    const disabledModels = [...(modelSettings.disabledModels ?? []).filter(id => !visibleModels.has(id)),
-      ...modelSettings.models.filter(model => !modelDraft.get(model.id)).map(model => model.id)];
-    try { await post('/api/model-settings', { revision: modelSettings.revision, disabledModels }); }
-    catch (error) {
-      if (error.status !== 409) throw error;
-      if (modelSettingsRequest) await modelSettingsRequest;
-      await refreshModelSettings({ replaceDraft: true });
-      text('model-settings-message', modelSettingsError || modelSettingsUnavailable
-        ? '版本冲突，模型选择尚未保存。请刷新列表后重试。'
-        : '模型列表已由其他页面更新，已重新加载。请重新勾选后保存。');
-      return;
-    }
-    if (modelSettingsRequest) await modelSettingsRequest;
-    await refreshModelSettings({ replaceDraft: true });
-    text('model-settings-message', '已保存。请在客户端刷新模型目录，或重开客户端。');
-  });
+  void action('model-settings-save', saveModelSettingsChanges);
 });
 elements['model-settings-reset-button'].addEventListener('click', () => {
   if (busyAction || !modelSettings) return;
   modelDraft = new Map(modelSettings.models.map(model => [model.id, model.enabled]));
-  renderModelSettingsList(); text('model-settings-message', '已恢复为最近保存的选择。');
+  resetModelContextDraft(); renderModelSettingsList(); text('model-settings-message', '已恢复为最近保存的模型和上下文设置。');
 });
 elements['model-settings-refresh-button'].addEventListener('click', () => {
   if (busyAction || restartInProgress) return;
@@ -2684,7 +3036,7 @@ elements['model-settings-refresh-button'].addEventListener('click', () => {
   void refreshModelSettings().then(() => {
     if (!modelSettingsError && !modelSettingsUnavailable) text('model-settings-message', !completeModelDiscoverySupported()
       ? '当前后台仍使用旧目录接口。请先点击“重启网关服务”，恢复后再刷新账号目录。'
-      : modelSettingsDirty() ? '账号目录已刷新，未保存的可用勾选已保留；不可用的未保存启用已撤回。保存时仍会核对目录版本。'
+      : modelSettingsDirty() ? '账号目录已刷新，未保存的可用勾选已保留，上下文设置已保留；不可用的未保存启用已撤回。保存时仍会核对目录版本。'
         : '账号目录已刷新。新增模型默认关闭，勾选并保存后在 Codex 中刷新模型目录。');
   });
 });

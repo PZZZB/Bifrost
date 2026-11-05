@@ -22,7 +22,9 @@ const aCatalog = { etag: 'native-a-metadata', models: [{ slug: 'a-model', priori
 const bCatalog = { models: [{ slug: 'gpt-6-astra' }, { slug: 'gpt-6.1-sol' }] };
 const terminal = response => `data: ${JSON.stringify({ type: 'response.completed', response })}\n\n`;
 
-async function fixture(t, { provider, enabled, fetchImpl, onUsage, catalogWaitMs = 50, modelPolicy = null } = {}) {
+// Catalog tests with persisted policy include filesystem work. Use the normal
+// gateway budget; the deadline test supplies its own explicit short timeout.
+async function fixture(t, { provider, enabled, fetchImpl, onUsage, catalogWaitMs = 1200, modelPolicy = null } = {}) {
   const calls = { a: 0, b: 0, upstream: [], adapter: [] }, records = [];
   provider ??= {
     status: async () => ready,

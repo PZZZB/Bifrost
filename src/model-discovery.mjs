@@ -43,7 +43,10 @@ export class ModelDiscovery {
         const name = channel === 'Cursor' && text(source.displayName) ? `Cursor ${source.displayName}`
           : text(source.name) ? source.name : fallback;
         const availability = channel === 'Cursor' ? cursorModelAvailability(source) : { available: source.available !== false, reason: source.reason };
-        const { slug: _sourceSlug, ...metadata } = source;
+        // ModelPolicy must see this adapter's canonical name. Keeping SDK
+        // display aliases would override it and alternate with native catalogs.
+        const { slug: _sourceSlug, display_name: _sourceDisplayName, displayName: _sourceSdkName,
+          label: _sourceLabel, ...metadata } = source;
         return { ...metadata, id: alias.id, name, available: availability.available,
           ...(!availability.available ? { reason: text(availability.reason) ? availability.reason : '此模型暂未适配当前客户端。' } : {}),
           source: sources.has(source.source) ? source.source : 'account-catalog' };

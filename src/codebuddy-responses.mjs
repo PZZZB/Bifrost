@@ -3,6 +3,7 @@ import { clientScope as validateClientScope } from './client-scope.mjs';
 import { CODEBUDDY_MODEL } from './codebuddy-provider.mjs';
 import { CODEBUDDY_STATE_PREFIX, CODEBUDDY_COMPACTION_STATE_PREFIX } from './codebuddy-thinking-state.mjs';
 import { resolveCodeBuddyAlias } from './codebuddy-models.mjs';
+import { codeBuddySourceError } from './codebuddy-source-errors.mjs';
 import { translateResponses as translate, ResponsesConversion as Conversion, encodeResponsesEvent as sse,
   AdapterError, errorData, errorResponse, MessagesSseParser as SseParser, messagesJsonEvents as jsonEvents } from './protocols/responses-messages.mjs';
 
@@ -188,9 +189,14 @@ export class CodeBuddyResponsesProvider {
         clientScope,
         headers: new Headers({ 'content-type': 'application/json', 'anthropic-version': '2023-06-01' }), signal: abort.signal });
       if (!upstream?.ok) {
-        let message = 'CodeBuddy 上游请求失败。';
-        try { const data = await upstream.json(); if (typeof data.error?.message === 'string') message = data.error.message.slice(0, 1024); } catch {}
-        const denied = errorResponse(new AdapterError(message, upstream?.status >= 400 && upstream.status <= 599 ? upstream.status : 502));
+        let message = 'CodeBuddy 上游请求失败。', code = null;
+        try {
+          const data = await upstream.json();
+          if (typeof data.error?.message === 'string') message = data.error.message.slice(0, 1024);
+          const source = codeBuddySourceError(data.error?.code);
+          if (source?.status === upstream.status) code = source.code;
+        } catch {}
+        const denied = errorResponse(new AdapterError(message, upstream?.status >= 400 && upstream.status <= 599 ? upstream.status : 502, null, code));
         denied.bridgeUsage = upstream?.bridgeUsage ?? Promise.resolve(null); denied.bridgeModel = upstream?.bridgeModel;
         cleanup(); return denied;
       }
@@ -237,7 +243,8 @@ export class CodeBuddyResponsesProvider {
         }
         checkAbort();
         const usage = await (upstream.bridgeUsage ?? null); checkAbort();
-        for (const event of conversion.finishEvents(usage)) { checkAbort(); yield event; }
+        const commit = [...conversion.finishEvents(usage)]; checkAbort();
+        yield commit;
       } finally {
         await dispose();
       }
@@ -246,7 +253,9 @@ export class CodeBuddyResponsesProvider {
     if (request.original.stream !== true) {
       try {
         let complete;
-        for await (const event of iterator) if (['response.completed', 'response.incomplete'].includes(event.type)) complete = event.response;
+        for await (const value of iterator) for (const event of Array.isArray(value) ? value : [value]) {
+          if (['response.completed', 'response.incomplete'].includes(event.type)) complete = event.response;
+        }
         return decorate(Response.json(complete));
       } catch (error) { return decorate(errorResponse(error)); }
     }
@@ -254,7 +263,14 @@ export class CodeBuddyResponsesProvider {
       async pull(controller) {
         try {
           const next = await iterator.next();
-          if (next.done) controller.close(); else controller.enqueue(sse(next.value));
+          if (next.done) controller.close();
+          else {
+            controller.enqueue(sse(next.value));
+            if (Array.isArray(next.value)) {
+              controller.close();
+              void iterator.return().catch(() => {});
+            }
+          }
         } catch (error) {
           controller.enqueue(sse(conversion.event('response.failed', { response: conversion.response('failed', null, errorData(error)) })));
           controller.close();

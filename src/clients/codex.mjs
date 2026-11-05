@@ -1,4 +1,5 @@
 import { modelCapabilities } from '../routing/model-capabilities.mjs';
+import { contextDeclaration } from '../model-context.mjs';
 
 const instructions = 'You are a coding assistant. Follow the user instructions and use the client tools when needed. '
   + 'Respect the configured sandbox, permissions and approval requirements. '
@@ -15,7 +16,8 @@ export const codexClient = Object.freeze({ id: 'codex', name: 'Codex', protocols
   catalog(models) {
     return { models: models.map((model, priority) => {
       const capability = modelCapabilities(model.capabilities);
-      const context = Math.min(capability.contextWindow ?? 32_000, 200_000);
+      const declared = contextDeclaration(capability);
+      const context = declared.clientTokens ?? declared.tokens ?? Math.min(32_000, declared.maxTokens ?? 32_000);
       return { slug: model.id, display_name: model.name || model.id,
         description: `${model.source?.location === 'local' ? '公司额度' : '远端 Bifrost 用户额度'} · ${model.source?.id || 'Bifrost'}。客户端执行工具；不支持托管搜索。`,
         visibility: 'list', supported_in_api: true, priority,
@@ -29,11 +31,13 @@ export const codexClient = Object.freeze({ id: 'codex', name: 'Codex', protocols
         additional_speed_tiers: [], service_tiers: [], default_service_tier: null,
         available_access_programs: null, availability_nux: null, upgrade: null,
         include_skills_usage_instructions: true, include_plugin_usage_instructions: true, include_apps_usage_instructions: true,
-        support_verbosity: false, default_verbosity: null, apply_patch_tool_type: null, web_search_tool_type: 'text',
+        // Patch editing and collaboration are native client tools, independent
+        // of the selected model provider's hosted capabilities.
+        support_verbosity: false, default_verbosity: null, apply_patch_tool_type: 'freeform', web_search_tool_type: 'text',
         truncation_policy: { mode: 'tokens', limit: 10000 }, supports_image_detail_original: false,
         experimental_supported_tools: [], supports_search_tool: true, supports_experimental_context: false,
         use_responses_lite: false, supports_reasoning_effort_updates: false, prefer_websockets: false,
-        tool_mode: 'direct', multi_agent_version: null };
+        tool_mode: 'direct', multi_agent_version: 'v2' };
     }) };
   } });
 

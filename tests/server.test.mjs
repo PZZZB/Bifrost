@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createBridgeServer } from '../src/server.mjs';
+import { ModelPolicy } from '../src/model-policy.mjs';
 
 async function fixture(t, extra = {}) {
   const state = { gatewayKey: 'private-gateway-key-test', enabled: false, pinnedAccount: null };
@@ -196,6 +200,44 @@ test('model settings and Cursor account mutations share local authentication and
   const loginResponse = await fetch(`${url}/api/cursor/login`, { method: 'POST', headers: auth, body: '{}' });
   assert.equal(loginResponse.status, 200); assert.equal((await loginResponse.json()).url, 'https://cursor.com/login');
   assert.equal(saved, 1); assert.equal(logins, 1);
+});
+
+test('context budget configuration uses the authenticated model-settings API and never sends an inference request', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'bifrost-context-api-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const modelPolicy = await ModelPolicy.open({ path: join(directory, 'models.json') });
+  const id = 'claude-codebuddy-opus-5-5';
+  await modelPolicy.observe({ models: [{ id, name: 'Opus', available: true, contextWindow: 300000,
+    contextWindowOptions: [300000, 600000, 1000000], maxInputTokens: 1000000 }] }, 'CodeBuddy');
+  let inferenceRequests = 0, syncs = 0;
+  const { url, cookie, status } = await fixture(t, { modelPolicy,
+    gateway: { metrics: {}, proxy: async (_req, res) => { inferenceRequests++; res.end('unexpected'); } },
+    clientControls: { autoSync: async () => { syncs++; } } });
+  const endpoint = `${url}/api/model-settings`, headers = { cookie, 'X-Bridge-CSRF': status.csrfToken,
+    'content-type': 'application/json' };
+  const post = (body, options = {}) => fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), ...options });
+  const revision = modelPolicy.snapshot().revision, payload = { revision, disabledModels: [], contextWindows: { [id]: 1000000 } };
+  assert.equal((await post(payload, { headers: { cookie } })).status, 403);
+  assert.equal((await post(payload, { headers: { ...headers, Origin: 'https://foreign.example' } })).status, 403);
+  assert.deepEqual(modelPolicy.snapshot().contextWindows, {});
+  const saved = await post(payload); assert.equal(saved.status, 200);
+  assert.equal((await saved.json()).models[0].contextSettings.effectiveTokens, 1000000);
+  assert.equal((await post(payload)).status, 409);
+  let current = await (await fetch(endpoint, { headers: { cookie } })).json();
+  assert.deepEqual(current.contextWindows, { [id]: 1000000 });
+  await modelPolicy.observe({ models: [{ id, name: 'Opus', available: true, contextWindow: 300000,
+    contextWindowOptions: [300000, 600000, 1000000], maxInputTokens: 500000 }] }, 'CodeBuddy');
+  current = await (await fetch(endpoint, { headers: { cookie } })).json();
+  assert.equal(current.models[0].contextSettings.valid, false); assert.equal(current.models[0].contextSettings.effectiveTokens, 300000);
+  assert.equal(current.models[0].capabilities.contextWindow.maxTokens, 500000);
+  assert.deepEqual(current.models[0].capabilities.contextWindow.options, [300000]);
+  assert.equal((await post({ revision: current.revision, disabledModels: [], contextWindows: { [id]: 1000000 } })).status, 400);
+  assert.equal((await post({ revision: current.revision, disabledModels: [], contextWindows: { [id]: 1000001 } })).status, 400);
+  const legacySave = await post({ revision: current.revision, disabledModels: [id] });
+  assert.equal(legacySave.status, 200); assert.deepEqual((await legacySave.json()).contextWindows, { [id]: 1000000 });
+  const reset = await post({ revision: modelPolicy.snapshot().revision, disabledModels: [], contextWindows: { [id]: null } });
+  assert.equal(reset.status, 200); assert.equal((await reset.json()).models[0].contextSettings.effectiveTokens, 300000);
+  assert.equal(inferenceRequests, 0); assert.equal(syncs, 3);
 });
 
 test('the authenticated model-settings GET discovers complete account directories without a Codex model request', async t => {

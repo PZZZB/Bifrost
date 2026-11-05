@@ -112,6 +112,23 @@ function requestThreadId(headers) {
     .map(name => headers[name]).find(value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)) ?? null;
 }
 
+function requestFork(headers, thread) {
+  const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
+  const raw = headers['x-codex-turn-metadata'];
+  if (!thread || typeof raw !== 'string' || raw.length > 32768) return null;
+  try {
+    const metadata = JSON.parse(raw);
+    if (!uuid(metadata?.thread_id)
+        || metadata.thread_id.toLowerCase() !== thread.toLowerCase()
+        || !uuid(metadata.forked_from_thread_id) || metadata.forked_from_thread_id.toLowerCase() === thread.toLowerCase()) return null;
+    const family = ['session-id', 'session_id'].map(name => headers[name]).find(uuid);
+    // Candidate issuers only. A hint never authorizes state: the remote adapter
+    // must authenticate it under the current user, source, model and credentials.
+    return { parentSession: metadata.forked_from_thread_id.toLowerCase(),
+      familySession: family ? family.toLowerCase() : null };
+  } catch { return null; }
+}
+
 export class SseInspector {
   constructor(onEvent) { this.decoder = new TextDecoder(); this.text = ''; this.onEvent = onEvent; }
   push(bytes) {
@@ -549,7 +566,8 @@ export class Gateway {
           if (threadMetrics) threadMetrics.active++;
         }
         const scope = clientScope(req.headers['x-bifrost-client-scope']);
-        const history = await adaptCrossProviderHistory(data, { target: account, clientScope: scope, session: requestThreadId(req.headers) ?? '', signal: abort.signal,
+        const session = requestThreadId(req.headers) ?? '', fork = requestFork(req.headers, session);
+        const history = await adaptCrossProviderHistory(data, { target: account, clientScope: scope, session, fork, signal: abort.signal,
           openCodeBuddyCompaction: typeof this.codeBuddyProvider?.openCompactionForHandoff === 'function'
             ? (token, options) => this.codeBuddyProvider.openCompactionForHandoff(token, options) : null,
           inspectRemoteState: typeof this.remoteSources?.inspectStateForHandoff === 'function'
@@ -560,7 +578,7 @@ export class Gateway {
         if (remote) {
           if (diagnostic) diagnostic.stage = 'upstream_request';
           response = await this.remoteSources.request({ path: `${path}${url.search}`, body: data,
-            scope, session: requestThreadId(req.headers) ?? '', signal: abort.signal });
+            scope, session, fork, signal: abort.signal });
         } else if (codeBuddy || cursor) {
           const provider = cursor ? this.cursorProvider : this.codeBuddyProvider;
           if (provider === null || (cursor ? this.cursorEnabled() : this.codeBuddyEnabled()) !== true) {

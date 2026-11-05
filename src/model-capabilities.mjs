@@ -1,4 +1,5 @@
 import { cursorEffortParameter, cursorImageCapability } from './cursor-service.mjs';
+import { contextDeclaration } from './model-context.mjs';
 
 const EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent']);
 const CHANNELS = new Set(['A', 'B', 'CodeBuddy', 'Cursor', 'Bifrost', 'Claude']);
@@ -57,7 +58,7 @@ export function capabilitiesFromCatalog(value, { channel, promptMode } = {}) {
   const preferred = native ? source.default_reasoning_level : channel === 'Cursor'
     ? source.variants?.find(item => item?.isDefault === true)?.params?.find(item => item?.id === cursorEffortParameter(source)?.id)?.value
     : source.defaultEffort;
-  const tokens = native ? source.context_window : source.contextWindow;
+  const context = contextDeclaration(source, { native }), tokens = context.tokens;
   const mode = compatibility(CHANNELS.has(channel) ? channel : null, promptMode);
   const declared = (support, label, origin = profileOrigin) => capability(support, support === null ? 'unknown' : origin,
     support === null ? `目录未明确返回${label}能力。` : legacy && origin === 'adapter-profile'
@@ -73,7 +74,7 @@ export function capabilitiesFromCatalog(value, { channel, promptMode } = {}) {
         positive(tokens) ? channel === 'Claude' && source.contextSource === 'official-cli-runtime'
           ? '官方 CLI 对当前所选模型返回的上下文上限；未进行满窗口压力测试，客户端实际预算可能更小。'
           : '目录声明的上下文长度；客户端实际保留预算可能更小。' : '目录未明确返回可验证的上下文长度。',
-        { tokens: positive(tokens) ? tokens : null }),
+        context),
       cache: capability(null, channel === 'Claude' ? 'response-usage' : 'unknown', channel === 'CodeBuddy'
         ? '缓存提示不能保证保真转换；实际缓存命中仅以服务商返回的用量为准。'
         : '目录不能证明本次缓存是否生效；仅以服务商返回的实际用量为准。'),

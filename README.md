@@ -165,17 +165,23 @@ CodeBuddy IDE 使用 `models.json`，WorkBuddy 使用“设置 → 模型 → �
 
 Codex 发送 Responses 请求；网关转换为 Anthropic Messages，再复用现有 CodeBuddy Chat Completions 适配器。工具名称、命名空间、参数与结果在转换中保留，工具仍在当前 Codex 执行；自定义工具的完整原始输入封装为字符串传递。支持文本、内嵌图片、函数与自定义客户端工具、流式回复及后续工具回合。未适配的内容或字段返回明确错误。
 
+CodeBuddy、Cursor 和通用远端目录显式启用 Codex 本地 `apply_patch` 与 v2 子代理工具，保留直接工具调用模式。这些声明选择当前客户端执行的工具，不代表源端提供 OpenAI 托管能力；沙箱、审批与子代理管理仍由 Codex 执行。A/B 的原始模型目录继续保留其自身声明。
+
+交互提问继续使用 Codex 自己的提问卡片和回答通道。当前已验证的官方 CLI `0.166.0-alpha.6` 默认只允许在 Plan 模式执行 `request_user_input`；普通模式需要在用户配置已有的 `[features]` 表中设置 `default_mode_request_user_input = true`，完全退出并重开 Codex 加载。该开关已在本机官方二进制注册，但仍标为 `under development`，不是稳定配置承诺。网关能够传递问题和回答，不能代替客户端开启此能力。配置说明见[普通模式提问](docs/local-client-controls.md#普通模式提问)。
+
 Cursor 与 CodeBuddy 共用的转换层识别 Codex 的 `internal_chat_message_metadata_passthrough`：只接受输入条目上的对象或 null，检查后不传给第三方模型，不将其中的内部审计值当成提示或工具执行记录。正文、工具参数和结果中恰好同名的普通数据仍保留。A/B 原生路线继续保留原始字段。
 
 原 CodeBuddy Opus 5.5 使用 adaptive 思考，支持 `low`、`medium`、`high`、`xhigh`，默认 `high`。其他模型按当前账号目录提供的明确能力映射思考参数；没有精确档位时沿用上游默认思考，不把继承的 Codex high/max 提示宣称为已执行。图片与工具能力的明确否定优先于冲突的正向声明。补全、代码跳转、图像生成等尚未适配的条目保留在网页并说明原因，不能勾选为 Codex 对话模型。
 
-桥接上下文使用不高于 200k 的保守预算，实际较小的目录限制会保留；最大输出不超过 32768 token，并受模型目录的更小上限限制。隐藏思考和扩展元数据沿用现有加密、账号与实际上游模型绑定机制，经带 `bifrost-codebuddy-responses-v1:` 前缀的自有封套在 Responses 历史中续接；这不是 OpenAI 的加密凭证，也不会发送给 A/B。不能将一个 CodeBuddy 模型的加密历史用于另一个模型。
+桥接上下文默认使用当前账号目录声明的窗口，不再统一限制为 200K。在控制台的模型选择中可为每个模型选择原生上下文档位或设置上限内的自定义预算，详见[每个模型的上下文预算](docs/local-client-controls.md#每个模型的上下文预算)。最大输出不超过 32768 token，并受模型目录的更小上限限制。隐藏思考和扩展元数据沿用现有加密、账号与实际上游模型绑定机制，经带 `bifrost-codebuddy-responses-v1:` 前缀的自有封套在 Responses 历史中续接；这不是 OpenAI 的加密凭证，也不会发送给 A/B。不能将一个 CodeBuddy 模型的加密历史用于另一个模型。
 
 OpenAI 托管的联网搜索、服务端压缩、服务端会话存储及结构化输出保证不在此适配范围。Codex 默认附带但未使用的 `web_search` 声明会被移除，同时明确告知模型此能力不可用；强制选择搜索或包含托管工具历史的请求会报错。模型仍可使用实际提供的客户端联网工具。系统及 developer 更新保留原顺序，以标记内容和顶层优先级说明转换；并行工具尚未全部返回时，更新随紧接的工具结果传递。
 
 共享转换层接受 `include: null`，以及思考接续、搜索结果、图片引用和代码执行输出的七个公开可选选择器，并兼容 Codex 的 `output.encrypted_content` 选择器。这些字段只选择额外返回内容，不会启用托管工具或伪造其结果；没有对应响应项时不添加额外内容。加密输出选择器保留本网关已有的思考接续，不为普通消息或工具参数伪造 OpenAI 密文。`message.output_text.logprobs` 仍明确拒绝，因为当前通道不提供真实分数。未知选择器和错误类型会报错；`include` 不传给 CodeBuddy 的 Messages／Chat 上游。[公开选择器定义](https://developers.openai.com/api/reference/typescript/resources/responses)。
 
 Codex 在 A/B、CodeBuddy 和远端 Bifröst 之间切换时，网关从当前请求派生可转交的明文历史，保留消息、工具调用和工具结果。来源专用的隐藏思考状态不会转交给其他来源；公开的思考摘要仍作为带标签的历史文本保留。客户端保存的原历史不被改写。CodeBuddy 自有压缩摘要经当前账号和接入用户验证后可转交给其他模型；OpenAI 已有的专用压缩密文无法由其他来源解码，遇到这种历史仍需先用原模型生成明文交接摘要。
+
+远端 Messages 历史快照支持 Codex 侧边聊天和会话分叉，执行会话仍按分支独立。旧版封装会在本地验证并迁移，不因为聊天 ID 改变而丢弃历史。Claude 额度耗尽后切回原生 GPT，已保存摘要的交接无需调用旧 Claude；必要的新压缩使用新选定模型。边界与旧历史索引见[侧边聊天与切换模型](docs/local-client-controls.md#侧边聊天与切换模型)。
 
 支持 Codex v2 通过 `/responses` 发送 `compaction_trigger`：所选上游生成真实工作摘要，完整结束且没有工具调用时，网关才返回一个自有加密 `compaction` 检查点；后续请求恢复为标注的用户上下文。截断、空白、取消和工具错误不会提交压缩成功。CodeBuddy 检查点使用持久密钥，并绑定当前账号、实际模型和接入用户。独立的 `/responses/compact` 仍未适配，不伪造该接口成功。
 
@@ -184,6 +190,8 @@ Token 统计合并 CodeBuddy 的 Codex 与 Claude 渠道，按真实上游 `usag
 可运行 `node scripts/verify-codebuddy-codex-offline.mjs` 做独立本地协议检查：它使用空白 Codex 配置、本地模拟上游和临时文件，不使用真实账户或发送模型推理。增加 `--include-mode selectors` 或 `--include-mode null` 可在模拟适配器边界验证额外选择器（包括 `output.encrypted_content`）或 null 与原有工具回合、思考接续兼容；报告分别记录原始客户端字段与合成输入。真实质量、实时模型权限和扣费仍需用户验收。
 
 `node scripts/verify-codebuddy-compaction-offline.mjs` 使用官方 Codex app-server 和假上游，验证同一会话中的真实 v2 压缩触发、压缩后续聊、CodeBuddy 与 A/B 来回切换，以及远端 Bifröst 的压缩和跨模型交接。每个客户端推理请求只派发一次模型请求；不加载现有登录或修改用户配置。
+
+`npm run verify:codex-questions` 使用官方 Codex app-server、完整 CodeBuddy 转换链和假上游，验证默认配置的普通模式限制、Plan 模式问答，以及开启上述开关后的普通模式问答。测试会核对原生提问事件和回答回传；不加载现有账号、不调用真实模型，也不修改用户配置。它验证原生客户端与协议链路，实际桌面卡片的显示和点击仍由桌面端验收。
 
 ## Codex 使用 Cursor
 

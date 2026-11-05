@@ -434,42 +434,43 @@ for (const stream of [false, true]) test(`CodeBuddy ${stream ? 'SSE' : 'JSON'} h
 async function abortAfterCheckpointFrame(response, abort, frameType) {
   assert.equal(response.status, 200); assert.match(response.headers.get('content-type'), /text\/event-stream/);
   const reader = response.body.getReader(), decoder = new TextDecoder();
-  const events = []; let reachedFrame = false, pending = '';
+  const events = []; let reachedFrame = false, pending = '', commitFrames = null;
   try {
     while (true) {
       const next = await reader.read(); if (next.done) break;
       pending += decoder.decode(next.value, { stream: true });
-      let boundary;
+      let boundary; const currentFrames = [];
       while ((boundary = /\r?\n\r?\n/.exec(pending))) {
         const raw = pending.slice(0, boundary.index); pending = pending.slice(boundary.index + boundary[0].length);
         const data = raw.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
         if (!data) continue;
-        const event = JSON.parse(data); events.push(event);
+        const event = JSON.parse(data); events.push(event); currentFrames.push(event);
         if (!reachedFrame && event.type === frameType) {
           assert.equal(event.item?.type, 'compaction'); assert.equal(typeof event.item.encrypted_content, 'string');
-          // Abort at the observable wire boundary, before requesting another
-          // frame. This does not cancel the already completed model response.
-          assert.equal(pending, ''); reachedFrame = true; abort.abort();
+          // The source has completed and the entire terminal commit is already
+          // enqueued. Local abort must not split it or append response.failed.
+          reachedFrame = true; abort.abort(); commitFrames = currentFrames;
         }
       }
     }
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   assert.equal(reachedFrame, true);
-  const published = events.slice(events.findIndex(event => event.type === frameType) + 1);
-  assert.equal(published.some(event => event.type === 'response.completed'), false);
-  if (frameType === 'response.output_item.added') assert.equal(published.some(event => event.type === 'response.output_item.done'), false);
+  assert.deepEqual(commitFrames.map(event => event.type), ['response.output_item.added', 'response.output_item.done', 'response.completed']);
+  assert.equal(events.some(event => event.type === 'response.failed'), false);
+  const completed = events.find(event => event.type === 'response.completed');
+  assert.deepEqual(completed.response.output, [events.find(event => event.type === 'response.output_item.done').item]);
   return events;
 }
 
 for (const after of ['response.output_item.added', 'response.output_item.done']) {
-  test(`CodeBuddy cancellation after ${after} cannot commit a canonical compaction response`, async () => {
+  test(`CodeBuddy cancellation after published ${after} preserves the complete compaction commit`, async () => {
     const f = fixture(), abort = new AbortController();
     const response = await f.request(compactBody(true), { signal: abort.signal });
     await abortAfterCheckpointFrame(response, abort, after);
     assert.equal(f.client.calls.length, 1); assert.equal(f.counts.seals, 1);
   });
 
-  test(`generic Messages cancellation after ${after} cannot commit a canonical compaction response`, async () => {
+  test(`generic Messages cancellation after published ${after} preserves the complete compaction commit`, async () => {
     const abort = new AbortController(); let calls = 0;
     const adapter = new MessagesResponsesAdapter({ stateSecret: 'late-cancel-summary-fixed-test-secret-without-credentials',
       requestMessages: async () => {

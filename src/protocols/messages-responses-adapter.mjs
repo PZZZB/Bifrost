@@ -1,6 +1,8 @@
 import { createHmac } from 'node:crypto';
 import { ClientStateCodec } from '../client-state.mjs';
+import { clientScope as validateClientScope } from '../client-scope.mjs';
 import { meterClientResponse, getClientMeter } from '../client-meter.mjs';
+import { readClaudeSourceError } from '../claude-source-errors.mjs';
 import { translateResponses, ResponsesConversion, MessagesSseParser, messagesJsonEvents,
   encodeResponsesEvent, AdapterError, errorData, errorResponse } from './responses-messages.mjs';
 
@@ -35,9 +37,23 @@ export class MessagesResponsesAdapter {
       return saved.summary;
     } catch { throw new AdapterError('历史摘要不属于当前来源、模型、接入用户或授权。', 409, 'input.compaction'); }
   }
-  async request({ body, scope, session, signal, capabilities = {} } = {}) {
+  rebindState(value, { fromScope, scope, model, kind } = {}) {
+    try {
+      if (kind === 'reasoning') {
+        const block = thinkingBlock(JSON.parse(this.#codec.open(value, fromScope, model)));
+        const fields = block.type === 'thinking' ? ['type', 'thinking', 'signature'] : ['type', 'data'];
+        if (Object.keys(block).some(field => !fields.includes(field))) throw new Error();
+        return fromScope === scope ? value : this.#codec.seal(JSON.stringify(block), scope, model);
+      }
+      if (!['compaction', 'context_compaction'].includes(kind)) throw new Error();
+      const summary = this.openCompactionForHandoff(value, { scope: fromScope, model });
+      return fromScope === scope ? value : COMPACTION_PREFIX
+        + this.#compactionCodec.seal(JSON.stringify({ version: 1, summary }), scope, model);
+    } catch { throw new AdapterError('历史快照不属于当前来源、模型、接入用户或授权，或包含未支持的状态。', 409); }
+  }
+  async request({ body, scope, session, signal, capabilities = {}, legacyScopes = [] } = {}) {
     const abort = new AbortController(), linked = AbortSignal.any([abort.signal, ...(signal ? [signal] : [])]);
-    let translated, upstream, reader, metered;
+    let translated, upstream, reader, metered, previousScopes = [];
     const profile = { model: body?.model, label: 'Bifrost', idPrefix: 'bifrost_messages', reasoningIdPrefix: 'rs_bifrost_messages_',
       allowedEfforts: capabilities.reasoningEfforts ?? [], defaultReasoning: {}, allowRedactedThinking: true,
       stablePriorityPrefix: true,
@@ -55,7 +71,7 @@ export class MessagesResponsesAdapter {
     // Responses has no field for Anthropic's direct-caller annotation. Keep only
     // that observed annotation in a bounded, scoped exact-replay map. IDs, names
     // and arguments must still match; no defaults or invented tool results.
-    const key = block => this.#digest([scope, body.model, block.id]);
+    const key = (block, owner = scope) => this.#digest([owner, body.model, block.id]);
     const identity = block => this.#digest([block.type, block.id, block.name, block.input]);
     profile.observeTool = block => {
       if (block.caller === undefined) return;
@@ -68,14 +84,36 @@ export class MessagesResponsesAdapter {
       while (this.#toolMetadata.size > 4096) this.#toolMetadata.delete(this.#toolMetadata.keys().next().value);
     };
     profile.restoreTool = block => {
-      const row = this.#toolMetadata.get(key(block));
+      const currentKey = key(block);
+      let row = this.#toolMetadata.get(currentKey);
+      if (!row && previousScopes.length) {
+        const observed = previousScopes.map(owner => ({ key: key(block, owner), row: this.#toolMetadata.get(key(block, owner)) }))
+          .filter(value => value.row);
+        const matching = observed.filter(value => value.row.identity === identity(block));
+        if (!matching.length && observed.length) throw new AdapterError('工具接续的名称或参数已变化。', 409);
+        if (matching.length) {
+          // Only server-verified snapshot origins reach this argument. Copy
+          // previously observed read-only annotations, never native callbacks.
+          const selected = matching.reduce((first, value) => value.row.expires < first.row.expires ? value : first);
+          if (selected.row.expires <= Date.now()) {
+            this.#toolMetadata.delete(selected.key); throw new AdapterError('工具接续记录已过期，请新建会话。', 409);
+          }
+          row = { ...selected.row };
+          this.#toolMetadata.set(currentKey, row);
+          while (this.#toolMetadata.size > 4096) this.#toolMetadata.delete(this.#toolMetadata.keys().next().value);
+        }
+      }
       if (!row) return block;
-      if (row.expires <= Date.now()) { this.#toolMetadata.delete(key(block)); throw new AdapterError('工具接续记录已过期，请新建会话。', 409); }
+      if (row.expires <= Date.now()) { this.#toolMetadata.delete(currentKey); throw new AdapterError('工具接续记录已过期，请新建会话。', 409); }
       if (row.identity !== identity(block)) throw new AdapterError('工具接续的名称或参数已变化。', 409);
       return { ...block, caller: { type: 'direct' } };
     };
     let ignoredEffort = false;
     try {
+      try {
+        if (!Array.isArray(legacyScopes) || legacyScopes.some(owner => !validateClientScope(owner))) throw new Error();
+      } catch { throw new AdapterError('历史快照来源范围无效。', 409); }
+      previousScopes = [...new Set(legacyScopes)].filter(owner => owner !== scope);
       const input = structuredClone(body);
       // A client may inherit a global hint even when this source exposes no control.
       // Use its default explicitly and never echo that hint as executed reasoning.
@@ -91,11 +129,12 @@ export class MessagesResponsesAdapter {
       upstream = await this.#request({ body: translated.upstream, scope, session, signal: linked });
       if (!(upstream instanceof Response)) throw new AdapterError('Messages 来源未返回有效响应。', 502);
       if (!upstream.ok) {
-        // Keep a user-visible status; provider bodies/addresses never become adapter errors.
-        await upstream.body?.cancel();
+        // Read only a bounded, whitelisted source code. Provider text and
+        // addresses never become adapter errors or client-visible diagnostics.
+        const source = await readClaudeSourceError(upstream, { signal: linked });
         const message = upstream.status === 402 ? '模型来源余额不足或需要充值，请检查远端账号额度（HTTP 402）。'
           : `模型来源拒绝了请求（HTTP ${upstream.status}）。`;
-        const response = errorResponse(new AdapterError(message, upstream.status));
+        const response = errorResponse(new AdapterError(source?.message ?? message, upstream.status, null, source?.code));
         const retry = upstream.headers.get('retry-after'); if (retry) response.headers.set('retry-after', retry);
         return response;
       }
@@ -135,7 +174,8 @@ export class MessagesResponsesAdapter {
         const wireUsage = usage ? { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens, total_tokens: usage.totalTokens,
           input_tokens_details: { cached_tokens: usage.cachedInputTokens, cache_write_tokens: usage.cacheWriteTokens },
           output_tokens_details: { reasoning_tokens: usage.reasoningTokens } } : null;
-        for (const event of conversion.finishEvents(wireUsage)) { check(); yield event; }
+        const commit = [...conversion.finishEvents(wireUsage)]; check();
+        yield commit;
       } finally { await dispose(); }
     };
     const iterator = events();
@@ -143,13 +183,25 @@ export class MessagesResponsesAdapter {
     if (translated.original.stream !== true) {
       try {
         let result;
-        for await (const event of iterator) if (['response.completed', 'response.incomplete'].includes(event.type)) result = event.response;
+        for await (const value of iterator) for (const event of Array.isArray(value) ? value : [value]) {
+          if (['response.completed', 'response.incomplete'].includes(event.type)) result = event.response;
+        }
         return Response.json(result, { headers });
       } catch (error) { return errorResponse(error); }
     }
     return new Response(new ReadableStream({
       async pull(controller) {
-        try { const next = await iterator.next(); if (next.done) controller.close(); else controller.enqueue(encodeResponsesEvent(next.value)); }
+        try {
+          const next = await iterator.next();
+          if (next.done) controller.close();
+          else {
+            controller.enqueue(encodeResponsesEvent(next.value));
+            if (Array.isArray(next.value)) {
+              controller.close();
+              void iterator.return().catch(() => {});
+            }
+          }
+        }
         catch (error) {
           controller.enqueue(encodeResponsesEvent(conversion.event('response.failed', { response: conversion.response('failed', null, errorData(error)) })));
           controller.close();

@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { normalizeRemoteAccount, remoteQuotaCard, bifrostQuotaSnapshot } from '../src/bifrost-quotas.mjs';
 import { BifrostRemote } from '../src/providers/bifrost-remote.mjs';
 import { startServerRemotes } from '../src/runtime/server-remotes.mjs';
@@ -152,10 +155,15 @@ test('metadata transport cancellation and a closed source cannot publish a prior
   assert.equal(f.requests.length, 1);
 });
 
-test('runtime keeps sources separate, isolates an old server, and invalidates bindings when one source closes', async () => {
+test('runtime keeps sources separate, isolates an old server, and invalidates bindings when one source closes', async t => {
+  const tempRoot = await realpath(tmpdir()), stateDir = await mkdtemp(join(tempRoot, 'bifrost-quota-runtime-'));
+  t.after(async () => {
+    assert.equal(dirname(stateDir), tempRoot); assert.match(basename(stateDir), /^bifrost-quota-runtime-/);
+    await rm(stateDir, { recursive: true, force: true });
+  });
   const requests = [], config = { version: 1, sources: ['home', 'office'].map(id => ({ id, kind: 'bifrost-remote',
     baseUrl: `https://${id}.example.invalid/v1`, protocols: ['messages'], credentialRef: randomUUID() })) };
-  const runtime = await startServerRemotes({ config, stateDir: 'unused-quota-fixture', secret: 'remote-balance-fixture-secret-'.repeat(3),
+  const runtime = await startServerRemotes({ config, stateDir, secret: 'remote-balance-fixture-secret-'.repeat(3),
     refreshIntervalMs: 3_600_000, loadKey: async () => apiKey,
     fetchImpl: async (url, options) => {
       requests.push({ url: String(url), method: options.method || 'GET' });

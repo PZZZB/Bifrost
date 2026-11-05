@@ -15,7 +15,10 @@ async function fixture(t, value = saved) {
   const path = join(configDir, '.credentials.json');
   const save = data => writeFile(path, typeof data === 'string' ? data : JSON.stringify(data), { mode: 0o600 });
   await save(value);
-  return { configDir, path, save, read: options => readClaudeAuthorization({ configDir, now, platform: 'linux', ...options }) };
+  // Exercise file storage on every host without applying POSIX permissions to
+  // a Windows file. The separate Keychain test supplies its own macOS branch.
+  const platform = process.platform === 'win32' ? 'win32' : 'linux';
+  return { configDir, path, save, read: options => readClaudeAuthorization({ configDir, now, platform, ...options }) };
 }
 
 test('repeated health checks and a new hub read the same persistent credentials without starting Claude or rewriting tokens', async t => {

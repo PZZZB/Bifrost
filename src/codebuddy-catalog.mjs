@@ -51,7 +51,13 @@ const modelSql = `${selectedEntry}
   CASE WHEN json_type(model.value, '$.reasoning.canDisableThinking') IN ('true','false')
     THEN json_extract(model.value, '$.reasoning.canDisableThinking') END AS canDisableThinking,
   CASE WHEN json_type(model.value, '$.contextWindow.defaultLength') = 'integer'
-    THEN json_extract(model.value, '$.contextWindow.defaultLength') END AS contextLength
+    THEN json_extract(model.value, '$.contextWindow.defaultLength') END AS contextLength,
+  CASE WHEN json_type(model.value, '$.contextWindow.supportedLengths') = 'array'
+    AND json_array_length(model.value, '$.contextWindow.supportedLengths') BETWEEN 1 AND 32
+    AND NOT EXISTS (SELECT 1 FROM json_each(model.value, '$.contextWindow.supportedLengths') AS length
+      WHERE length.type != 'integer' OR length.value < 1 OR length.value > 1000000000)
+    THEN (SELECT json_group_array(length.value) FROM json_each(model.value, '$.contextWindow.supportedLengths') AS length)
+    END AS contextLengths
   FROM owned, json_each(json_extract(owned.entry, '$.data.models')) AS model
   LIMIT ${MAX_MODELS + 1}`;
 const promotionFields = ['id', 'name', 'priority', 'enabled', 'startAt', 'endAt', 'startTime', 'endTime'];
@@ -143,9 +149,14 @@ export class NativeCodeBuddyCatalog {
         if (row.reasoningSummary === 'auto') reasoning.summary = 'auto';
         if (row.canDisableThinking === 0 || row.canDisableThinking === 1) reasoning.canDisableThinking = row.canDisableThinking === 1;
         if (Object.keys(reasoning).length) model.reasoning = reasoning;
+        const contextWindow = {};
         if (Number.isSafeInteger(row.contextLength) && row.contextLength > 0 && row.contextLength <= 1_000_000_000) {
-          model.contextWindow = { defaultLength: row.contextLength };
+          contextWindow.defaultLength = row.contextLength;
         }
+        if (row.contextLengths !== null) {
+          contextWindow.supportedLengths = [...new Set(JSON.parse(row.contextLengths))].sort((a, b) => a - b);
+        }
+        if (Object.keys(contextWindow).length) model.contextWindow = contextWindow;
         if (row.hasError) model.error = true;
         if (row.hasDisabledReason) model.disabledReason = true;
         const promotions = database.prepare(promotionSql).all(EXTENSION, identity.uid, entry.savedAt, model.id);

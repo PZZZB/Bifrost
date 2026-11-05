@@ -14,6 +14,7 @@ import { UsageLedger } from '../src/usage-ledger.mjs';
 import { normalizeDiagnosticRecord } from '../src/request-diagnostics.mjs';
 import { DesktopWire } from '../src/routing/desktop-wire.mjs';
 import { ModelRouter } from '../src/routing/model-router.mjs';
+import { MessagesResponsesAdapter } from '../src/protocols/messages-responses-adapter.mjs';
 
 const secret = 'server-remote-fixture-secret-'.repeat(3), apiKey = `bfk_${'R'.repeat(43)}`;
 const baseUrl = 'https://mac.example.invalid:47846/v1';
@@ -22,6 +23,31 @@ const config = () => ({ version: 1, sources: [source()] });
 const opus = 'remote/bifrost/Claude-opus', sonnet = 'remote/bifrost/Claude-sonnet';
 const codexIncludes = ['reasoning.encrypted_content', 'output.encrypted_content', 'web_search_call.action.sources', 'web_search_call.results',
   'file_search_call.results', 'code_interpreter_call.outputs', 'computer_call_output.output.image_url', 'message.input_image.image_url'];
+function remoteContext(session, caller = null, model = opus) {
+  const provider = { id: 'bifrost', kind: 'bifrost-remote', generation: createHash('sha256').update(JSON.stringify([baseUrl, apiKey])).digest('hex'),
+    catalogSnapshot: () => [{ id: 'Claude-opus', protocols: ['responses'] }, { id: 'Claude-sonnet', protocols: ['responses'] }],
+    async refreshCatalog() {}, async request() {}, status: () => ({}), async close() {} };
+  return new ModelRouter({ providers: [provider], secret }).resolve('responses', {
+    body: { model }, owner: caller || 'server-owner', session, trackSession: false,
+  });
+}
+async function legacyHistory(output, { session, caller = null, version = 1, model = opus }) {
+  const context = remoteContext(session, caller, model);
+  const modern = new DesktopWire({ secret, prefix: REMOTE_RESPONSES_STATE_PREFIX, selfDescribingState: true });
+  const inner = modern.input({ input: output }, { ...context, scope: context.snapshotScope }).input;
+  const adapter = new MessagesResponsesAdapter({ stateSecret: secret, requestMessages: async () => { throw new Error('No fixture inference allowed.'); } });
+  for (const item of inner) if (item.encrypted_content != null) {
+    item.encrypted_content = adapter.rebindState(item.encrypted_content, {
+      fromScope: context.snapshotScope, scope: context.scope, model: context.upstreamModel, kind: item.type,
+    });
+  }
+  const old = new DesktopWire({ secret, prefix: REMOTE_RESPONSES_STATE_PREFIX, selfDescribingState: version === 2 });
+  return (await (await old.response(Response.json({ output: inner }), context)).json()).output;
+}
+const forkHeaders = (child, parent, caller = null, extra = {}) => ({ 'thread-id': child,
+  ...(caller ? { 'x-bifrost-client-scope': caller } : {}),
+  'x-codex-turn-metadata': JSON.stringify({ thread_id: child, history_initialization: 'warm_fork', forked_from_thread_id: parent }),
+  ...extra });
 async function directory(t) {
   const path = await realpath(await mkdtemp(join(tmpdir(), 'bifrost-server-remotes-')));
   t.after(() => rm(path, { recursive: true, force: true })); return path;
@@ -76,11 +102,11 @@ test('protected credential and config publication preserve the prior source on f
   assert.deepEqual(await loadServerRemotesConfig(stateDir), next);
 });
 
-async function fixture(t, { configured = true, policy = true } = {}) {
+async function fixture(t, { configured = true, policy = true, remoteProtocols = ['chat-completions', 'messages'] } = {}) {
   const stateDir = await directory(t), calls = { local: [], remote: [], b: 0, codebuddy: 0 }, usage = [], diagnostics = [];
   const controls = { online: true, status: 200, post: null, models: [{ id: 'Claude-opus' }, { id: 'Claude-sonnet' }] };
-  const remotes = configured ? await startServerRemotes({ stateDir, config: config(), secret, loadKey: async () => apiKey,
-    fetchImpl: async (url, options) => {
+  const remoteConfig = config(); remoteConfig.sources[0].protocols = remoteProtocols;
+  const remoteFetch = async (url, options) => {
       assert.equal(options.headers.authorization, `Bearer ${apiKey}`); assert.equal(options.redirect, 'manual');
       assert.ok(url.startsWith(baseUrl + '/'));
       if (url.endsWith('/models')) return controls.online ? Response.json({ data: controls.models }) : Response.json({}, { status: 503 });
@@ -89,7 +115,9 @@ async function fixture(t, { configured = true, policy = true } = {}) {
       if (controls.status !== 200) return new Response('secret-provider-error-and-address', { status: controls.status,
         headers: { 'content-type': 'text/plain', 'retry-after': '12' } });
       return message(JSON.parse(options.body).model);
-    } }) : null;
+    };
+  const remotes = configured ? await startServerRemotes({ stateDir, config: remoteConfig, secret, loadKey: async () => apiKey,
+    fetchImpl: remoteFetch }) : null;
   if (remotes) { t.after(() => remotes.close()); await remotes.refresh(); }
   const modelPolicy = policy ? await ModelPolicy.open({ path: join(stateDir, 'policy.json') }) : null;
   modelPolicy?.setAuthorizationVersionGetter('Bifrost', () => remotes?.generation ?? null);
@@ -115,7 +143,7 @@ async function fixture(t, { configured = true, policy = true } = {}) {
   const post = (model, input = 'Reply OK', extra = {}, path = '/responses', extraHeaders = {}) => fetch(url + path, {
     method: 'POST', headers: { ...headers, ...extraHeaders }, body: JSON.stringify({ model, input, ...extra }),
   });
-  return { stateDir, gateway, remotes, modelPolicy, url, headers, calls, controls, usage, diagnostics, post };
+  return { stateDir, gateway, remotes, modelPolicy, url, headers, calls, controls, usage, diagnostics, post, remoteFetch, remoteConfig };
 }
 
 test('existing Server merges native, CodeBuddy and remote models at its original URL', async t => {
@@ -268,9 +296,9 @@ test('opaque remote reasoning survives its source turn and authenticated visible
   }
   assert.doesNotMatch(JSON.stringify(f.calls.remote.at(-1).body), /secret-native-signature|bifrost-remote-responses/);
   assert.doesNotMatch(f.calls.local.at(-1).options.body.toString(), /secret-native-signature|bifrost-remote-responses/);
-  const wrongThread = await f.post(opus, history, { stream: false }, '/responses', { 'thread-id': randomUUID() });
-  assert.equal(wrongThread.status, 409); await wrongThread.text();
-  assert.equal(f.calls.remote.length, 3); assert.equal(f.calls.local.length, 1); assert.equal(f.calls.codebuddy, 1);
+  const copied = await f.post(opus, history, { stream: false }, '/responses', { 'thread-id': randomUUID() });
+  assert.equal(copied.status, 200); await copied.text();
+  assert.equal(f.calls.remote.length, 4); assert.equal(f.calls.local.length, 1); assert.equal(f.calls.codebuddy, 1);
 });
 
 test('remote compaction is wrapped, resumable and transferable across registered models and local channels', async t => {
@@ -308,7 +336,7 @@ test('remote compaction is wrapped, resumable and transferable across registered
   assert.deepEqual(history, before);
 });
 
-test('remote checkpoints reject routing-hint, kind, ciphertext, owner, session and authorization changes before inference', async t => {
+test('remote checkpoints reject altered routing, kind, ciphertext, owner and authorization before inference', async t => {
   const f = await fixture(t, { policy: false }), thread = randomUUID(), caller = randomUUID();
   const headers = { 'thread-id': thread, 'x-bifrost-client-scope': caller };
   f.controls.post = (_url, options) => message(JSON.parse(options.body).model, [{ type: 'text', text: 'AUTHENTICATED_REMOTE_SUMMARY' }]);
@@ -323,7 +351,7 @@ test('remote checkpoints reject routing-hint, kind, ciphertext, owner, session a
     const reply = await f.post('company-native', history(edited), { stream: false }, '/responses', headers);
     assert.equal(reply.status, 409); await reply.text();
   }
-  for (const changed of [{ 'thread-id': randomUUID() }, { 'x-bifrost-client-scope': randomUUID() }]) {
+  for (const changed of [{ 'x-bifrost-client-scope': randomUUID() }]) {
     const reply = await f.post(sonnet, history(token), { stream: false }, '/responses', { ...headers, ...changed });
     assert.equal(reply.status, 409); await reply.text();
   }
@@ -341,30 +369,104 @@ test('remote checkpoints reject routing-hint, kind, ciphertext, owner, session a
   assert.equal(f.calls.remote.length, 1); assert.equal(f.calls.local.length, 0); assert.equal(f.calls.codebuddy, 0);
 });
 
-test('legacy anonymous remote reasoning resumes only its explicitly selected source model without guessing routes', async t => {
+test('legacy anonymous remote reasoning authenticates its issuer locally before cross-model history handoff', async t => {
   const f = await fixture(t, { policy: false }), thread = randomUUID();
   f.controls.post = (_url, options) => message(JSON.parse(options.body).model, [
     { type: 'thinking', thinking: 'legacy thought', signature: 'LEGACY_PRIVATE_SIGNATURE' }, { type: 'text', text: 'Legacy reply.' },
   ]);
   const output = (await (await f.post(opus, 'Start legacy fixture.', { stream: false }, '/responses', { 'thread-id': thread })).json()).output;
-  const provider = { id: 'bifrost', kind: 'bifrost-remote', generation: createHash('sha256').update(JSON.stringify([baseUrl, apiKey])).digest('hex'),
-    catalogSnapshot: () => [{ id: 'Claude-opus', protocols: ['responses'] }], async refreshCatalog() {}, async request() {}, status: () => ({}), async close() {} };
-  const context = new ModelRouter({ providers: [provider], secret }).resolve('responses', {
-    body: { model: opus }, owner: 'server-owner', session: thread, trackSession: false,
-  });
   const modern = new DesktopWire({ secret, prefix: REMOTE_RESPONSES_STATE_PREFIX, selfDescribingState: true });
-  const inner = modern.input({ input: output }, context).input;
-  const oldWire = new DesktopWire({ secret, prefix: REMOTE_RESPONSES_STATE_PREFIX });
-  const legacy = (await (await oldWire.response(Response.json({ output: inner }), context)).json()).output;
+  const legacy = await legacyHistory(output, { session: thread });
   assert.equal(modern.stateHint(legacy.find(row => row.type === 'reasoning').encrypted_content), null);
   const history = [{ role: 'user', content: 'Start legacy fixture.' }, ...legacy, { role: 'user', content: 'Continue.' }];
   const same = await f.post(opus, history, { stream: false }, '/responses', { 'thread-id': thread });
   assert.equal(same.status, 200); await same.text(); assert.match(JSON.stringify(f.calls.remote.at(-1).body), /LEGACY_PRIVATE_SIGNATURE/);
   for (const target of [sonnet, 'company-native']) {
     const reply = await f.post(target, history, { stream: false }, '/responses', { 'thread-id': thread });
-    assert.equal(reply.status, 409); await reply.text();
+    assert.equal(reply.status, 200); await reply.text();
   }
-  assert.equal(f.calls.remote.length, 2); assert.equal(f.calls.local.length, 0);
+  assert.equal(f.calls.remote.length, 3); assert.equal(f.calls.local.length, 1);
+  assert.doesNotMatch(JSON.stringify(f.calls.remote.at(-1).body), /LEGACY_PRIVATE_SIGNATURE/);
+  assert.doesNotMatch(f.calls.local.at(-1).options.body.toString(), /LEGACY_PRIVATE_SIGNATURE/);
+});
+
+for (const version of [1, 2]) test(`legacy v${version} side chats preserve both state layers through nested forks and a gateway restart`, async t => {
+  const f = await fixture(t, { policy: false }), parent = randomUUID(), child = randomUUID(), nested = randomUUID(), caller = randomUUID();
+  const parentHeaders = { 'thread-id': parent, 'x-bifrost-client-scope': caller };
+  const initial = [{ role: 'user', content: 'ORIGINAL_TASK_TO_KEEP' }];
+  f.controls.post = (_url, options) => message(JSON.parse(options.body).model, [
+    { type: 'thinking', thinking: 'prior reasoning', signature: 'PRIVATE_INHERITED_SIGNATURE' },
+    { type: 'text', text: 'PARENT_HISTORY_TO_KEEP' },
+  ]);
+  const first = (await (await f.post(opus, initial, { stream: false }, '/responses', parentHeaders)).json()).output;
+  const parentSession = f.calls.remote.at(-1).options.headers['x-session-id'];
+  const old = await legacyHistory(first, { session: parent, caller, version });
+  const childInput = [...initial, ...old, { role: 'user', content: 'FIRST_CHILD_QUESTION' }], before = structuredClone(childInput);
+  const response = await f.post(opus, childInput, { stream: false }, '/responses', forkHeaders(child, parent, caller));
+  assert.equal(response.status, 200, await (response.status === 200 ? Promise.resolve('') : response.clone().text()));
+  const childOutput = (await response.json()).output, childSession = f.calls.remote.at(-1).options.headers['x-session-id'];
+  assert.notEqual(childSession, parentSession); assert.deepEqual(childInput, before);
+  assert.match(JSON.stringify(f.calls.remote.at(-1).body.messages), /ORIGINAL_TASK_TO_KEEP.*PRIVATE_INHERITED_SIGNATURE.*PARENT_HISTORY_TO_KEEP/s);
+  const count = f.calls.remote.length;
+  const unauthorized = await f.post(opus, childInput, { stream: false }, '/responses', forkHeaders(randomUUID(), parent, randomUUID()));
+  assert.equal(unauthorized.status, 409); await unauthorized.text(); assert.equal(f.calls.remote.length, count);
+  const index = await readFile(join(f.stateDir, 'remote-fork-lineage.json'), 'utf8');
+  assert.doesNotMatch(index, /PRIVATE_INHERITED_SIGNATURE|ORIGINAL_TASK_TO_KEEP|PARENT_HISTORY_TO_KEEP|bifrost-client-state|bfk_/);
+  assert.equal(index.includes(caller), false);
+  await f.remotes.close();
+  const restarted = await startServerRemotes({ stateDir: f.stateDir, config: f.remoteConfig, secret,
+    loadKey: async () => apiKey, fetchImpl: f.remoteFetch });
+  t.after(() => restarted.close()); await restarted.refresh(); f.gateway.remoteSources = restarted;
+  const nestedInput = [...childInput, ...childOutput, { role: 'user', content: 'NESTED_CHILD_QUESTION' }];
+  const nestedResponse = await f.post(opus, nestedInput, { stream: false }, '/responses', forkHeaders(nested, child, caller));
+  assert.equal(nestedResponse.status, 200); await nestedResponse.text();
+  const nestedSession = f.calls.remote.at(-1).options.headers['x-session-id'];
+  assert.notEqual(nestedSession, parentSession); assert.notEqual(nestedSession, childSession);
+  assert.match(JSON.stringify(f.calls.remote.at(-1).body), /ORIGINAL_TASK_TO_KEEP.*PARENT_HISTORY_TO_KEEP.*FIRST_CHILD_QUESTION.*NESTED_CHILD_QUESTION/s);
+  const parentContinues = await f.post(opus, [...initial, ...old, { role: 'user', content: 'PARENT_CONTINUES' }],
+    { stream: false }, '/responses', parentHeaders);
+  assert.equal(parentContinues.status, 200); await parentContinues.text();
+  assert.equal(f.calls.remote.at(-1).options.headers['x-session-id'], parentSession);
+  const resumedHeaders = forkHeaders(child, parent, caller, { 'x-codex-turn-metadata': JSON.stringify({
+    thread_id: child, history_initialization: 'cold_resume', forked_from_thread_id: parent }) });
+  const childContinues = await f.post(opus, [...childInput, ...childOutput, { role: 'user', content: 'CHILD_CONTINUES' }],
+    { stream: false }, '/responses', resumedHeaders);
+  assert.equal(childContinues.status, 200); await childContinues.text();
+  assert.equal(f.calls.remote.at(-1).options.headers['x-session-id'], childSession);
+});
+
+for (const version of [1, 2]) test(`legacy v${version} compaction remains the sole history in a side chat and can switch to GPT with old quota empty`, async t => {
+  const f = await fixture(t, { policy: false }), parent = randomUUID(), child = randomUUID(), caller = randomUUID();
+  const summary = 'ONLY_HISTORY_LEFT: original objective, completed edits, pending verification.';
+  f.controls.post = (_url, options) => message(JSON.parse(options.body).model, [{ type: 'text', text: summary }]);
+  const compacted = (await (await f.post(opus, [{ role: 'user', content: 'Summarize this task.' }, { type: 'compaction_trigger' }],
+    { stream: false }, '/responses', { 'thread-id': parent, 'x-bifrost-client-scope': caller })).json()).output;
+  const old = await legacyHistory(compacted, { session: parent, caller, version });
+  const history = [...old, { role: 'user', content: 'Continue the task.' }];
+  const forked = await f.post(opus, history, { stream: false }, '/responses', forkHeaders(child, parent, caller));
+  assert.equal(forked.status, 200); await forked.text();
+  assert.match(JSON.stringify(f.calls.remote.at(-1).body.messages), /ONLY_HISTORY_LEFT.*pending verification/s);
+  f.controls.post = null; f.controls.status = 402;
+  const remoteCalls = f.calls.remote.length;
+  const switched = await f.post('company-native', history, { stream: false }, '/responses', forkHeaders(child, parent, caller));
+  assert.equal(switched.status, 200); await switched.text();
+  assert.equal(f.calls.remote.length, remoteCalls, 'Local history handoff must not call the exhausted Claude source.');
+  assert.match(JSON.parse(f.calls.local.at(-1).options.body).input[0].content[0].text, /ONLY_HISTORY_LEFT/);
+});
+
+test('unknown native Responses live handles remain thread-bound even with a claimed fork parent', async t => {
+  const f = await fixture(t, { policy: false, remoteProtocols: ['responses'] }), parent = randomUUID(), child = randomUUID();
+  f.controls.post = () => Response.json({ object: 'response', status: 'completed', model: 'Claude-opus',
+    output: [{ type: 'reasoning', encrypted_content: 'UNKNOWN_REMOTE_LIVE_HANDLE' },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Original result.' }] }] });
+  const initial = [{ role: 'user', content: 'Native provider task.' }];
+  const output = (await (await f.post(opus, initial, { stream: false }, '/responses', { 'thread-id': parent })).json()).output;
+  const history = [...initial, ...output, { role: 'user', content: 'Continue.' }];
+  const forked = await f.post(opus, history, { stream: false }, '/responses', forkHeaders(child, parent));
+  assert.equal(forked.status, 409); await forked.text(); assert.equal(f.calls.remote.length, 1);
+  const original = await f.post(opus, history, { stream: false }, '/responses', { 'thread-id': parent });
+  assert.equal(original.status, 200); await original.text(); assert.equal(f.calls.remote.length, 2);
+  assert.match(JSON.stringify(f.calls.remote.at(-1).body), /UNKNOWN_REMOTE_LIVE_HANDLE/);
 });
 
 test('cancelling a Server remote request reaches its single transport', async t => {

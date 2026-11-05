@@ -87,10 +87,21 @@ export class BifrostRemote {
     })();
     return this.#pending;
   }
-  async request(protocol, { body, scope, session, signal } = {}) {
+  supportsSnapshotState(modelId, protocol = 'responses') {
+    const native = this.#models.find(model => model.id === modelId && model.available);
+    return Boolean(!this.#abort.signal.aborted && protocol === 'responses' && this.#responses
+      && !native?.protocols.includes('responses') && native?.protocols.includes('messages'));
+  }
+  rebindSnapshotState(value, { fromScope, scope, model, kind } = {}) {
+    if (!this.supportsSnapshotState(model)) {
+      throw new BridgeError('当前远端来源未提供可复制的历史快照。', 409, 'remote_snapshot_state_unsupported');
+    }
+    return this.#responses.rebindState(value, { fromScope, scope, model, kind });
+  }
+  async request(protocol, { body, scope, session, signal, legacyScopes = [] } = {}) {
     const native = this.#models.find(model => model.id === body?.model && model.available);
     if (protocol === 'responses' && !native?.protocols.includes('responses') && native?.protocols.includes('messages') && this.#responses) {
-      return this.#responses.request({ body, scope, session, signal, capabilities: native.capabilities });
+      return this.#responses.request({ body, scope, session, signal, capabilities: native.capabilities, legacyScopes });
     }
     return this.#requestNative(protocol, { body, scope, session, signal });
   }

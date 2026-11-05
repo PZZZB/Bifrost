@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ClientAccess } from '../src/client-access.mjs';
 import { createClientServer } from '../src/client-server.mjs';
+import { claudeSourceError } from '../src/claude-source-errors.mjs';
 
 const DAY = 86_400_000;
 const PASSWORD = 'Offline portal password 123';
@@ -255,6 +256,54 @@ test('Messages authenticates with the same issued key and is restricted to the C
   assert.equal(denied.status, 501); assert.equal(denied.data.error.code, 'client_protocol_unsupported'); assert.equal(f.messageCalls.length, 1);
   const conflicting = await f.send('/v1/models', { headers: { authorization: `Bearer ${assigned.secret}`, 'x-api-key': 'different-key' } });
   assert.equal(conflicting.status, 401);
+});
+
+test('public Claude HTTP rejections retain only matching whitelisted codes and never provider diagnostics', async t => {
+  const model = 'Claude-opus', cases = [
+    { status: 409, code: 'claude_tool_session_missing' }, { status: 429, code: 'claude_rate_limited' },
+    { status: 400, code: 'claude_invalid_request' }, { status: 401, code: 'claude_authentication_failed' },
+    { status: 402, code: 'claude_billing_error' }, { status: 502, code: 'claude_execution_failed' },
+  ];
+  let current, calls = 0;
+  const f = await fixture(t, { models: [{ id: model, channel: 'Claude', enabled: true, available: true }], server: {
+    requestMessages: async () => { calls++; return Response.json({ error: { code: current.code, message: 'PRIVATE_SOURCE_ERROR_sk-secret_/Users/private',
+      details: 'PRIVATE_SOURCE_ERROR' } }, { status: current.status }); },
+  } }), assigned = await f.account('claude-error-user', [model]);
+  for (current of cases) {
+    const response = await f.send('/v1/messages', { method: 'POST', headers: keyHeaders(assigned),
+      body: { model, max_tokens: 8, messages: [{ role: 'user', content: 'Offline fixture.' }] } });
+    assert.equal(response.status, current.status); assert.equal(response.data.error.code, current.code);
+    assert.equal(response.data.error.message, claudeSourceError(current.code).message);
+    assert.doesNotMatch(response.text, /PRIVATE_SOURCE_ERROR|sk-secret|\/Users\/private/);
+  }
+  assert.equal(calls, cases.length);
+});
+
+test('public Claude unknown, oversized and status-mismatched errors keep their existing generic rejection', async t => {
+  const model = 'Claude-opus'; let current, calls = 0;
+  const f = await fixture(t, { models: [{ id: model, channel: 'Claude', enabled: true, available: true }], server: {
+    requestMessages: async () => { calls++; return Response.json({ error: { code: current.code, message: 'PRIVATE_SOURCE_ERROR' },
+      extra: current.extra ?? '' }, { status: current.status }); },
+  } }), assigned = await f.account('claude-generic-error-user', [model]);
+  const cases = [{ status: 409, code: 'PRIVATE_SOURCE_ERROR' }, { status: 409, code: 'claude_authentication_failed' },
+    { status: 409, code: 'claude_tool_session_missing', extra: 'x'.repeat(9000) }, { status: 500, code: 'PRIVATE_SOURCE_ERROR' }];
+  for (current of cases) {
+    const response = await f.send('/v1/messages', { method: 'POST', headers: keyHeaders(assigned),
+      body: { model, max_tokens: 8, messages: [{ role: 'user', content: 'Offline fixture.' }] } });
+    assert.equal(response.status, current.status === 500 ? 503 : 409); assert.equal(response.data.error.code, 'client_upstream_rejected');
+    assert.doesNotMatch(response.text, /PRIVATE_SOURCE_ERROR|claude_authentication_failed|claude_tool_session_missing/);
+  }
+  assert.equal(calls, cases.length);
+});
+
+test('CodeBuddy error transport remains independent of Claude source error handling', async t => {
+  let calls = 0;
+  const source = { error: { code: 'claude_tool_session_missing', message: 'Unmodified CodeBuddy fixture error.' } };
+  const f = await fixture(t, { server: { requestMessages: async () => { calls++; return Response.json(source, { status: 409 }); } } });
+  const assigned = await f.account('codebuddy-error-user', [CB]);
+  const response = await f.send('/v1/messages', { method: 'POST', headers: keyHeaders(assigned),
+    body: { model: CB, max_tokens: 8, messages: [{ role: 'user', content: 'Offline fixture.' }] } });
+  assert.equal(response.status, 409); assert.deepEqual(response.data, source); assert.equal(calls, 1);
 });
 
 test('Host, Origin, malformed body and draining failures do not reach the fake model', async t => {

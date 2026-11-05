@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { keyMatches, readBody } from './gateway.mjs';
 import { ClaudeSdkWorker } from './claude-sdk-worker.mjs';
+import { claudeSourceError, classifyClaudeSourceError, classifyClaudeSourceException } from './claude-source-errors.mjs';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const authUnavailable = credentialState => ({ authenticated: false, renewable: false, credentialState });
@@ -71,8 +72,11 @@ const contentIdentity = content => Array.isArray(content) ? content.map(block =>
     ? { ...value, content: value.content.map(withoutCache) } : value;
 }) : content;
 const historyDigest = messages => digest(messages.map(message => ({ ...message, content: contentIdentity(message.content) })));
-const failure = (status, message) => Response.json({ type: 'error', error: { type: status < 500
-  ? 'invalid_request_error' : 'api_error', message } }, { status });
+const failure = (status, message, code) => {
+  const source = claudeSourceError(code);
+  return Response.json({ type: 'error', error: { type: status < 500 ? 'invalid_request_error' : 'api_error',
+    message: source?.message ?? message, ...(source ? { code: source.code } : {}) } }, { status });
+};
 const sse = value => new TextEncoder().encode(`event: ${value.type}\ndata: ${JSON.stringify(value)}\n\n`);
 const SESSION_HEADERS = ['x-claude-code-session-id', 'x-session-id', 'x-conversation-id',
   'x-session-affinity', 'session_id', 'session-id', 'x-opencode-session'];
@@ -306,17 +310,19 @@ export class ClaudeCliHub {
     const prefixHash = historyDigest(body.messages.slice(0, -1)), last = body.messages.at(-1).content;
     const results = Array.isArray(last) ? last.filter(block => block?.type === 'tool_result') : [];
     const reservation = digest({ identity, contextHash, prefixHash });
-    if (this.starting.has(reservation)) return failure(409, '同一 CLI 会话正在提交请求。');
+    if (this.starting.has(reservation)) return failure(409, '同一 CLI 会话正在提交请求。', 'claude_session_busy');
     this.starting.add(reservation);
     try {
     let run, resume;
     if (results.length) {
-      run = [...this.runs.values()].find(item => item.expected.has(results[0].tool_use_id));
-      if (!run || run.turn || run.historyHash !== prefixHash || run.contextHash !== contextHash ||
+      run = [...this.runs.values()].find(item => item.identity === identity && item.model === model
+        && item.expected.has(results[0].tool_use_id));
+      if (!run) return failure(409, null, 'claude_tool_session_missing');
+      if (run.turn || run.historyHash !== prefixHash || run.contextHash !== contextHash ||
           run.optionsHash !== optionsHash || run.identity !== identity || results.length !== last.length ||
           results.length !== run.expected.size || new Set(results.map(item => item.tool_use_id)).size !== results.length ||
           results.some(item => !run.expected.has(item.tool_use_id))) {
-        return failure(409, '待返回的 CLI 工具会话不匹配或已中断，未替用户生成工具结果。');
+        return failure(409, null, 'claude_tool_session_mismatch');
       }
       try { for (const result of results) mcpResult(result); }
       catch (error) { return failure(400, error.message); }
@@ -325,7 +331,7 @@ export class ClaudeCliHub {
         item.historyHash === prefixHash && item.identity === identity;
       const candidates = body.messages.length > 1 ? [...this.runs.values()].filter(match) : [];
       if (candidates.some(item => item.turn || item.expected.size) || candidates.length > 1) {
-        return failure(409, 'CLI 会话忙碌或缺少唯一会话标识。');
+        return failure(409, 'CLI 会话忙碌或缺少唯一会话标识。', 'claude_session_busy');
       }
       run = candidates[0];
       if (run && run.optionsHash !== optionsHash) {
@@ -333,7 +339,7 @@ export class ClaudeCliHub {
       }
       if (!run && !resume && body.messages.length > 1) {
         const saved = [...this.saved.values()].filter(match);
-        if (saved.length > 1) return failure(409, '已保存的 CLI 会话缺少唯一标识。');
+        if (saved.length > 1) return failure(409, '已保存的 CLI 会话缺少唯一标识。', 'claude_session_busy');
         resume = saved[0];
       }
       if (!run) {
@@ -380,7 +386,7 @@ export class ClaudeCliHub {
     if (body.stream === true) return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
     // Drain the same event path so JSON and SSE share interruption semantics.
     const reader = stream.getReader(); while (!(await reader.read()).done) { /* event state is accumulated below */ }
-    if (turn.error || !turn.messageStopped) return failure(502, turn.error ?? 'CLI 没有完整结束回复。');
+    if (turn.error || !turn.messageStopped) return failure(turn.errorStatus ?? 502, turn.error ?? 'CLI 没有完整结束回复。', turn.errorCode);
     return Response.json({ ...turn.message, content: [...turn.blocks.values()].map(block => block.value),
       stop_reason: turn.stopReason, stop_sequence: null });
     } finally { this.starting.delete(reservation); }
@@ -411,7 +417,7 @@ export class ClaudeCliHub {
     catch (error) { this.runs.delete(id); await run.worker.close().catch(() => {}); throw error; }
     run.pump = (async () => {
       try { for await (const event of run.worker.events) await this.workerEvent(run, event); }
-      catch { await this.stopRun(run, '官方 CLI 执行失败。'); }
+      catch (error) { await this.stopRun(run, classifyClaudeSourceException(error) ?? '官方 CLI 执行失败。'); }
       finally { await this.stopRun(run, run.turn || run.expected.size ? '官方 CLI 会话已结束。' : null); }
     })();
     return run;
@@ -419,9 +425,16 @@ export class ClaudeCliHub {
   }
 
   async workerEvent(run, packet) {
+    if (packet?.type === 'assistant' && packet.error !== undefined && !packet.parent_tool_use_id) {
+      if (run.turn && !run.turn.ended) await this.stopRun(run,
+        classifyClaudeSourceError(packet) ?? claudeSourceError('claude_upstream_error'));
+      return;
+    }
     if (packet?.type === 'result') {
       if (!run.turn) return;
-      if (packet.is_error || packet.subtype !== 'success') { await this.stopRun(run, '官方 CLI 没有成功结束本轮。'); return; }
+      if (packet.is_error || packet.subtype !== 'success') {
+        await this.stopRun(run, classifyClaudeSourceError(packet) ?? claudeSourceError('claude_upstream_error')); return;
+      }
       if (!run.turn.message || !run.turn.messageStopped || !run.turn.stopReason || run.turn.stopReason === 'tool_use') {
         await this.stopRun(run, 'CLI 结束标记与模型回复不匹配。'); return;
       }
@@ -435,6 +448,9 @@ export class ClaudeCliHub {
     if (!object(event) || typeof event.type !== 'string') { await this.stopRun(run, 'CLI 流事件格式无效。'); return; }
     turn.bytes += Buffer.byteLength(JSON.stringify(event));
     if (turn.bytes > 64 * 1024 * 1024) { await this.stopRun(run, 'CLI 回复超过本地适配器的 64 MiB 上限。'); return; }
+    if (event.type === 'error') {
+      await this.stopRun(run, classifyClaudeSourceError(event) ?? claudeSourceError('claude_upstream_error')); return;
+    }
     if (event.type !== 'ping' && event.type !== 'message_start' && (!turn.message || turn.messageStopped)) {
       await this.stopRun(run, 'CLI 消息起止顺序无效。'); return;
     }
@@ -501,8 +517,6 @@ export class ClaudeCliHub {
       if (turn.stopReason === 'tool_use' && !run.expected.size) {
         await this.stopRun(run, 'CLI 工具结束标记没有匹配的调用。'); return;
       }
-    } else if (event.type === 'error') {
-      await this.stopRun(run, '官方 CLI 模型流返回错误。'); return;
     } else if (event.type !== 'ping') { await this.stopRun(run, 'CLI 返回了未知的模型流事件。'); return; }
     if (event.type === 'message_stop' && turn.stopReason === 'max_tokens') {
       // The API message is valid but truncated. The SDK may automatically continue it;
@@ -536,6 +550,8 @@ export class ClaudeCliHub {
 
   async stopRun(run, message = null) {
     if (run.stopping) return run.stopping;
+    const source = claudeSourceError(message?.code);
+    message = source?.message ?? (typeof message === 'string' || message === null ? message : '官方 CLI 执行失败。');
     if (!message && run.worker.sessionId && run.historyHash && !run.turn && !run.expected.size) {
       this.saved.set(run.id, { id: run.id, nativeId: run.worker.sessionId, historyHash: run.historyHash,
         identity: run.identity, contextHash: run.contextHash, optionsHash: run.optionsHash, model: run.model });
@@ -544,8 +560,9 @@ export class ClaudeCliHub {
     run.stopping = (async () => {
       if (run.turn) {
         const turn = run.turn; turn.error = message ?? 'CLI 会话已停止。';
+        if (source) { turn.errorCode = source.code; turn.errorStatus = source.status; }
         turn.signal?.removeEventListener('abort', turn.abort);
-        turn.queue.end({ type: 'error', error: { type: 'api_error', message: turn.error } });
+        turn.queue.end({ type: 'error', error: { type: 'api_error', message: turn.error, ...(source ? { code: source.code } : {}) } });
         run.turn = null;
       }
       for (const call of run.calls.values()) call.resolve({ isError: true,

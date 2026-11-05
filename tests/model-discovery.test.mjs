@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { ModelPolicy } from '../src/model-policy.mjs';
 import { ModelDiscovery } from '../src/model-discovery.mjs';
 import { gatedAccountService } from '../src/upstream-accounts.mjs';
+import { appendCursorModels } from '../src/models.mjs';
+import { cursorModelAvailability } from '../src/cursor-service.mjs';
 
 const legacyCB = 'claude-codebuddy-opus-5-5', legacyCU = 'Cursor-gemini-4-argon';
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -160,4 +162,57 @@ test('discovery forwards safe source capabilities and the actual Cursor prompt m
   assert.equal(snapshot.models.some(model => model.id === 'Cursor-must-not-be-registered'), false);
   assert.equal(JSON.stringify(snapshot).includes('PRIVATE'), false);
   const raw = await readFile(path, 'utf8'); assert.equal(raw.includes('capabilities'), false); assert.equal(raw.includes('verification'), false);
+});
+
+test('management and native Cursor catalogs keep canonical names and a stable settings revision', async t => {
+  const { policy, discovery, cb, cu, path } = await fixture(t);
+  const sources = [{ id: 'gemini-4-argon', displayName: 'Gemini 4 Argon', contextWindow: 1000000,
+    supportsImages: true, parameters: [{ id: 'effort', values: [{ value: 'medium' }, { value: 'high' }] }] },
+  { id: 'new-sdk-model', displayName: 'New SDK model' }];
+  cb.getModels = async () => cbModels().map(model => ({ ...model, contextWindow: 300000,
+    contextWindowOptions: [300000, 600000, 1000000], maxInputTokens: 1000000 }));
+  cu.getModels = async () => structuredClone(sources); cu.promptMode = 'project-rules';
+  await discovery.refresh();
+  await policy.update({ revision: policy.snapshot().revision, disabledModels: policy.snapshot().disabledModels,
+    contextWindows: { [legacyCB]: 600000 } });
+  const before = policy.snapshot(), bytes = await readFile(path, 'utf8');
+  assert.equal(before.models.find(model => model.id === legacyCU).name, 'Cursor Gemini 4 Argon');
+  assert.equal(before.models.find(model => model.id === 'Cursor-new-sdk-model').name, 'Cursor New SDK model');
+  for (let iteration = 0; iteration < 3; iteration++) {
+    // Match Gateway.catalog's authoritative Cursor entries and merged Codex view.
+    await policy.observe({ models: sources.map(source => ({ id: `Cursor-${source.id}`,
+      name: `Cursor ${source.displayName}`, ...cursorModelAvailability(source), source: 'account-catalog' })) },
+    'Cursor', { defaultEnabled: false, authorizationVersion: cu.authorizationVersion });
+    await policy.observe(appendCursorModels({ models: [] }, sources));
+    const after = await discovery.refresh();
+    assert.equal(after.revision, before.revision);
+    assert.deepEqual(after.models, before.models);
+    assert.deepEqual(after.disabledModels, before.disabledModels);
+    assert.deepEqual(after.contextWindows, { [legacyCB]: 600000 });
+  }
+  assert.equal(await readFile(path, 'utf8'), bytes);
+  assert.equal(policy.snapshot().models.find(model => model.id === legacyCU).compatibility.mode, 'project-rules');
+});
+
+test('canonical discovery names ignore conflicting display aliases without losing source capabilities or name fallbacks', async t => {
+  const { policy, discovery, cb, cu } = await fixture(t);
+  const codeBuddy = { id: legacyCB, name: 'CodeBuddy source name', available: true, source: 'remote',
+    display_name: 'Wrong preferred alias', displayName: 'Wrong SDK alias', label: 'Wrong label', contextWindow: 600000 };
+  const cursor = [{ id: 'gemini-4-argon', displayName: 'SDK model', display_name: 'Wrong native alias',
+    label: 'Wrong label', name: 'Other source name', contextWindow: 1000000 },
+  { id: 'new-sdk-model', name: 'SDK name fallback', label: 'Wrong label' }];
+  const untouched = structuredClone({ codeBuddy, cursor });
+  cb.getModels = async () => [codeBuddy]; cu.getModels = async () => cursor;
+  const snapshot = await discovery.refresh();
+  assert.equal(snapshot.models.find(model => model.id === legacyCB).name, 'CodeBuddy source name');
+  assert.equal(snapshot.models.find(model => model.id === legacyCU).name, 'Cursor SDK model');
+  assert.equal(snapshot.models.find(model => model.id === 'Cursor-new-sdk-model').name, 'SDK name fallback');
+  assert.equal(snapshot.models.find(model => model.id === legacyCB).capabilities.contextWindow.tokens, 600000);
+  assert.equal(snapshot.models.find(model => model.id === legacyCU).capabilities.contextWindow.tokens, 1000000);
+  assert.deepEqual({ codeBuddy, cursor }, untouched);
+  cu.authorizationVersion++;
+  assert.equal(policy.snapshot().models.find(model => model.id === legacyCU).available, false);
+  await discovery.refresh();
+  assert.equal(policy.snapshot().models.find(model => model.id === legacyCU).available, true);
+  assert.equal(policy.snapshot().models.find(model => model.id === legacyCU).name, 'Cursor SDK model');
 });

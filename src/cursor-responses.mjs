@@ -646,7 +646,7 @@ export class CursorResponsesProvider {
         for (const event of sourceEvent({ type: 'message_stop' })) yield event;
         record.busy = false; finishedHttp = true; cleanup(); self.#expire(record);
         resolveUsage(usage);
-        yield conversion.finish(usage);
+        yield [...conversion.finishEvents(usage)];
       } catch (error) {
         resolveUsage(usage); await self.#stop(record, error);
         const safe = safeError(error); terminalError = safe;
@@ -657,7 +657,9 @@ export class CursorResponsesProvider {
     const iterator = events();
     if (parsed.stream !== true) {
       let complete;
-      for await (const event of iterator) if (['response.completed', 'response.failed'].includes(event.type)) complete = event.response;
+      for await (const value of iterator) for (const event of Array.isArray(value) ? value : [value]) {
+        if (['response.completed', 'response.failed'].includes(event.type)) complete = event.response;
+      }
       const response = complete?.status === 'failed' ? denied(terminalError) : Response.json(complete);
       response.bridgeUsage = bridgeUsage; response.bridgeModel = model.upstream; return response;
     }
@@ -667,7 +669,14 @@ export class CursorResponsesProvider {
       async pull(controller) {
         const next = firstConsumed ? await iterator.next() : await first();
         firstConsumed = true;
-        if (next.done) controller.close(); else controller.enqueue(encodeResponsesEvent(next.value));
+        if (next.done) controller.close();
+        else {
+          controller.enqueue(encodeResponsesEvent(next.value));
+          if (Array.isArray(next.value)) {
+            controller.close();
+            void iterator.return().catch(() => {});
+          }
+        }
       },
       async cancel() { cancelled = true; const stopping = stop(); cleanup(); resolveUsage(null); await stopping; await iterator.return().catch(() => {}); },
     }, { highWaterMark: 0 });

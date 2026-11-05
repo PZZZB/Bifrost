@@ -38,6 +38,29 @@ test('diagnostic persistence and exports retain only the public whitelist and fi
   assert.equal(journal.detail('not-a-request'), null);
 });
 
+test('a source failure after HTTP 200 retains its safe cause across diagnostics persistence and export', async t => {
+  const { journal, path } = await fixture(t);
+  const failure = classifyDiagnosticFailure({ code: 'claude_rate_limited', message: 'PRIVATE_PROVIDER_RESPONSE' },
+    { httpStatus: 200, stage: 'stream' });
+  assert.equal(failure.errorCode, 'claude_rate_limited'); assert.match(failure.message, /用量或速率限制/);
+  const record = entry({ ...failure, status: 'failed', account: 'Bifrost', httpStatus: 200, message: 'PRIVATE_PROVIDER_RESPONSE' });
+  await journal.record(record); await journal.close();
+  const reopened = await RequestDiagnostics.open({ path }); t.after(() => reopened.close());
+  const saved = reopened.detail(record.requestId);
+  assert.equal(saved.httpStatus, 200); assert.equal(saved.errorCode, failure.errorCode); assert.equal(saved.failureStage, 'stream');
+  assert.equal(saved.message, failure.message); assert.doesNotMatch(JSON.stringify(reopened.exportReport(record.requestId)), /PRIVATE_/);
+  assert.equal(classifyDiagnosticFailure({ code: failure.errorCode }, { interrupted: true }).errorCode, 'request_interrupted');
+});
+
+test('source diagnostic codes use a finite whitelist and ignore attacker-controlled messages', () => {
+  const known = normalizeDiagnosticRecord(entry({ status: 'failed', errorCode: 'claude_tool_session_missing', message: 'PRIVATE_CAUSE' }));
+  assert.equal(known.errorCode, 'claude_tool_session_missing'); assert.match(known.message, /工具会话/);
+  for (const errorCode of ['claude_rate_limited.PRIVATE_CAUSE', 'claude_PRIVATE_CAUSE', 'PRIVATE_CAUSE', 'toString', 'constructor', '__proto__']) {
+    const unknown = normalizeDiagnosticRecord(entry({ status: 'failed', errorCode, message: 'PRIVATE_CAUSE' }));
+    assert.equal(unknown.errorCode, 'unknown_error'); assert.doesNotMatch(unknown.message, /PRIVATE_CAUSE/);
+  }
+});
+
 test('usage normalization preserves explicit zero, authoritative partial counts and safe canonical replay', () => {
   assert.equal(normalizeDiagnosticUsage(null), null); assert.equal(normalizeDiagnosticUsage({}), null);
   assert.deepEqual(normalizeDiagnosticUsage({ input_tokens: 12, output_tokens: 4,

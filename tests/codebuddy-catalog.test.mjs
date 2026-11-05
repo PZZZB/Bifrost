@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { NativeCodeBuddyCatalog } from '../src/codebuddy-catalog.mjs';
+import { codeBuddyModelAlias, publicCodeBuddyModel } from '../src/codebuddy-models.mjs';
 
 const now = Date.UTC(2026, 9, 19, 10);
 const opus = { id: 'claude-opus-5.5', name: 'Claude-Opus-5.5', credits: 'x2.17' };
@@ -89,6 +90,44 @@ test('owned cache projects explicit model capabilities without copying nested cr
     reasoning: { supportedEfforts: ['low', 'high', 'max'], defaultEffort: 'high', summary: 'auto', canDisableThinking: false },
     contextWindow: { defaultLength: 300000 } }]);
   assert.equal(JSON.stringify(result).includes('PRIVATE_CAPABILITY'), false);
+});
+
+test('owned context tiers retain the upstream default and match online public metadata', async t => {
+  const model = { ...opus, maxInputTokens: 1000000, maxOutputTokens: 128000,
+    contextWindow: { defaultLength: 300000, supportedLengths: [1000000, 300000, 600000, 300000],
+      apiKey: 'PRIVATE_CONTEXT' }, headers: { Authorization: 'PRIVATE_CONTEXT' } };
+  const { reader } = await fixture(t, [ownEntry({ models: [model] })]);
+  const result = await reader.load({ identity: { uid: 'owned-employee' } });
+  assert.deepEqual(result.models, [{ ...opus, maxInputTokens: 1000000, maxOutputTokens: 128000,
+    contextWindow: { defaultLength: 300000, supportedLengths: [300000, 600000, 1000000] } }]);
+  const nativeDescriptor = codeBuddyModelAlias(result.models[0]);
+  assert.deepEqual(nativeDescriptor, codeBuddyModelAlias(model));
+  assert.deepEqual(publicCodeBuddyModel(nativeDescriptor), nativeDescriptor);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_CONTEXT'), false);
+});
+
+test('invalid native context tiers are not partially exported and leave valid defaults intact', async t => {
+  const options = [null, {}, '1000000', [], [300000, '1000000'], [300000, { apiKey: 'PRIVATE_CONTEXT' }],
+    [300000, null], [300000, false], [300000, 0], [300000, -1], [300000, 1.5], [300000, 1000000001],
+    Array.from({ length: 33 }, () => 300000)];
+  const models = options.map((supportedLengths, index) => ({ id: `context-${index}`, name: `Context ${index}`,
+    contextWindow: { defaultLength: 300000, supportedLengths, apiKey: 'PRIVATE_CONTEXT' } }));
+  const { reader } = await fixture(t, [ownEntry({ models })]);
+  const result = await reader.load({ identity: { uid: 'owned-employee' } });
+  assert.equal(result.models.length, models.length);
+  for (const model of result.models) assert.deepEqual(model.contextWindow, { defaultLength: 300000 });
+  assert.equal(JSON.stringify(result).includes('PRIVATE_CONTEXT'), false);
+});
+
+test('native tiers do not invent a missing or invalid default context length', async t => {
+  const { reader } = await fixture(t, [ownEntry({ models: [
+    { ...opus, contextWindow: { supportedLengths: [1000000000, 1] } },
+    { id: 'invalid-default', name: 'Invalid default', contextWindow: { defaultLength: 'PRIVATE_CONTEXT', supportedLengths: [300000, 1000000] } },
+  ] })]);
+  const result = await reader.load({ identity: { uid: 'owned-employee' } });
+  assert.deepEqual(result.models[0].contextWindow, { supportedLengths: [1, 1000000000] });
+  assert.deepEqual(result.models[1].contextWindow, { supportedLengths: [300000, 1000000] });
+  assert.equal(JSON.stringify(result).includes('PRIVATE_CONTEXT'), false);
 });
 
 test('cancellation and missing cache never create a database', async t => {

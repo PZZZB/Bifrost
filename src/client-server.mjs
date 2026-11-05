@@ -8,6 +8,7 @@ import { readBody } from './gateway.mjs';
 import { ClientChatAdapter } from './client-chat.mjs';
 import { meterClientResponse, getClientMeter } from './client-meter.mjs';
 import { publicClientModel } from './client-model-catalog.mjs';
+import { readClaudeSourceError } from './claude-source-errors.mjs';
 
 const STATIC = { '/portal': ['portal.html', 'text/html; charset=utf-8'],
   '/portal/': ['portal.html', 'text/html; charset=utf-8'], '/register': ['portal.html', 'text/html; charset=utf-8'],
@@ -296,12 +297,13 @@ export function createClientServer({ access, publicDir, publicBaseUrl, allowedHo
         if (model.channel === 'Claude' && !response.ok) {
           // dispatch has already inspected error usage. Public errors must not
           // reveal host addresses, operating systems, or upstream credentials.
-          await response.body?.cancel().catch(() => {});
           const noSourceBalance = response.status === 402;
-          response = Response.json({ error: { message: noSourceBalance ? '模型来源额度不足，请联系管理员。'
-            : '模型服务暂时不可用，请稍后重试或联系管理员。',
-          code: noSourceBalance ? 'client_upstream_balance_exhausted' : 'client_upstream_rejected' } },
-            { status: [400, 402, 409, 413, 422, 429].includes(response.status) ? response.status : 503 });
+          const source = await readClaudeSourceError(response, { signal: abort.signal });
+          response = source ? Response.json({ error: { message: source.message, code: source.code } }, { status: response.status })
+            : Response.json({ error: { message: noSourceBalance ? '模型来源额度不足，请联系管理员。'
+              : '模型服务暂时不可用，请稍后重试或联系管理员。',
+            code: noSourceBalance ? 'client_upstream_balance_exhausted' : 'client_upstream_rejected' } },
+              { status: [400, 402, 409, 413, 422, 429].includes(response.status) ? response.status : 503 });
         }
         await relay(req, res, response, abort);
       } finally {

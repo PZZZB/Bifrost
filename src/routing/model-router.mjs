@@ -57,9 +57,11 @@ export class ModelRouter {
     if (id !== undefined) return this.provider(id).refreshCatalog(signal);
     return Promise.allSettled([...this.#sources.values()].map(provider => provider.refreshCatalog(signal)));
   }
-  #binding(route, owner, session) {
+  #binding(route, owner, session, snapshotProtocol = null) {
     const bytes = createHmac('sha256', this.#secret)
-      .update(JSON.stringify([owner, session, route.id, route.upstreamModel, route.generation])).digest().subarray(0, 16);
+      .update(JSON.stringify(snapshotProtocol === null
+        ? [owner, session, route.id, route.upstreamModel, route.generation]
+        : ['bifrost-history-snapshot-v1', owner, route.id, route.upstreamModel, route.generation, snapshotProtocol])).digest().subarray(0, 16);
     bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
     const value = bytes.toString('hex');
     return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
@@ -81,14 +83,23 @@ export class ModelRouter {
       if (!previous && this.#sessions.size >= 1024) throw fail('会话数量已达上限，请稍后重试。', 429, 'desktop_session_limit');
       this.#sessions.set(key, { scope, expires: at + 6 * 60 * 60 * 1000 });
     }
-    return { ...route, scope, protocol };
+    return { ...route, scope, snapshotScope: this.#binding(route, owner, '', protocol), protocol };
   }
-  async request(context, { body, signal } = {}) {
+  async request(context, { body, signal, snapshot = false, legacyScopes = [] } = {}) {
     if (String(context.provider.generation) !== context.generation) throw fail('来源授权已变化，请刷新模型并新建聊天。', 409, 'desktop_source_changed');
     if (signal?.aborted) throw fail('请求已取消。', 499, 'desktop_cancelled');
+    if (typeof snapshot !== 'boolean' || !Array.isArray(legacyScopes)
+        || legacyScopes.length > 64 || legacyScopes.some(scope => typeof scope !== 'string'
+          || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(scope))) {
+      throw fail('历史快照范围无效。', 400, 'desktop_state_mismatch');
+    }
+    if (snapshot && context.provider.supportsSnapshotState?.(context.upstreamModel, context.protocol) !== true) {
+      throw fail('当前来源未声明可复制的历史快照。', 409, 'desktop_state_mismatch');
+    }
     // The only dispatch. Failures are never replayed against another provider.
     return context.provider.request(context.protocol, { body: { ...body, model: context.upstreamModel },
-      scope: context.scope, session: context.scope, signal });
+      scope: snapshot ? context.snapshotScope : context.scope, session: context.scope, signal,
+      ...(legacyScopes.length ? { legacyScopes } : {}) });
   }
   async close() { this.#sessions.clear(); await Promise.allSettled([...this.#sources.values()].map(provider => provider.close())); }
 }

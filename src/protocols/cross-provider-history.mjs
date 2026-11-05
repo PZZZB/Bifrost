@@ -62,7 +62,7 @@ function hasPlainPayload(item) {
 }
 
 /** Derive a destination request without mutating the client's durable history. */
-export async function adaptCrossProviderHistory(body, { target, clientScope = null, session = '', signal,
+export async function adaptCrossProviderHistory(body, { target, clientScope = null, session = '', fork = null, signal,
   openCodeBuddyCompaction = null, inspectRemoteState = null, openRemoteCompaction = null } = {}) {
   if (!['A', 'B', 'CodeBuddy', 'Cursor', 'Bifrost'].includes(target)) throw new TypeError('Invalid history destination.');
   aborted(signal);
@@ -89,14 +89,14 @@ export async function adaptCrossProviderHistory(body, { target, clientScope = nu
       }
       if (encrypted.startsWith(REMOTE_RESPONSES_STATE_PREFIX)) {
         if (typeof inspectRemoteState !== 'function') throw new BridgeError('远端来源尚不能验证此历史摘要，请先使用原模型恢复。', 409, 'history_compaction_unavailable');
-        const info = await inspectRemoteState(encrypted, { clientScope, session, signal, kind: item.type,
+        const info = await inspectRemoteState(encrypted, { clientScope, session, fork, signal, kind: item.type,
           model: target === 'Bifrost' ? body.model : null });
         aborted(signal);
         if (target === 'Bifrost' && info?.model === body.model) { input.push(item); continue; }
         fields(item, ['type', 'id', 'encrypted_content', 'status', 'internal_chat_message_metadata_passthrough']);
         if (item.status != null && item.status !== 'completed') invalid();
         if (typeof openRemoteCompaction !== 'function') throw new BridgeError('远端来源暂不能恢复此历史摘要，请先使用原模型恢复。', 409, 'history_compaction_unavailable');
-        const summary = await openRemoteCompaction(encrypted, { clientScope, session, signal, kind: item.type,
+        const summary = await openRemoteCompaction(encrypted, { clientScope, session, fork, signal, kind: item.type,
           model: target === 'Bifrost' ? body.model : null });
         aborted(signal); input.push(conversationSummary(summary)); changed = true; continue;
       }
@@ -113,7 +113,7 @@ export async function adaptCrossProviderHistory(body, { target, clientScope = nu
       let remoteMatches = true;
       if (source === 'Bifrost' && encrypted.startsWith(REMOTE_RESPONSES_STATE_PREFIX)) {
         if (typeof inspectRemoteState !== 'function') throw new BridgeError('远端接续状态无法定位原模型，请先使用原模型恢复历史。', 400, 'remote_history_channel_mismatch');
-        const info = await inspectRemoteState(encrypted, { clientScope, session, signal, kind: 'reasoning',
+        const info = await inspectRemoteState(encrypted, { clientScope, session, fork, signal, kind: 'reasoning',
           model: target === 'Bifrost' ? body.model : null });
         aborted(signal); remoteMatches = info?.model === body.model;
       }

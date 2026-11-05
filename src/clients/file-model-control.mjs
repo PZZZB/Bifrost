@@ -49,11 +49,16 @@ export function createFileModelControl({ id, name, configPath, statePath, gatewa
   const io = { ...filesystem, ...fs };
 
   async function assertPath(path) {
-    let cursor = path;
+    const ancestors = []; let cursor = path;
     while (true) {
+      ancestors.push(cursor);
+      const parent = dirname(cursor); if (parent === cursor) break; cursor = parent;
+    }
+    // Reject an untrusted ancestor before inspecting any descendant through
+    // it. Windows can report UNKNOWN for a missing file beneath a junction.
+    for (const cursor of ancestors.reverse()) {
       try { if ((await io.lstat(cursor)).isSymbolicLink()) throw fail('客户端配置路径包含链接，未修改配置。', 'client_config_link'); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
-      const parent = dirname(cursor); if (parent === cursor) break; cursor = parent;
     }
   }
   async function read(path, maximum = MAX_FILE_BYTES) {

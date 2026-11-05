@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClaudeSdkWorker, CLAUDE_AGENT_SDK_VERSION, CLAUDE_CLIENT_MCP_SERVER,
   CLAUDE_CLIENT_MCP_TIMEOUT_MS, CLAUDE_CLIENT_SYSTEM_PROMPT, buildClaudeEnvironment } from '../src/claude-sdk-worker.mjs';
+import { claudeSourceError } from '../src/claude-source-errors.mjs';
 
 const root = join(tmpdir(), 'offline-claude-worker');
 const sessionId = 'b6b38769-021a-4931-a050-c54a2f79277b';
@@ -348,6 +349,34 @@ test('stream failures close the query and propagate only a fixed error', async t
   assert.deepEqual(result, { reason: 'failed', error: 'Claude SDK worker stream failed.', sessionId: null });
   assert.equal(fake.closeCount, 1);
   assert.doesNotMatch(JSON.stringify(result), new RegExp(key));
+});
+
+for (const [fields, code] of [[{ status: 429 }, 'claude_rate_limited'], [{ type: 'authentication_error' }, 'claude_authentication_failed'],
+  [{ code: 'ECONNRESET' }, 'claude_network_error'], [{ name: 'AbortError', status: 429 }, 'claude_request_interrupted']]) {
+  test(`SDK exceptions preserve ${code} without private exception text or credentials`, async testContext => {
+    const { worker, fake } = workerFixture(testContext);
+    await worker.start();
+    fake.output.end(Object.assign(new Error(`PRIVATE_SDK_EXCEPTION ${key} /Users/private/config`), fields));
+    const source = claudeSourceError(code);
+    await assert.rejects(async () => { for await (const _event of worker.events) {} }, error => {
+      assert.equal(error.code, code); assert.equal(error.message, source.message);
+      assert.equal(error.cause, undefined); return true;
+    });
+    const result = await worker.done;
+    assert.deepEqual(result, { reason: 'failed', error: source.message, sessionId: null });
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_SDK_EXCEPTION|offline-independent|\/Users\/private/);
+    assert.equal(fake.closeCount, 1);
+  });
+}
+
+test('closing a worker wins over a queued source exception and retains the cancelled outcome', async testContext => {
+  const { worker, fake } = workerFixture(testContext);
+  await worker.start();
+  const iterator = worker.events[Symbol.asyncIterator](), pending = iterator.next();
+  const closing = worker.close();
+  fake.output.end(Object.assign(new Error(`PRIVATE_SDK_EXCEPTION ${key}`), { status: 429 }));
+  await closing;
+  assert.equal((await pending).done, true); assert.deepEqual(await worker.done, { reason: 'closed', error: null, sessionId: null });
 });
 
 test('a slow event consumer cannot make the worker read an unbounded SDK stream', async testContext => {

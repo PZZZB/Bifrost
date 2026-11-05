@@ -5,6 +5,7 @@ import { documentParts, DocumentConversionError } from './codebuddy-documents.mj
 import { thinkingOptions, thinkingText, ThinkingConversionError } from './codebuddy-thinking.mjs';
 import { CodeBuddyThinkingState, CODEBUDDY_STATE_PREFIX, ThinkingStateError } from './codebuddy-thinking-state.mjs';
 import { CODEBUDDY_MODEL, codeBuddyModelAlias, resolveCodeBuddyAlias, isCodeBuddyOpus55 } from './codebuddy-models.mjs';
+import { codeBuddySourceError } from './codebuddy-source-errors.mjs';
 
 export { CODEBUDDY_MODEL };
 
@@ -20,11 +21,22 @@ const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 const aborted = signal => signal?.aborted === true;
 
 class AdapterError extends Error {
-  constructor(message, status = 400) { super(message); this.status = status; }
+  constructor(message, status = 400, code = null) {
+    super(message); this.status = status;
+    if (codeBuddySourceError(code)) this.code = code;
+  }
 }
 
 function invalid(message = 'CodeBuddy 适配器不支持此请求。') { throw new AdapterError(message); }
-function protocol(message = 'CodeBuddy 上游流不符合预期协议。') { throw new AdapterError(message, 502); }
+function protocol(message = 'CodeBuddy 上游流不符合预期协议。', code = 'codebuddy_upstream_protocol_error') {
+  throw new AdapterError(message, 502, code);
+}
+function emptyLegacyFunctionCall(value) {
+  // HY4 includes this deprecated field beside real tool_calls. An empty
+  // envelope carries no call; populated or extended envelopes remain errors.
+  return value == null || value === '' || object(value) && Object.keys(value).every(key =>
+    ['name', 'arguments'].includes(key) && (value[key] === '' || value[key] === null));
+}
 function unsupportedDeltaFields(delta, fields) {
   const publicNames = ['name', 'tool_call_id', 'audio', 'reasoning', 'reasoning_details', 'reasoning_signature', 'extra_fields',
     'extra_content', 'thinking', 'signature', 'annotations', 'function_call', 'metadata', 'content_type',
@@ -34,21 +46,21 @@ function unsupportedDeltaFields(delta, fields) {
     const name = publicNames.includes(key) ? `${key}:${type}` : `unknown_key,keyLength=${key.length},valueType=${type}`;
     return name + (typeof value === 'string' || Array.isArray(value) ? `,length=${value.length}` : '');
   });
-  protocol(`CodeBuddy 返回了尚未支持的内容类型（${details.join(';')}）。`);
+  protocol(`CodeBuddy 返回了尚未支持的内容类型（${details.join(';')}）。`, 'codebuddy_unsupported_delta');
 }
 function unsupportedFinishReason(value) {
   const known = ['error', 'content_filter', 'end_turn', 'max_tokens', 'tool_use', 'tool_call',
     'stop_sequence', 'pause_turn', 'refusal'];
   const detail = typeof value === 'string' && known.includes(value) ? `finish_reason=${value}`
     : `type=${Array.isArray(value) ? 'array' : typeof value}${typeof value === 'string' ? `,length=${value.length}` : ''}`;
-  protocol(`CodeBuddy 返回了未支持的结束原因（${detail}）。`);
+  protocol(`CodeBuddy 返回了未支持的结束原因（${detail}）。`, 'codebuddy_unsupported_finish');
 }
 function upstreamFinishError(chunk) {
   const details = ['finish_reason=error'];
   for (const field of ['status_code', 'code']) {
     if (Number.isSafeInteger(chunk[field])) details.push(`${field}=${chunk[field]}`);
   }
-  protocol(`CodeBuddy 上游返回了失败结束原因（${details.join(',')}）。`);
+  protocol(`CodeBuddy 上游返回了失败结束原因（${details.join(',')}）。`, 'codebuddy_upstream_failed');
 }
 function keys(value, allowed) {
   if (!object(value) || Object.keys(value).some(key => !allowed.includes(key))) invalid();
@@ -71,7 +83,8 @@ function errorResponse(error) {
   const type = ({ 400: 'invalid_request_error', 401: 'authentication_error', 403: 'permission_error',
     404: 'not_found_error', 429: 'rate_limit_error', 499: 'api_error', 501: 'not_implemented_error' })[status] || 'api_error';
   return Response.json({ type: 'error', error: { type,
-    message: inputError ? error.message : 'CodeBuddy 请求失败。' } }, { status });
+    message: inputError ? error.message : 'CodeBuddy 请求失败。',
+    ...(codeBuddySourceError(error?.code) ? { code: error.code } : {}) } }, { status });
 }
 
 function cacheHint(value, onHint) {
@@ -429,7 +442,7 @@ class Completion {
       if (object(chunk) && Array.isArray(chunk.choices) && chunk.choices.some(choice => choice?.finish_reason === 'error')) {
         upstreamFinishError(chunk);
       }
-      protocol('CodeBuddy 上游返回了错误事件。');
+      protocol('CodeBuddy 上游返回了错误事件。', 'codebuddy_upstream_failed');
     }
     this.usage = normalizeUsage(chunk.usage, this.usage);
     if (!Array.isArray(chunk.choices) || chunk.choices.length > 1) protocol();
@@ -442,12 +455,14 @@ class Completion {
     const delta = choice.delta;
     if (this.finishReason !== null && (Object.keys(delta).some(key => {
       if (key === 'extra_fields') return false;
+      if (key === 'function_call') return !emptyLegacyFunctionCall(delta[key]);
       if (key === 'role') return delta.role !== 'assistant';
       if (key === 'tool_calls') return !Array.isArray(delta.tool_calls) || delta.tool_calls.length !== 0;
       if (['content', 'reasoning_content', 'refusal'].includes(key)) return delta[key] !== null && delta[key] !== '';
       return true;
     }) || finishReason !== null && finishReason !== undefined)) protocol();
-    const unsupportedFields = Object.keys(delta).filter(key => !['role', 'content', 'tool_calls', 'refusal', 'reasoning_content', 'extra_fields'].includes(key) && delta[key] !== null && delta[key] !== '');
+    const unsupportedFields = Object.keys(delta).filter(key => !['role', 'content', 'tool_calls', 'refusal', 'reasoning_content', 'extra_fields'].includes(key)
+      && !(key === 'function_call' && emptyLegacyFunctionCall(delta[key])) && delta[key] !== null && delta[key] !== '');
     if (unsupportedFields.length) unsupportedDeltaFields(delta, unsupportedFields);
     if (delta.role !== undefined && delta.role !== 'assistant' || delta.refusal) protocol('CodeBuddy 上游未返回可用的 assistant 消息。');
     this.captureExtraFields(delta.extra_fields);
@@ -512,7 +527,7 @@ class Completion {
     }
   }
   finish() {
-    if (!this.done || !this.started || this.finishReason === null) protocol('CodeBuddy 上游未完整结束。');
+    if (!this.done || !this.started || this.finishReason === null) protocol('CodeBuddy 上游未完整结束。', 'codebuddy_upstream_truncated');
     if (this.finishReason === 'tool_calls' && !this.calls.size || this.finishReason === 'stop' && this.calls.size
       || this.request.requireTools && !this.calls.size && this.finishReason !== 'length') protocol('CodeBuddy 工具调用与结束原因不一致。');
     this.closeText(); this.closeThinking(); this.emitExtraFields(); const seen = new Set();
@@ -767,8 +782,11 @@ export class CodeBuddyProvider {
           const result = await iterator.next();
           if (result.done) controller.close(); else controller.enqueue(sse(result.value));
         } catch (error) {
+          const source = codeBuddySourceError(abort.signal.aborted ? 'codebuddy_request_interrupted'
+            : error instanceof AdapterError ? error.code : 'codebuddy_upstream_connection_error');
           controller.enqueue(sse({ type: 'error', error: { type: 'api_error', message: abort.signal.aborted
-            ? 'CodeBuddy 请求已取消。' : error instanceof AdapterError ? error.message : 'CodeBuddy 上游连接已中断。' } }));
+            ? 'CodeBuddy 请求已取消。' : error instanceof AdapterError ? error.message : 'CodeBuddy 上游连接已中断。',
+          ...(source ? { code: source.code } : {}) } }));
           controller.close();
         }
       },

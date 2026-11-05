@@ -2,6 +2,8 @@ import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, rename, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { claudeSourceError } from './claude-source-errors.mjs';
+import { codeBuddySourceError } from './codebuddy-source-errors.mjs';
 
 const ACCOUNTS = new Set(['A', 'B', 'CodeBuddy', 'Cursor', 'Claude', 'With', 'Bifrost']);
 const STATUSES = new Set(['completed', 'tool_pending', 'incomplete', 'failed', 'interrupted']);
@@ -29,13 +31,17 @@ const MESSAGES = Object.freeze({
   tool_pending: '模型已返回工具调用，完整回合仍等待工具结果。',
   unknown_error: '请求未完成，未取得可安全公开的具体错误类别。',
 });
+const diagnosticMessage = code => typeof code === 'string'
+  ? Object.hasOwn(MESSAGES, code) ? MESSAGES[code] : (claudeSourceError(code) ?? codeBuddySourceError(code))?.message ?? null : null;
 
 /** Classify only explicit codes/statuses. Provider error text is never retained. */
 export function classifyDiagnosticFailure(error, { httpStatus = null, stage = 'upstream_request', interrupted = false } = {}) {
   let code = 'unknown_error';
   const supplied = typeof error?.code === 'string' ? error.code.toLowerCase() : '';
+  const source = claudeSourceError(supplied) ?? codeBuddySourceError(supplied);
   const status = Number.isInteger(error?.status) ? error.status : httpStatus;
   if (interrupted || error?.name === 'AbortError') code = 'request_interrupted';
+  else if (source) code = source.code;
   else if (['invalid_gateway_key', 'account_a_auth_required', 'anthropic_invalid_gateway_key', 'with_invalid_gateway_key',
     'authentication_error', 'unauthenticated', 'auth_required', 'not_authenticated'].includes(supplied) || status === 401) code = 'authentication_failed';
   else if (['gateway_restarting', 'anthropic_gateway_restarting', 'with_gateway_restarting'].includes(supplied)) code = 'gateway_restarting';
@@ -51,7 +57,7 @@ export function classifyDiagnosticFailure(error, { httpStatus = null, stage = 'u
     ['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET'].includes(error?.cause?.code)) code = 'network_failed';
   else if (status >= 400 && status < 500) code = ['authentication', 'validation', 'routing'].includes(stage) ? 'invalid_request' : 'payload_rejected';
   else if (status >= 500 && status <= 599) code = 'upstream_failed';
-  return { errorCode: code, message: MESSAGES[code], failureStage: STAGES.has(stage) ? stage : 'upstream_request' };
+  return { errorCode: code, message: diagnosticMessage(code), failureStage: STAGES.has(stage) ? stage : 'upstream_request' };
 }
 
 function token(value) { return Number.isSafeInteger(value) && value >= 0 ? value : null; }
@@ -93,7 +99,7 @@ export function normalizeDiagnosticRecord(raw) {
     if (raw.time === null || !Number.isFinite(time.getTime())) return null;
     const status = STATUSES.has(raw.status) ? raw.status : 'failed';
     const errorCode = status === 'completed' ? null : status === 'tool_pending' ? 'tool_pending'
-      : status === 'interrupted' ? 'request_interrupted' : Object.hasOwn(MESSAGES, raw.errorCode) ? raw.errorCode
+      : status === 'interrupted' ? 'request_interrupted' : diagnosticMessage(raw.errorCode) ? raw.errorCode
         : status === 'incomplete' ? 'incomplete_response' : 'unknown_error';
     const durationMs = milliseconds(raw.durationMs), first = milliseconds(raw.firstResponseMs);
     return {
@@ -103,7 +109,7 @@ export function normalizeDiagnosticRecord(raw) {
       httpStatus: Number.isInteger(raw.httpStatus) && raw.httpStatus >= 100 && raw.httpStatus <= 599 ? raw.httpStatus : null,
       durationMs, firstResponseMs: first !== null && durationMs !== null ? Math.min(first, durationMs) : first,
       failureStage: status === 'completed' || status === 'tool_pending' ? null : STAGES.has(raw.failureStage) ? raw.failureStage : null,
-      errorCode, message: errorCode ? MESSAGES[errorCode] : '请求已完整返回。', usage: normalizeDiagnosticUsage(raw.usage),
+      errorCode, message: errorCode ? diagnosticMessage(errorCode) : '请求已完整返回。', usage: normalizeDiagnosticUsage(raw.usage),
     };
   } catch { return null; }
 }
