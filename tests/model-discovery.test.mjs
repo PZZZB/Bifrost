@@ -86,9 +86,156 @@ test('partial catalog failure preserves switches and safe cached names without b
   assert.deepEqual(after.disabledModels, saved); assert.equal(after.discovery.CodeBuddy.state, 'ready');
   assert.equal(after.discovery.Cursor.state, 'error');
   assert.equal(after.models.find(model => model.id === legacyCU).enabled, true);
-  assert.equal(after.models.find(model => model.id === legacyCU).available, false);
+  assert.equal(after.models.find(model => model.id === legacyCU).available, true);
+  assert.equal(policy.assertEnabled(legacyCU), true);
   assert.equal(JSON.stringify(after).includes('PRIVATE_TOKEN'), false); assert.equal(JSON.stringify(after).includes('private.invalid'), false);
   cu.getModels = async () => cuModels(); await discovery.refresh(); assert.equal(policy.assertEnabled(legacyCU), true);
+});
+
+test('a failed CodeBuddy refresh preserves only the current authorization directory and recovers without model inference', async t => {
+  const { policy, discovery, cb, calls, path } = await fixture(t);
+  const before = await discovery.refresh(), saved = await readFile(path, 'utf8');
+  cb.getModels = async () => { calls.cb++; throw Object.assign(new Error('PRIVATE_PROVIDER_ERROR'), { code: 'network_error' }); };
+  const failed = await discovery.refresh();
+  assert.equal(failed.discovery.CodeBuddy.state, 'error');
+  assert.match(failed.discovery.CodeBuddy.message, /目录刷新失败/);
+  assert.doesNotMatch(failed.discovery.CodeBuddy.message, /授权|PRIVATE/);
+  assert.equal(failed.models.find(model => model.id === legacyCB).available, true);
+  assert.equal(policy.assertEnabled(legacyCB), true);
+  assert.deepEqual(failed.disabledModels, before.disabledModels);
+  assert.equal(await readFile(path, 'utf8'), saved, 'A read failure cannot change model switches, names or revision.');
+  assert.equal(JSON.stringify(failed).includes('PRIVATE'), false);
+  cb.getModels = async () => { calls.cb++; return cbModels(); };
+  const recovered = await discovery.refresh();
+  assert.equal(recovered.discovery.CodeBuddy.state, 'ready');
+  assert.equal(recovered.discovery.CodeBuddy.message, undefined);
+  assert.equal(policy.assertEnabled(legacyCB), true);
+  assert.equal(calls.cb, 3);
+});
+
+test('failed initial reads and changed authorizations cannot adopt an earlier account directory', async t => {
+  const { policy, discovery, cb } = await fixture(t);
+  cb.getModels = async () => { throw new Error('READ_FAILED'); };
+  await discovery.refresh();
+  assert.equal(policy.snapshot().models.find(model => model.id === legacyCB).available, false);
+  assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
+  cb.getModels = async () => cbModels(); await discovery.refresh();
+  assert.equal(policy.assertEnabled(legacyCB), true);
+  cb.authorizationVersion++;
+  cb.getModels = async () => { throw new Error('READ_FAILED'); };
+  const changed = await discovery.refresh();
+  assert.equal(changed.discovery.CodeBuddy.state, 'error');
+  assert.equal(changed.models.find(model => model.id === legacyCB).available, false);
+  assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
+});
+
+test('successful empty, removed, disabled-model and disabled-channel directories remain authoritative', async t => {
+  const { policy, discovery, cb } = await fixture(t);
+  await discovery.refresh();
+  cb.getModels = async () => cbModels().map(model => model.id === legacyCB ? { ...model, available: false, reason: 'Model no longer available.' } : model);
+  await discovery.refresh();
+  assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
+  cb.getModels = async () => cbModels(); await discovery.refresh();
+  assert.equal(policy.assertEnabled(legacyCB), true);
+  cb.getModels = async () => cbModels().filter(model => model.id !== legacyCB); await discovery.refresh();
+  assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
+  cb.getModels = async () => []; const empty = await discovery.refresh();
+  assert.equal(empty.discovery.CodeBuddy.state, 'ready'); assert.equal(empty.discovery.CodeBuddy.count, 0);
+  assert.equal(empty.models.filter(model => model.channel === 'CodeBuddy').every(model => model.available === false), true);
+  cb.getModels = async () => cbModels(); await discovery.refresh();
+  cb.enabled = false;
+  cb.getModels = async () => { assert.fail('An explicitly disabled channel must never load a catalog.'); };
+  const disabled = await discovery.refresh();
+  assert.equal(disabled.discovery.CodeBuddy.state, 'disabled');
+  assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
+  assert.equal(policy.assertEnabled(legacyCU), true);
+});
+
+test('a timeout after a successful directory does not poison same-account availability', async t => {
+  const { policy, discovery, cb } = await fixture(t, { timeoutMs: 15 });
+  await discovery.refresh();
+  let aborted = false;
+  cb.getModels = ({ signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
+    aborted = true; reject(new Error('PRIVATE_TIMEOUT'));
+  }, { once: true }));
+  const timedOut = await discovery.refresh();
+  assert.equal(aborted, true); assert.equal(timedOut.discovery.CodeBuddy.state, 'error');
+  assert.equal(policy.assertEnabled(legacyCB), true);
+  assert.equal(timedOut.models.find(model => model.id === legacyCB).available, true);
+  assert.equal(JSON.stringify(timedOut).includes('PRIVATE_TIMEOUT'), false);
+});
+
+test('same-authorization disable overrides a failing metadata read and does not retain its old availability', async t => {
+  const { policy, discovery, cb } = await fixture(t);
+  await discovery.refresh();
+  let entered, rejectRead;
+  const started = new Promise(resolve => { entered = resolve; });
+  cb.getModels = async () => { entered(); return new Promise((_resolve, reject) => { rejectRead = reject; }); };
+  const pending = discovery.refresh(); await started;
+  cb.enabled = false; rejectRead(new Error('PRIVATE_READ_FAILURE'));
+  const result = await pending;
+  assert.equal(cb.authorizationVersion, 0);
+  assert.equal(result.discovery.CodeBuddy.state, 'disabled');
+  assert.equal(result.models.find(model => model.id === legacyCB).available, false);
+  assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
+  assert.equal(policy.assertEnabled(legacyCU), true);
+});
+
+test('disabled clearing uses the current authorization after a newer directory wins an older failing read', async t => {
+  const { policy, discovery, cb } = await fixture(t);
+  cb.authorizationVersion = 1; await discovery.refresh();
+  assert.equal(policy.assertEnabled(legacyCB), true);
+  cb.getModels = async () => {
+    cb.authorizationVersion = 2;
+    await policy.observe({ models: cbModels() }, 'CodeBuddy', { complete: true, authorizationVersion: 2 });
+    assert.equal(policy.assertEnabled(legacyCB), true, 'A separate current-account read has confirmed the newer directory.');
+    cb.enabled = false;
+    throw new Error('PRIVATE_OLD_READ_FAILURE');
+  };
+  const result = await discovery.refresh();
+  assert.equal(result.discovery.CodeBuddy.state, 'disabled');
+  assert.equal(result.discovery.CodeBuddy.count, 0);
+  assert.equal(result.models.find(model => model.id === legacyCB).available, false);
+  assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
+  assert.equal(JSON.stringify(result).includes('PRIVATE_OLD_READ_FAILURE'), false);
+  assert.equal(policy.assertEnabled(legacyCU), true);
+});
+
+test('same-authorization disable during another channel policy write clears previously ready models', async t => {
+  const { policy, discovery, cb } = await fixture(t);
+  await discovery.refresh();
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const observe = policy.observe.bind(policy);
+  policy.observe = async (...args) => { if (args[1] === 'Cursor') { entered(); await gate; } return observe(...args); };
+  const pending = discovery.refresh(); await started;
+  cb.enabled = false; release();
+  const result = await pending;
+  assert.equal(cb.authorizationVersion, 0);
+  assert.equal(result.discovery.CodeBuddy.state, 'disabled');
+  assert.equal(result.models.find(model => model.id === legacyCB).available, false);
+  assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
+});
+
+test('cross-channel disable races cannot leave a formerly ready directory after an error invalidation', async t => {
+  const { policy, discovery, cb, cu } = await fixture(t);
+  await discovery.refresh();
+  cu.getModels = async () => { throw new Error('METADATA_FAILED'); };
+  const observe = policy.observe.bind(policy); let invalidations = 0;
+  policy.observe = async (...args) => {
+    const result = await observe(...args);
+    if (args[1] === 'Cursor' && args[2].complete === false) cu.enabled = false;
+    else if (args[1] === 'Cursor' && args[2].complete === true) { invalidations++; cb.enabled = false; }
+    else if (args[1] === 'CodeBuddy' && args[2].complete === true && args[0].models.length === 0) invalidations++;
+    return result;
+  };
+  const result = await discovery.refresh();
+  assert.equal(cb.authorizationVersion, 0); assert.equal(cu.authorizationVersion, 0);
+  assert.equal(result.discovery.CodeBuddy.state, 'disabled'); assert.equal(result.discovery.Cursor.state, 'disabled');
+  assert.equal(result.models.filter(model => ['CodeBuddy', 'Cursor'].includes(model.channel)).every(model => model.available === false), true);
+  assert.throws(() => policy.assertEnabled(legacyCB), error => error.code === 'model_unavailable');
+  assert.throws(() => policy.assertEnabled(legacyCU), error => error.code === 'model_unavailable');
+  assert.equal(invalidations, 2, 'Explicit disable is applied at most once per channel after the initial policy writes.');
 });
 
 test('catalog timeout aborts only the slow metadata read and simultaneous web refreshes coalesce', async t => {

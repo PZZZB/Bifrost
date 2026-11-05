@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Gateway } from '../src/gateway.mjs';
 import { ModelPolicy } from '../src/model-policy.mjs';
+import { ModelDiscovery } from '../src/model-discovery.mjs';
 import { CODEBUDDY_MODEL } from '../src/codebuddy-provider.mjs';
 import { CODEBUDDY_RESPONSES_STATE_PREFIX } from '../src/codebuddy-responses.mjs';
 
@@ -264,6 +265,46 @@ test('saved model switches filter the full native catalog and block disabled A/B
     assert.equal(response.status, 400); assert.equal((await response.json()).error.code, 'model_disabled');
   }
   assert.equal(calls.a + calls.b + calls.upstream.length + calls.adapter.length, 0);
+});
+
+test('a failed metadata refresh preserves the CodeBuddy route while source authentication and account changes remain enforced', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'bifrost-directory-routing-'));
+  const policy = await ModelPolicy.open({ path: join(stateDir, 'models.json') });
+  await policy.observe({ models: [{ id: model, name: 'CodeBuddy fixture' }] });
+  let metadataFails = false, rejectAuthentication = false;
+  const service = { enabled: true, authorizationVersion: 0, getModels: async () => {
+    if (metadataFails) throw new Error('PRIVATE_CATALOG_FAILURE');
+    return [{ id: model, name: 'CodeBuddy fixture', available: true, source: 'remote' }];
+  } };
+  const discovery = new ModelDiscovery({ modelPolicy: policy, codeBuddyService: service });
+  t.after(async () => { await discovery.close(); await rm(stateDir, { recursive: true, force: true }); });
+  const dispatched = [];
+  const { url, calls, settle } = await fixture(t, { modelPolicy: policy, provider: {
+    status: async () => ready,
+    request: async options => {
+      dispatched.push(options);
+      return rejectAuthentication ? Response.json({ error: { code: 'not_authenticated' } }, { status: 401 })
+        : Response.json({ id: 'directory-recovery', status: 'completed' });
+    },
+  } });
+  await discovery.refresh(); metadataFails = true;
+  const failed = await discovery.refresh();
+  assert.equal(failed.discovery.CodeBuddy.state, 'error');
+  assert.equal(dispatched.length, 0);
+  const request = () => fetch(`${url}/backend-api/codex/responses`, { method: 'POST', headers,
+    body: JSON.stringify({ model, input: 'Offline continuation after a metadata read failure.' }) });
+  const continued = await request();
+  assert.equal(continued.status, 200); assert.equal((await continued.json()).id, 'directory-recovery');
+  rejectAuthentication = true;
+  const unauthorized = await request();
+  assert.equal(unauthorized.status, 401); assert.equal((await unauthorized.json()).error.code, 'not_authenticated');
+  service.authorizationVersion++;
+  const changed = await request();
+  assert.equal(changed.status, 403); assert.equal((await changed.json()).error.code, 'model_unavailable');
+  await settle();
+  assert.equal(dispatched.length, 2);
+  assert.equal(calls.a + calls.b + calls.upstream.length, 0);
+  assert.equal(JSON.stringify(failed).includes('PRIVATE_CATALOG_FAILURE'), false);
 });
 
 test('gateway draining rejects new native and CodeBuddy work before reading upstream credentials', async t => {

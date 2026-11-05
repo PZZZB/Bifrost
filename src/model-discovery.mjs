@@ -21,7 +21,7 @@ export class ModelDiscovery {
   }
   snapshot() { return { ...this.modelPolicy.snapshot(), discovery: structuredClone(this.#status) }; }
   async #read(channel, service) {
-    const message = `${channel} 账号目录暂不可用，请检查授权后刷新。`;
+    const message = `${channel} 模型目录刷新失败，请稍后重试。`;
     if (!service || service.enabled === false || typeof service.getModels !== 'function') {
       return { channel, models: [], state: 'disabled', message: `${channel} 渠道尚未启用或授权。` };
     }
@@ -53,7 +53,7 @@ export class ModelDiscovery {
       });
       return { channel, models, state: 'ready', authorizationVersion,
         ...(channel === 'Cursor' ? { promptMode: service.promptMode } : {}) };
-    } catch { return { channel, models: [], state: 'error', message }; }
+    } catch { return { channel, models: [], state: 'error', message, authorizationVersion }; }
     finally { clearTimeout(timer); this.#active.delete(abort); }
   }
   refresh() {
@@ -63,19 +63,43 @@ export class ModelDiscovery {
       if (this.#closed) return this.snapshot();
       for (const result of results) {
         const service = result.channel === 'Cursor' ? this.cursorService : this.codeBuddyService;
-        const stale = () => result.state === 'ready' && (service?.enabled === false
-          || result.authorizationVersion !== service?.authorizationVersion);
-        if (stale()) Object.assign(result, { models: [], state: 'error', message: `${result.channel} 授权已变化，请重新刷新账号目录。` });
-        await this.modelPolicy.observe({ models: result.models }, result.channel, { defaultEnabled: false, complete: true,
+        const stale = () => result.state !== 'disabled' && service?.enabled === false
+          || result.state === 'ready' && result.authorizationVersion !== service?.authorizationVersion;
+        const rejectStale = () => Object.assign(result, { models: [], state: service?.enabled === false ? 'disabled' : 'error',
+          message: service?.enabled === false ? `${result.channel} 渠道已停用。` : `${result.channel} 授权已变化，请重新刷新账号目录。` });
+        if (stale()) rejectStale();
+        // A failed read is not an authoritative empty directory. Retain only
+        // metadata already bound to this authorization; ModelPolicy's live
+        // version getter still rejects old accounts and unverified startup rows.
+        await this.modelPolicy.observe({ models: result.models }, result.channel, { defaultEnabled: false,
+          complete: result.state === 'ready' || result.state === 'disabled',
           unavailableReason: result.message ?? '当前账号目录未返回此模型，请刷新目录后重试。',
-          authorizationVersion: result.authorizationVersion ?? service?.authorizationVersion, promptMode: result.promptMode });
+          authorizationVersion: result.state === 'disabled' ? service?.authorizationVersion
+            : result.authorizationVersion ?? service?.authorizationVersion, promptMode: result.promptMode });
         if (stale()) {
-          Object.assign(result, { models: [], state: 'error', message: `${result.channel} 授权已变化，请重新刷新账号目录。` });
-          await this.modelPolicy.observe({ models: [] }, result.channel, { defaultEnabled: false, complete: true,
+          rejectStale();
+          await this.modelPolicy.observe({ models: [] }, result.channel, { defaultEnabled: false, complete: result.state === 'disabled',
             unavailableReason: result.message, authorizationVersion: service?.authorizationVersion });
         }
         this.#status[result.channel] = { state: result.state, count: result.models.length,
           checkedAt: new Date(this.now()).toISOString(), ...(result.message ? { message: result.message } : {}) };
+      }
+      // A channel can be disabled while another policy write is awaiting disk.
+      // An error result must not hide that explicit state change. Once cleared,
+      // this refresh never republishes its old positive result; at most one
+      // extra invalidation per channel is needed, including cross-write races.
+      for (let pass = 0; pass < results.length; pass++) {
+        let changed = false;
+        for (const result of results) {
+          const service = result.channel === 'Cursor' ? this.cursorService : this.codeBuddyService;
+          if (service?.enabled !== false || result.state === 'disabled') continue;
+          Object.assign(result, { models: [], state: 'disabled', message: `${result.channel} 渠道已停用。` });
+          await this.modelPolicy.observe({ models: [] }, result.channel, { defaultEnabled: false, complete: true,
+            unavailableReason: result.message, authorizationVersion: service?.authorizationVersion });
+          this.#status[result.channel] = { state: 'disabled', count: 0, checkedAt: new Date(this.now()).toISOString(), message: result.message };
+          changed = true;
+        }
+        if (!changed) break;
       }
       // The first channel may change while the second policy write is in
       // progress. Version-bound policy rows already fail closed; finalize
