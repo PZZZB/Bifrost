@@ -4,16 +4,17 @@ import { isIP } from 'node:net';
 import { createClaudeGatewayServer, ChatHistoryStore } from '../src/openai-chat-gateway.mjs';
 import { ClaudeCliHub } from '../src/claude-cli-provider.mjs';
 import { startRelayControl } from '../src/relay-control.mjs';
-import { discoverClaudeMetadata } from '../src/claude-model-catalog.mjs';
+import { ClaudeMetadataReader } from '../src/claude-model-catalog.mjs';
 import { unavailableClaudeUsage } from '../src/claude-subscription-usage.mjs';
 
 let hub, server, control, controlStart, closing;
-let catalogTimer, catalogPending;
+let catalogTimer, catalogPending, metadataReader;
+let lastAuthorizationState;
 let subscriptionUsage = unavailableClaudeUsage(), usageAttemptAt = 0, authorizationVersion = null;
 const catalogAbort = new AbortController();
 function close() {
   return closing ??= (async () => {
-    clearInterval(catalogTimer); catalogAbort.abort(); await catalogPending?.catch(() => {});
+    clearInterval(catalogTimer); catalogAbort.abort(); await metadataReader?.close(); await catalogPending?.catch(() => {});
     await controlStart?.then(value => value.close(), () => {});
     const results = await Promise.allSettled([
       server && new Promise(done => { server.close(done); server.closeAllConnections(); }),
@@ -58,12 +59,19 @@ try {
     allowedHosts: config.listener.allowedHosts, allowedPeers: config.listener.allowedPeers,
     routes: config.models.map(routeFor) }, { history });
   if (config.modelDiscovery?.enabled === true) {
+    metadataReader = new ClaudeMetadataReader({ ...config.cli, signal: catalogAbort.signal, identitySecret: gatewayKey });
     const refreshCatalog = () => catalogPending ??= (async () => {
       try {
-        const authenticated = (await hub.status()).authenticated;
+        const status = await hub.status(), authenticated = status.authenticated;
+        const authorizationState = JSON.stringify({ authenticated, credentialState: status.credentialState, renewable: status.renewable });
+        if (authorizationState !== lastAuthorizationState) {
+          lastAuthorizationState = authorizationState;
+          process.stdout.write(`${JSON.stringify({ event: 'authorization_state', checkedAt: new Date().toISOString(),
+            authenticated, credentialState: status.credentialState, renewable: status.renewable })}\n`);
+        }
         const includeUsage = Date.now() - usageAttemptAt >= 300000;
         if (includeUsage) usageAttemptAt = Date.now();
-        const metadata = authenticated ? await discoverClaudeMetadata({ ...config.cli, signal: catalogAbort.signal, includeUsage, identitySecret: gatewayKey })
+        const metadata = authenticated ? await metadataReader.read({ includeUsage })
           : { models: [], subscriptionUsage: unavailableClaudeUsage('not_authenticated') };
         if (!catalogAbort.signal.aborted) {
           if (metadata.subscriptionUsage) subscriptionUsage = metadata.subscriptionUsage;

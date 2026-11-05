@@ -145,6 +145,12 @@ node --test tests/claude-login-session.test.mjs tests/mac-vm-console.test.mjs
 
 后台在几秒内重读登录状态。`/health` 和 `/v1/models` 仅用于元数据检查；未登录时健康响应是 200/`ok:false`，模型列表为空。VM 关机时，Mac 入口返回 503。只有实际文本、流式、工具权限和多轮调用通过后，才能认定模型接入验收完成。
 
+### 登录持久化和续期
+
+服务由 systemd 常驻，登录凭据保存在 VM 的持久磁盘；断开终端、断网重连及正常重启不应要求重新登录。短期访问令牌到期后，官方 CLI 使用已保存的续期凭据更新授权。健康检查只读指定配置目录的凭据状态，不运行 `claude auth status`、`doctor` 或自建 OAuth 续期请求。存在续期凭据时，访问令牌到期不会被直接当作退出登录。存储不可读与凭据缺失分别报错，不把文件故障误报为需要本人登录。元数据查询复用进程，常规探活不写凭据、不发送推理提示。中继日志仅在授权状态变化时记录时间、状态分类及是否存在续期能力，不记录令牌或账号身份。
+
+这项改动移除了短命探活进程干扰续期的已知风险模式，不能保证上游授权永久有效。2026-11-05 排查确认过本机访问和续期令牌同时为空；当时没有足够日志证明发生原因。与之高度相关的[上游问题报告](https://github.com/anthropics/claude-code/issues/95822)描述了短命 CLI 在续期写入完成前退出、使已轮换令牌丢失的情况，不能仅凭相似症状断言本机根因。若续期凭据已被撤销或丢失，仍须本人重新授权一次；重启服务不能恢复它。[官方认证说明](https://code.claude.com/docs/en/authentication)。
+
 ## 协议范围和检查
 
 支持 `/v1/messages`、`/v1/messages/count_tokens`、`/v1/chat/completions`、`/v1/models` 和 `/health`。Chat Completions 支持文本、用户图片、普通 function 工具、`tool_choice: auto/none`、JSON 或 SSE。原始思考签名和历史索引留在 VM 内。

@@ -18,6 +18,18 @@ async function fixture(t) {
   return { save, config, key };
 }
 
+test('an HTTP 200 with no authenticated models does not advertise a ready Claude source', async t => {
+  const f = await fixture(t); let authenticated = false;
+  const client = await loadMacClaudeClient(await f.save('config.json', f.config), { fetchImpl: async url =>
+    url.endsWith('/v1/models') ? Response.json({ data: authenticated ? [{ id: 'claude-opus' }] : [] })
+      : Response.json({ ok: authenticated, providers: {} }) });
+  t.after(() => client.close());
+  assert.equal(client.status().available, false); assert.equal(client.status().modelCount, 0);
+  authenticated = true; await client.refresh(); assert.equal(client.status().available, true);
+  authenticated = false; await client.refresh(); assert.equal(client.status().available, false);
+  assert.deepEqual(client.models(), []);
+});
+
 test('Mac Claude bridge discovers only authenticated catalog and namespaces sessions by account', async t => {
   const f = await fixture(t), calls = []; let available = true;
   const client = await loadMacClaudeClient(await f.save('config.json', f.config), { fetchImpl: async (url, options) => {

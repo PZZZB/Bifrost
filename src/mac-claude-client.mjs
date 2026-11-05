@@ -48,7 +48,7 @@ export async function loadMacClaudeClient(path, { fetchImpl = fetch, onCatalog =
         } catch { subscriptionUsage = unavailableClaudeUsage('fetch_failed'); authorizationVersion = null; }
         await onCatalog(discovered.map(({ upstream, ...model }) => model), authorizationVersion);
         models = discovered;
-        lastAvailable = true;
+        lastAvailable = discovered.length > 0;
       } catch { models = []; lastAvailable = false; subscriptionUsage = unavailableClaudeUsage('fetch_failed'); authorizationVersion = null; await onCatalog([], null).catch(() => {}); }
       finally { refreshPending = null; }
     })();

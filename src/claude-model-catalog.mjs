@@ -23,30 +23,81 @@ export function claudeCatalogModels(rows) {
   return [...found.values()];
 }
 
-/** Initializes an empty streaming input to read metadata; never yields a prompt. */
-async function withClaudeMetadata({ binary, configDir, profileDir, stateDir, env = process.env, queryImpl, signal, timeoutMs = 12000 }, read) {
-  if (![binary, configDir, profileDir, stateDir].every(p => typeof p === 'string' && isAbsolute(p))) throw new Error('Invalid Claude catalog paths.');
-  const query = queryImpl ?? (await import('@anthropic-ai/claude-agent-sdk')).query;
-  const controller = new AbortController(); const cancel = () => controller.abort();
-  signal?.addEventListener('abort', cancel, { once: true }); if (signal?.aborted) cancel();
-  const timer = setTimeout(cancel, timeoutMs); let release, instance;
-  const wait = new Promise(resolve => { release = resolve; }); async function* emptyInput() { await wait; }
-  try {
-    instance = query({ prompt: emptyInput(), options: { pathToClaudeCodeExecutable: binary, cwd: stateDir,
-      env: buildClaudeEnvironment({ configDir, profileDir, env }), abortController: controller,
-      tools: [], mcpServers: {}, strictMcpConfig: true, settingSources: [], persistSession: false,
-      settings: { disableAllHooks: true, disableClaudeAiConnectors: true }, stderr: () => {} } });
-    return await Promise.race([read(instance), new Promise((_, reject) => {
-      if (controller.signal.aborted) reject(new Error('Claude catalog cancelled.'));
-      else controller.signal.addEventListener('abort', () => reject(new Error('Claude catalog cancelled.')), { once: true });
-    })]);
-  } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); release(); instance?.close(); }
+/** A relay-owned, empty SDK input. Polling metadata must not repeatedly start
+ * and kill CLI initialization, which can race an OAuth refresh token rotation. */
+export class ClaudeMetadataReader {
+  constructor({ binary, configDir, profileDir, stateDir, env = process.env, queryImpl, signal, timeoutMs = 12000,
+    identitySecret } = {}) {
+    if (![binary, configDir, profileDir, stateDir].every(p => typeof p === 'string' && isAbsolute(p)) ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647) throw new Error('Invalid Claude catalog configuration.');
+    this.options = { binary, configDir, profileDir, stateDir, env, queryImpl, identitySecret };
+    this.timeoutMs = timeoutMs; this.stop = new AbortController(); this.closed = false;
+    this.signal = signal; this.cancel = () => { void this.close().catch(() => {}); };
+    signal?.addEventListener('abort', this.cancel, { once: true }); if (signal?.aborted) this.cancel();
+  }
+
+  async session() {
+    if (this.closed) throw new Error('Claude catalog closed.');
+    if (this.current) return this.current;
+    return this.starting ??= (async () => {
+      const { binary, configDir, profileDir, stateDir, env, queryImpl } = this.options;
+      const query = queryImpl ?? (await import('@anthropic-ai/claude-agent-sdk')).query;
+      if (this.closed) throw new Error('Claude catalog closed.');
+      const controller = new AbortController(); let release;
+      const wait = new Promise(resolve => { release = resolve; }); async function* emptyInput() { await wait; }
+      const instance = query({ prompt: emptyInput(), options: { pathToClaudeCodeExecutable: binary, cwd: stateDir,
+        env: buildClaudeEnvironment({ configDir, profileDir, env }), abortController: controller,
+        tools: [], mcpServers: {}, strictMcpConfig: true, settingSources: [], persistSession: false,
+        settings: { disableAllHooks: true, disableClaudeAiConnectors: true }, stderr: () => {} } });
+      const session = { instance, controller, release, exit: new AbortController() };
+      this.current = session;
+      // Consume only lifecycle events. The empty input never submits inference.
+      // Recreate on a confirmed SDK exit, never merely on a slow metadata read.
+      if (typeof instance[Symbol.asyncIterator] === 'function') session.drain = (async () => {
+        try { for await (const _ of instance) { /* No prompts or outputs are logged. */ } }
+        catch { /* Pending reads report a sanitized disconnected error below. */ }
+        finally { release(); session.exit.abort(); if (this.current === session) this.current = null; }
+      })();
+      return session;
+    })().finally(() => { this.starting = null; });
+  }
+
+  read({ includeUsage = true, modelsOnly = false } = {}) {
+    if (this.closed) return Promise.reject(new Error('Claude catalog closed.'));
+    // Coalesce overlapping refreshes, including calls whose caller timed out.
+    // A timeout does not abort a CLI while it may be persisting renewed OAuth.
+    this.pending ??= (async () => {
+      const session = await this.session();
+      return bounded(() => modelsOnly ? session.instance.supportedModels().then(claudeCatalogModels)
+        : readMetadata(session.instance, { ...this.options, includeUsage }), undefined, session.exit.signal);
+    })().finally(() => { this.pending = null; });
+    const pending = this.pending;
+    return bounded(() => pending, this.timeoutMs, this.stop.signal);
+  }
+
+  close() {
+    if (this.closing) return this.closing;
+    this.closed = true; this.stop.abort(); this.signal?.removeEventListener('abort', this.cancel);
+    return this.closing = (async () => {
+      await this.starting?.catch(() => {});
+      const session = this.current; this.current = null;
+      if (session) {
+        session.release();
+        try { await session.instance.close(); } finally { session.controller.abort(); session.exit.abort(); }
+      }
+    })();
+  }
 }
-export function discoverClaudeModels(options) {
-  return withClaudeMetadata(options, async query => claudeCatalogModels(await query.supportedModels()));
+
+/** One-shot helpers for offline tools; long-running relays own a reader. */
+async function once(options, readOptions) {
+  const reader = new ClaudeMetadataReader(options);
+  try { return await reader.read(readOptions); } finally { await reader.close(); }
 }
-export function discoverClaudeMetadata(options) {
-  return withClaudeMetadata(options, async query => {
+export function discoverClaudeModels(options) { return once(options, { modelsOnly: true }); }
+export function discoverClaudeMetadata(options) { return once(options, { includeUsage: options.includeUsage }); }
+
+async function readMetadata(query, options) {
     const usage = options.includeUsage === false ? Promise.resolve(null) : readClaudeSubscriptionUsage(query);
     const models = claudeCatalogModels(await query.supportedModels());
     let authorizationVersion = null;
@@ -74,12 +125,13 @@ export function discoverClaudeMetadata(options) {
       }
     }
     return { models, subscriptionUsage: await usage, authorizationVersion };
-  });
 }
 
-async function bounded(read, timeoutMs) {
-  let timer;
+async function bounded(read, timeoutMs, signal) {
+  let timer, cancel;
   try { return await Promise.race([Promise.resolve().then(read), new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('Claude metadata timed out.')), timeoutMs);
-  })]); } finally { clearTimeout(timer); }
+    cancel = () => reject(new Error('Claude catalog cancelled.'));
+    signal?.addEventListener('abort', cancel, { once: true }); if (signal?.aborted) cancel();
+    if (timeoutMs !== undefined) timer = setTimeout(() => reject(new Error('Claude metadata timed out.')), timeoutMs);
+  })]); } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
 }

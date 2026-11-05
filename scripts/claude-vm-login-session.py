@@ -2,14 +2,15 @@
 """Ordinary-user CLI login session. No network listener or credential logging."""
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import pty
 import re
 import select
 import signal
+import stat
 import struct
-import subprocess
 import termios
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -17,6 +18,34 @@ import urllib.request
 import urllib.error
 
 AUTH_HOSTS = {"claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com"}
+
+
+def stored_authorization(config_dir, now=None):
+    """Read the guest's saved OAuth only; preflight must not start a refreshing CLI."""
+    descriptor = None
+    try:
+        descriptor = os.open(Path(config_dir) / ".credentials.json", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 65536
+                or metadata.st_mode & 0o077 or metadata.st_uid != os.getuid()):
+            return False
+        data = os.read(descriptor, 65537)
+        if len(data) > 65536:
+            return False
+        record = json.loads(data)
+        oauth = record.get("claudeAiOauth") if isinstance(record, dict) else None
+        if not isinstance(oauth, dict):
+            return False
+        token = lambda value: isinstance(value, str) and bool(value.strip()) and len(value) <= 16384
+        expiry = oauth.get("expiresAt")
+        return token(oauth.get("refreshToken")) or (token(oauth.get("accessToken"))
+            and isinstance(expiry, (int, float)) and not isinstance(expiry, bool) and math.isfinite(expiry)
+            and expiry > (time.time() * 1000 if now is None else now))
+    except (OSError, ValueError, TypeError):
+        return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def authorization_url(text):
@@ -88,13 +117,7 @@ def main():
            "CLAUDE_CONFIG_DIR": config["configDir"], "DISABLE_AUTOUPDATER": "1"}
 
     def authenticated():
-        try:
-            r = subprocess.run([config["binary"], "auth", "status", "--json"], env=env,
-                               capture_output=True, text=True, timeout=15)
-            d = json.loads(r.stdout)
-            return d.get("loggedIn") is True and d.get("authMethod") == "claude.ai" and d.get("configDirectory") == config["configDir"]
-        except Exception:
-            return False
+        return stored_authorization(config["configDir"])
 
     publish("starting")
     if authenticated():

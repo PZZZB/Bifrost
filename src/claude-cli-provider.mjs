@@ -1,13 +1,65 @@
 import http from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { mkdir, open, readFile, writeFile, rename } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { userInfo } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { keyMatches, readBody } from './gateway.mjs';
 import { ClaudeSdkWorker } from './claude-sdk-worker.mjs';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const authUnavailable = credentialState => ({ authenticated: false, renewable: false, credentialState });
+const authErrors = Object.freeze({ missing: '独立订阅登录凭据缺失，需要本人重新授权。',
+  expired: '独立订阅登录已到期，且没有可用的续期凭据。',
+  unreadable: '独立订阅登录凭据暂不可读取，请检查凭据存储。',
+  invalid: '独立订阅登录凭据格式异常，请检查凭据存储。' });
+
+/** Inspect saved authorization only. Never initialize a CLI or rotate OAuth in a health check. */
+export async function readClaudeAuthorization({ configDir, now = Date.now(), platform = process.platform,
+  execFileImpl = promisify(execFile) }) {
+  let bytes;
+  if (platform === 'darwin') {
+    // The pinned CLI uses this profile-specific Keychain service. Read through
+    // the OS API, without starting Claude or exporting credentials to a file.
+    const service = `Claude Code-credentials-${createHash('sha256').update(configDir.normalize('NFC')).digest('hex').slice(0, 8)}`;
+    let account;
+    try { account = process.env.USER || userInfo().username; } catch { account = 'claude-code-user'; }
+    if (!/^[a-zA-Z0-9._-]+$/.test(account)) account = 'claude-code-user';
+    try {
+      bytes = (await execFileImpl('/usr/bin/security', ['find-generic-password', '-a', account, '-w', '-s', service],
+        { windowsHide: true, timeout: 5000, maxBuffer: 65_536 })).stdout;
+    } catch (error) { if (error.code !== 44) return authUnavailable('unreadable'); }
+  }
+  if (bytes === undefined) {
+    let file;
+    try {
+      file = await open(join(configDir, '.credentials.json'), constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > 65_536 || (platform !== 'win32' &&
+        ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()))) return authUnavailable('unreadable');
+      // Bound the read even if a writer grows the file after stat().
+      const buffer = Buffer.alloc(65_537);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+      if (bytesRead > 65_536) return authUnavailable('invalid');
+      bytes = buffer.subarray(0, bytesRead).toString('utf8');
+    } catch (error) { return authUnavailable(error.code === 'ENOENT' ? 'missing' : 'unreadable'); }
+    finally { await file?.close(); }
+  }
+  try {
+    if (Buffer.byteLength(bytes) > 65_536) return authUnavailable('invalid');
+    const oauth = JSON.parse(bytes)?.claudeAiOauth;
+    if (!object(oauth)) return authUnavailable('missing');
+    const token = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 16_384;
+    const renewable = token(oauth.refreshToken);
+    const accessValid = token(oauth.accessToken) && Number.isFinite(oauth.expiresAt) && oauth.expiresAt > now;
+    if (renewable || accessValid) return { authenticated: true, renewable,
+      credentialState: accessValid ? 'saved' : 'refresh_required' };
+    return authUnavailable(token(oauth.accessToken) ? 'expired' : 'missing');
+  } catch { return authUnavailable('invalid'); }
+}
+
 const stable = value => Array.isArray(value) ? value.map(stable) : object(value)
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
 const digest = value => createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
@@ -197,30 +249,25 @@ export class ClaudeCliHub {
   }
 
   async readAuthStatus() {
-    const { buildClaudeEnvironment } = await import('./claude-sdk-worker.mjs');
-    try {
-      const { stdout } = await promisify(execFile)(this.binary, ['auth', 'status', '--json'], {
-        cwd: this.stateDir, env: buildClaudeEnvironment({ configDir: this.configDir, profileDir: this.profileDir }),
-        windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024,
-      });
-      const data = JSON.parse(stdout);
-      const canonicalPath = value => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value);
-      return data.loggedIn === true && data.authMethod === 'claude.ai' &&
-        typeof data.configDirectory === 'string' && canonicalPath(data.configDirectory) === canonicalPath(this.configDir);
-    } catch { return false; }
+    return readClaudeAuthorization({ configDir: this.configDir, now: this.clock() });
   }
 
   async status() {
     if (this.closed) return { authenticated: false, ready: false, modelAvailable: false, error: 'CLI 后端已停止。' };
     if (!this.authCache || this.authCache.until <= this.clock()) {
       if (!this.authReading) this.authReading = Promise.resolve().then(() => this.authStatus())
-        .then(value => value === true, () => false).finally(() => { this.authReading = null; });
-      const authenticated = await this.authReading;
-      this.authCache = { authenticated, until: this.clock() + (authenticated ? 30_000 : 3000) };
+        .then(value => typeof value === 'boolean' ? { authenticated: value } : {
+          authenticated: value?.authenticated === true, renewable: value?.renewable === true,
+          credentialState: ['saved', 'refresh_required', ...Object.keys(authErrors)].includes(value?.credentialState)
+            ? value.credentialState : 'unreadable',
+        }, () => authUnavailable('unreadable')).finally(() => { this.authReading = null; });
+      const state = await this.authReading;
+      this.authCache = { ...state, until: this.clock() + (state.authenticated ? 30_000 : 3000) };
     }
     return { authenticated: this.authCache.authenticated, ready: this.authCache.authenticated,
       modelAvailable: this.authCache.authenticated, transport: 'official-claude-sdk',
-      error: this.authCache.authenticated ? null : '请在运行 CLI 的电脑完成独立订阅登录。' };
+      ...(this.authCache.credentialState ? { credentialState: this.authCache.credentialState, renewable: this.authCache.renewable } : {}),
+      error: this.authCache.authenticated ? null : authErrors[this.authCache.credentialState] ?? '请在运行 CLI 的电脑完成独立订阅登录。' };
   }
 
   provider(model) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { claudeCatalogModels, discoverClaudeModels, discoverClaudeMetadata } from '../src/claude-model-catalog.mjs';
+import { ClaudeMetadataReader, claudeCatalogModels, discoverClaudeModels, discoverClaudeMetadata } from '../src/claude-model-catalog.mjs';
 const rows = [{ value: 'default', resolvedModel: 'claude-opus-v', displayName: 'Default' },
   { value: 'opus', resolvedModel: 'claude-opus-v', displayName: 'Opus', supportsEffort: true, supportedEffortLevels: ['high','invalid'] },
   { value: 'sonnet', displayName: 'Sonnet' }, { value: 'haiku', displayName: 'Haiku' },
@@ -53,4 +53,72 @@ test('missing or rejected optional SDK metadata does not erase supported models'
     queryImpl: () => ({ supportedModels: async () => rows, setModel: async () => { throw new Error('Unsupported'); }, getContextUsage: async () => ({}), close() {} }) });
   assert.equal(result.models.length, 4); assert.equal(result.subscriptionUsage, null); assert.equal(result.authorizationVersion, null);
   assert.ok(result.models.every(model => model.contextWindow === undefined));
+});
+
+const readerOptions = { binary: '/cli', configDir: '/config', profileDir: '/profile', stateDir: '/state' };
+const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+test('relay metadata reuses one live SDK query across refreshes and coalesces overlapping reads without a prompt', async t => {
+  let starts = 0, reads = 0, closes = 0, promptFinished = false, nativeSignal;
+  const gate = deferred();
+  const reader = new ClaudeMetadataReader({ ...readerOptions, queryImpl({ prompt, options }) {
+    starts++; nativeSignal = options.abortController.signal;
+    void prompt.next().then(value => { assert.equal(value.done, true); promptFinished = true; });
+    return { async supportedModels() { reads++; await gate.promise; return rows; }, close() { closes++; } };
+  } });
+  t.after(() => reader.close());
+  const pending = [reader.read({ includeUsage: false }), reader.read({ includeUsage: false })];
+  gate.resolve();
+  const results = await Promise.all(pending);
+  assert.deepEqual(results[0], results[1]); assert.equal(reads, 1);
+  for (let i = 0; i < 5; i++) assert.equal((await reader.read({ includeUsage: false })).models.length, 4);
+  assert.equal(reads, 6); assert.equal(starts, 1); assert.equal(closes, 0);
+  assert.equal(promptFinished, false); assert.equal(nativeSignal.aborted, false);
+  await Promise.all([reader.close(), reader.close()]);
+  assert.equal(closes, 1); assert.equal(nativeSignal.aborted, true); assert.equal(promptFinished, true);
+  await assert.rejects(reader.read(), /closed/);
+});
+
+test('a metadata timeout neither kills a renewing CLI nor starts another query, and a late result recovers on the same process', async t => {
+  let starts = 0, reads = 0, closes = 0, nativeSignal;
+  const gate = deferred();
+  const reader = new ClaudeMetadataReader({ ...readerOptions, timeoutMs: 25, queryImpl({ options }) {
+    starts++; nativeSignal = options.abortController.signal;
+    return { async supportedModels() { reads++; return gate.promise; }, close() { closes++; } };
+  } });
+  t.after(() => reader.close());
+  await assert.rejects(reader.read({ includeUsage: false }), /timed out/);
+  await assert.rejects(reader.read({ includeUsage: false }), /timed out/);
+  assert.equal(starts, 1); assert.equal(reads, 1); assert.equal(closes, 0); assert.equal(nativeSignal.aborted, false);
+  gate.resolve(rows); await new Promise(done => setImmediate(done));
+  assert.equal((await reader.read({ includeUsage: false })).models.length, 4);
+  assert.equal(starts, 1); assert.equal(closes, 0);
+});
+
+test('metadata shutdown cancels pending callers and closes its native query only once', async () => {
+  const signal = new AbortController(); let closes = 0;
+  const started = deferred();
+  const reader = new ClaudeMetadataReader({ ...readerOptions, signal: signal.signal, queryImpl: () => ({
+    supportedModels: () => { started.resolve(); return new Promise(() => {}); }, close() { closes++; },
+  }) });
+  const pending = reader.read(); const rejected = assert.rejects(pending, /cancelled/);
+  await started.promise; signal.abort(); await reader.close(); await rejected;
+  assert.equal(closes, 1);
+  const before = new AbortController(); before.abort();
+  const never = new ClaudeMetadataReader({ ...readerOptions, signal: before.signal,
+    queryImpl() { throw new Error('A cancelled reader must not start the CLI.'); } });
+  await assert.rejects(never.read(), /closed/); await never.close();
+});
+
+test('a confirmed native SDK exit allows a new metadata process without retrying inference', async t => {
+  const exit = deferred(); let starts = 0, reads = 0;
+  const reader = new ClaudeMetadataReader({ ...readerOptions, queryImpl() {
+    const generation = ++starts;
+    return { supportedModels: async () => { reads++; return rows; }, close() { exit.resolve(); },
+      async *[Symbol.asyncIterator]() { if (generation === 1) await exit.promise; else await new Promise(() => {}); } };
+  } });
+  t.after(() => reader.close());
+  assert.equal((await reader.read({ includeUsage: false })).models.length, 4);
+  exit.resolve(); await new Promise(done => setImmediate(done));
+  assert.equal((await reader.read({ includeUsage: false })).models.length, 4);
+  assert.equal(starts, 2); assert.equal(reads, 2);
 });

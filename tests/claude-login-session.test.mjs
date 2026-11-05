@@ -11,6 +11,28 @@ async function check(action,data){
  const program="import importlib.util,json,sys\ns=importlib.util.spec_from_file_location('login',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nd=json.loads(sys.argv[3])\ntry:\n r=m.authorization_url(d) if sys.argv[2]=='url' else m.validate_message(d['message'],d['url']);print(json.dumps({'accepted':True,'result':r}))\nexcept ValueError: print(json.dumps({'accepted':False}))";
  return JSON.parse((await exec('python3',['-c',program,modulePath,action,JSON.stringify(data)],{timeout:5000})).stdout);
 }
+test('guest login preflight reads persistent renewable OAuth without launching a status command or changing credentials',unix,async()=>{
+ const program=String.raw`
+import importlib.util,json,os,subprocess,sys,tempfile
+from pathlib import Path
+s=importlib.util.spec_from_file_location('login',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+subprocess.run=lambda *a,**k: (_ for _ in ()).throw(AssertionError('No CLI may run during credential inspection'))
+with tempfile.TemporaryDirectory() as folder:
+ p=Path(folder)/'.credentials.json';results=[];clock=1800000000000
+ for access,refresh,expiry in [('fixture-access','fixture-refresh',clock+1),('fixture-access','fixture-refresh',clock-1),('','fixture-refresh',0),('fixture-access','',clock-1),('','',0)]:
+  p.write_text(json.dumps({'claudeAiOauth':{'accessToken':access,'refreshToken':refresh,'expiresAt':expiry}}));p.chmod(0o600)
+  before=p.read_bytes();mtime=p.stat().st_mtime_ns
+  results.append(m.stored_authorization(folder,clock))
+  assert p.read_bytes()==before and p.stat().st_mtime_ns==mtime
+ p.chmod(0o644);results.append(m.stored_authorization(folder,clock));p.unlink()
+ p.symlink_to(Path(folder)/'missing');results.append(m.stored_authorization(folder,clock));p.unlink()
+ os.mkfifo(p,0o600);results.append(m.stored_authorization(folder,clock));p.unlink()
+ results.append(m.stored_authorization(folder,clock))
+ print(json.dumps(results))
+`;
+ assert.deepEqual(JSON.parse((await exec('python3',['-c',program,modulePath],{timeout:5000})).stdout),
+  [true,true,true,false,false,false,false,false,false]);
+});
 test('CLI authorization extraction waits for a full line and rejects nonofficial or ambiguous URLs',unix,async()=>{
  assert.equal((await check('url',url)).result,null);
  assert.equal((await check('url',url+'\n')).result,url);
