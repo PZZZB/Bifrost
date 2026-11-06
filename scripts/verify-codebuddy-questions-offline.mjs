@@ -130,6 +130,8 @@ const server = http.createServer(async (req, res) => {
         functionOutputs: (body.input ?? []).filter(item => item.type === 'function_call_output') });
     } catch (error) { result.errors.push({ phase: 'capture', message: error.message }); }
   });
+  // Capture bytes read by the gateway without draining the body before its iterator is ready.
+  req.pause();
   try { await gateway.proxy(req, res, new URL(req.url, 'http://offline-question.invalid')); }
   catch (error) {
     result.errors.push({ phase: 'gateway', message: error.message });

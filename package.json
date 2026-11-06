@@ -22,7 +22,9 @@
     "verify:desktop-codex": "node scripts/verify-desktop-codex-offline.mjs",
     "verify:codex-questions": "node scripts/verify-codebuddy-questions-offline.mjs",
     "verify:codex-compaction": "node scripts/verify-codebuddy-compaction-offline.mjs",
-    "verify:stability": "npm run check && npm test && npm run verify:codex-questions && npm run verify:codex-compaction",
+    "verify:codex-routing": "node scripts/verify-codex-native-routing-offline.mjs",
+    "verify:codex-large-requests": "node scripts/verify-codex-native-routing-offline.mjs --large",
+    "verify:stability": "npm run check && npm test && npm run verify:codex-routing && npm run verify:codex-large-requests && npm run verify:codex-questions && npm run verify:codex-compaction",
     "check": "node --check src/main.mjs && node --check src/upstream-accounts.mjs && node --check src/upstream-account-store.mjs && node --check public/app.js && node --check public/account-pool.js && node --check public/accounts/app.js && node --check src/claude-model-catalog.mjs && node --check src/mac-keychain-crypto.mjs && node --check src/launchd-owner.mjs && node --check scripts/run-claude-relay.mjs && node --check src/claude-subscription-usage.mjs && node --check src/client-meter.mjs && node --check src/client-server.mjs && node --check src/client-key-protector.mjs"
   },
   "dependencies": {

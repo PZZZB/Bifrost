@@ -128,6 +128,8 @@ const server = http.createServer(async (req, res) => {
       requests.push({ phase, model: body.model, types: body.input.map(item => item.type || 'message'),
         encrypted: body.input.filter(item => typeof item.encrypted_content === 'string').map(item => ({ type: item.type, hash: hash(item.encrypted_content) })) });
     });
+    // Capture bytes read by the gateway without draining the body before its iterator is ready.
+    req.pause();
     await gateway.proxy(req, res, new URL(req.url, 'http://fixture.invalid'));
   } catch (error) { errors.push({ phase, code: error.code || error.name, message: error.message }); if (!res.headersSent) res.writeHead(error.status || 500); res.end('{}'); }
 });

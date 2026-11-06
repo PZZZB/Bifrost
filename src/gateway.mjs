@@ -1,8 +1,8 @@
 import { timingSafeEqual, randomUUID, createHash } from 'node:crypto';
 import { clientScope } from './client-scope.mjs';
 import { once } from 'node:events';
-import * as zlib from 'node:zlib';
 import { BridgeError, redact } from './storage.mjs';
+import { readModelRequestBody } from './request-body.mjs';
 import { B_MODELS, bCatalogModels, mergeCatalog, resolveBModel, appendCodeBuddyModel, appendCodeBuddyModels, resolveCodeBuddyModel, appendCursorModels } from './models.mjs';
 import { resolveCursorModel, cursorModelAvailability } from './cursor-service.mjs';
 import { classifyDiagnosticFailure, normalizeDiagnosticRecord, responsesTerminalEvidence } from './request-diagnostics.mjs';
@@ -79,16 +79,7 @@ function appendPath(baseUrl, suffix) {
   return address.href;
 }
 
-function parseModel(body, headers) {
-  const decompressors = { zstd: zlib.zstdDecompressSync, gzip: zlib.gunzipSync,
-    deflate: zlib.inflateSync, br: zlib.brotliDecompressSync };
-  for (const encoding of (headers['content-encoding'] ?? 'identity').toLowerCase().split(',').reverse()) {
-    if (encoding.trim() === 'identity') continue;
-    const decompress = decompressors[encoding.trim()];
-    if (typeof decompress !== 'function') throw new BridgeError('不支持此请求压缩格式，请检查 Node.js 版本。', 415);
-    try { body = decompress(body, { maxOutputLength: 64 * 1024 * 1024 }); }
-    catch { throw new BridgeError('模型请求解压失败或正文超过大小限制。', 400); }
-  }
+function parseModel(body) {
   let data;
   try { data = JSON.parse(body.toString('utf8')); } catch { throw new BridgeError('模型请求不是有效 JSON。'); }
   if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.model !== 'string' || !data.model) {
@@ -532,9 +523,12 @@ export class Gateway {
     try {
       if (path === '/models') { await this.catalog(req, res, url, abort.signal, nativeCaller); return; }
       if (diagnostic) diagnostic.stage = 'validation';
-      const originalBody = await readBody(req);
+      const requestBody = await readModelRequestBody(req, { signal: abort.signal,
+        ...(modelRequest ? {} : { wireLimitBytes: 64 * 1024 * 1024, decodedLimitBytes: 64 * 1024 * 1024 }) });
+      const originalBody = requestBody.wireBody;
+      if (diagnostic) diagnostic.requestBodyDiagnostics = requestBody.diagnostics;
       {
-        const parsed = parseModel(originalBody, req.headers);
+        const parsed = parseModel(requestBody.body);
         let data = parsed.data;
         const { alias, codeBuddy, cursor } = parsed;
         const remote = this.remoteSources?.model(data.model);

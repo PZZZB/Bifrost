@@ -2195,6 +2195,26 @@ test('request details show the fixed protocol check and bounded structural infor
   assert.equal(page.calls.some(call => call.method === 'POST'), false);
 });
 
+test('request details distinguish measured wire bytes, unknown decoded bytes and an explicit zero', async () => {
+  for (const decodedBytes of [undefined, null, 0]) {
+    const record = diagnosticRecord('body_codec', { errorCode: 'request_body_invalid_compression', requestBodyDiagnostics: {
+      version: 1, encodings: ['zstd'], wireBytes: 1024, ...(decodedBytes === undefined ? {} : { decodedBytes }),
+      wireLimitBytes: 134217728, decodedLimitBytes: 134217728, stage: 'decode', errorKind: 'invalid_compression',
+      body: 'PRIVATE_BODY', errorMessage: 'PRIVATE_ERROR',
+    } });
+    const page = modernPage(call => call.path === '/api/request-diagnostics/body_codec' ? json({ request: record }) : undefined,
+      { diagnostics: { recent: [record] } }); await settle();
+    page.elements.get('diagnostics-recent-body').querySelectorAll('button')[0].trigger('click'); await settle();
+    const fields = detailFields(page.elements.get('diagnostics-fields'));
+    assert.equal(fields['请求编码'], 'zstd'); assert.match(fields['传输正文大小'], /1024 B/);
+    assert.equal(fields['解压后正文大小'], decodedBytes == null ? '未知' : '0.00 MiB（0 B）');
+    assert.equal(fields['解压后正文上限'], '128.00 MiB（134217728 B）');
+    assert.equal(fields['正文错误类别'], '压缩数据无效');
+    assert.doesNotMatch(listText(page.elements.get('diagnostics-fields')), /PRIVATE_/);
+    assert.equal(page.calls.some(call => call.method === 'POST'), false);
+  }
+});
+
 test('invalid IDs, missing reports and mismatched records never produce a diagnostic export link', async () => {
   const page = modernPage(call => {
     if (call.path === '/api/request-diagnostics/valid') return json({ request: diagnosticRecord('valid') });

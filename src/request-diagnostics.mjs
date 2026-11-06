@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { claudeSourceError } from './claude-source-errors.mjs';
 import { codeBuddySourceError } from './codebuddy-source-errors.mjs';
 import { normalizeCodeBuddySourceDiagnostics } from './codebuddy-source-diagnostics.mjs';
+import { normalizeRequestBodyDiagnostics } from './request-body.mjs';
 
 const ACCOUNTS = new Set(['A', 'B', 'CodeBuddy', 'Cursor', 'Claude', 'With', 'Bifrost']);
 const STATUSES = new Set(['completed', 'tool_pending', 'incomplete', 'failed', 'interrupted']);
@@ -14,7 +15,19 @@ const REQUEST_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MAX_LINE_BYTES = 16 * 1024;
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
+const REQUEST_BODY_MESSAGES = Object.freeze({
+  request_body_wire_too_large: '请求传输正文超过网关上限。',
+  request_body_decoded_too_large: '请求解压后的正文超过网关上限。',
+  request_body_invalid_compression: '请求压缩数据无效，未转发到模型来源。',
+  request_body_unsupported_encoding: '网关不支持此请求正文编码。',
+  request_body_zstd_window_limit: 'zstd 压缩窗口超过解码器限制。',
+  request_body_zstd_dictionary_error: 'zstd 压缩字典缺失或不匹配。',
+  request_body_aborted: '请求正文读取或解压已取消。',
+  request_body_read_failed: '请求正文未完整读取，未转发到模型来源。',
+});
+
 const MESSAGES = Object.freeze({
+  ...REQUEST_BODY_MESSAGES,
   authentication_failed: '认证未通过，请检查所选渠道的授权状态。',
   access_denied: '请求未获准，请检查所选渠道的访问权限。',
   invalid_request: '请求格式或参数未通过网关检查。',
@@ -43,6 +56,7 @@ export function classifyDiagnosticFailure(error, { httpStatus = null, stage = 'u
   const status = Number.isInteger(error?.status) ? error.status : httpStatus;
   if (interrupted || error?.name === 'AbortError') code = 'request_interrupted';
   else if (source) code = source.code;
+  else if (Object.hasOwn(REQUEST_BODY_MESSAGES, supplied)) code = supplied;
   else if (['invalid_gateway_key', 'account_a_auth_required', 'anthropic_invalid_gateway_key', 'with_invalid_gateway_key',
     'authentication_error', 'unauthenticated', 'auth_required', 'not_authenticated'].includes(supplied) || status === 401) code = 'authentication_failed';
   else if (['gateway_restarting', 'anthropic_gateway_restarting', 'with_gateway_restarting'].includes(supplied)) code = 'gateway_restarting';
@@ -59,8 +73,9 @@ export function classifyDiagnosticFailure(error, { httpStatus = null, stage = 'u
   else if (status >= 400 && status < 500) code = ['authentication', 'validation', 'routing'].includes(stage) ? 'invalid_request' : 'payload_rejected';
   else if (status >= 500 && status <= 599) code = 'upstream_failed';
   const sourceDiagnostics = normalizeCodeBuddySourceDiagnostics(code, error?.sourceDiagnostics);
+  const requestBodyDiagnostics = normalizeRequestBodyDiagnostics(error?.requestBodyDiagnostics);
   return { errorCode: code, message: diagnosticMessage(code), failureStage: STAGES.has(stage) ? stage : 'upstream_request',
-    ...(sourceDiagnostics ? { sourceDiagnostics } : {}) };
+    ...(sourceDiagnostics ? { sourceDiagnostics } : {}), ...(requestBodyDiagnostics ? { requestBodyDiagnostics } : {}) };
 }
 
 function token(value) { return Number.isSafeInteger(value) && value >= 0 ? value : null; }
@@ -106,6 +121,7 @@ export function normalizeDiagnosticRecord(raw) {
         : status === 'incomplete' ? 'incomplete_response' : 'unknown_error';
     const durationMs = milliseconds(raw.durationMs), first = milliseconds(raw.firstResponseMs);
     const sourceDiagnostics = status === 'failed' ? normalizeCodeBuddySourceDiagnostics(errorCode, raw.sourceDiagnostics) : null;
+    const requestBodyDiagnostics = normalizeRequestBodyDiagnostics(raw.requestBodyDiagnostics);
     return {
       requestId: raw.requestId.toLowerCase(), time: time.toISOString(),
       account: ACCOUNTS.has(raw.account) ? raw.account : raw.account === 'CB' ? 'CodeBuddy' : null,
@@ -115,6 +131,7 @@ export function normalizeDiagnosticRecord(raw) {
       failureStage: status === 'completed' || status === 'tool_pending' ? null : STAGES.has(raw.failureStage) ? raw.failureStage : null,
       errorCode, message: errorCode ? diagnosticMessage(errorCode) : '请求已完整返回。', usage: normalizeDiagnosticUsage(raw.usage),
       ...(sourceDiagnostics ? { sourceDiagnostics } : {}),
+      ...(requestBodyDiagnostics ? { requestBodyDiagnostics } : {}),
     };
   } catch { return null; }
 }

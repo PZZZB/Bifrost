@@ -2521,6 +2521,20 @@ async function loadRequestDiagnostic(id) {
       ['输入 Token', tokenCount(record.usage?.inputTokens)], ['输出 Token', tokenCount(record.usage?.outputTokens)],
       ['缓存命中 Token', tokenCount(record.usage?.cachedInputTokens)], ['思考 Token', tokenCount(record.usage?.reasoningTokens)],
     ];
+    const transport = record.requestBodyDiagnostics;
+    if (transport?.version === 1 && Array.isArray(transport.encodings)) {
+      const byteSize = value => Number.isSafeInteger(value) && value >= 0 ? `${(value / 1048576).toFixed(2)} MiB（${value} B）` : '未知';
+      const stages = { wire: '读取正文', decode: '解压正文', complete: '解码完成' };
+      const kinds = { wire_limit: '传输正文超限', decoded_limit: '解压后正文超限', invalid_compression: '压缩数据无效',
+        unsupported_encoding: '编码不支持', zstd_window_limit: 'zstd 窗口超限', zstd_dictionary_error: 'zstd 字典错误',
+        aborted: '请求中断', read_failed: '正文读取失败' };
+      fields.push(['请求编码', transport.encodings.filter(value => ['identity', 'zstd', 'gzip', 'deflate', 'br', 'unknown'].includes(value)).join(', ') || '未知'],
+        ['传输正文大小', byteSize(transport.wireBytes)], ['解压后正文大小', byteSize(transport.decodedBytes)],
+        ['传输正文上限', byteSize(transport.wireLimitBytes)], ['解压后正文上限', byteSize(transport.decodedLimitBytes)],
+        ['正文处理阶段', Object.hasOwn(stages, transport.stage) ? stages[transport.stage] : '未知']);
+      if (Object.hasOwn(kinds, transport.errorKind)) fields.push(['正文错误类别', kinds[transport.errorKind]]);
+      if ([16, 30, 32].includes(transport.zstdErrorCode)) fields.push(['zstd 错误码', transport.zstdErrorCode]);
+    }
     const shape = record.sourceDiagnostics;
     if (shape?.version === 1 && shape.kind === 'codebuddy_protocol_check' && typeof shape.description === 'string') {
       fields.push(['协议校验项', shape.description]);

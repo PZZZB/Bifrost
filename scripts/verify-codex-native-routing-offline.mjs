@@ -19,13 +19,15 @@ import { resolveBModel } from '../src/models.mjs';
 // Uses only synthetic credentials, disposable state, loopback servers and canned responses.
 // The production gateway, real login and user's existing threads are never accessed.
 const args = process.argv.slice(2);
-if (args.length && (args.length !== 2 || args[0] !== '--binary' || !args[1])) {
-  throw new Error('Usage: node scripts/verify-codex-native-routing-offline.mjs [--binary /absolute/path/to/codex]');
+const largeRequestMode = args[0] === '--large';
+const binaryArgs = largeRequestMode ? args.slice(1) : args;
+if (binaryArgs.length && (binaryArgs.length !== 2 || binaryArgs[0] !== '--binary' || !binaryArgs[1])) {
+  throw new Error('Usage: node scripts/verify-codex-native-routing-offline.mjs [--large] [--binary /absolute/path/to/codex]');
 }
-const binary = args[1] || await resolveCodexBinary();
+const binary = binaryArgs[1] || await resolveCodexBinary();
 const stateRoot = fileURLToPath(new URL('../.state/', import.meta.url));
 await mkdir(stateRoot, { recursive: true, mode: 0o700 });
-const work = await mkdtemp(join(stateRoot, 'codex-native-routing-offline-'));
+const work = await mkdtemp(join(stateRoot, largeRequestMode ? 'codex-large-native-routing-offline-' : 'codex-native-routing-offline-'));
 const home = join(work, 'home'); await mkdir(home, { mode: 0o700 });
 const evidencePath = join(work, 'proof.json');
 const upstreamA = 'https://native-a.offline.invalid/backend-api/codex';
@@ -44,6 +46,12 @@ await writeFile(join(home, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', 
   last_refresh: new Date().toISOString() }), { mode: 0o600 });
 
 const instructions = 'This is a local offline protocol test. Reply with the canned text. Do not run tools or access the network.';
+const largeContextBytes = 70 * 1024 * 1024;
+const largeContextStart = 'SYNTHETIC_LARGE_INPUT_START\n';
+const largeContextEnd = '\nSYNTHETIC_LARGE_INPUT_END';
+const largeContext = largeRequestMode
+  ? largeContextStart + ' '.repeat(largeContextBytes - largeContextStart.length - largeContextEnd.length) + largeContextEnd : null;
+const fixtureContextWindow = largeRequestMode ? 32_000_000 : 200000;
 function model(slug, priority) {
   return { slug, display_name: `Offline fixture ${slug}`, description: 'Synthetic routing fixture; no real inference.',
     default_reasoning_level: 'medium', supported_reasoning_levels: [{ effort: 'medium', description: 'Fixture default' }],
@@ -52,8 +60,8 @@ function model(slug, priority) {
     base_instructions: instructions, model_messages: { instructions_template: instructions },
     include_skills_usage_instructions: false, include_plugin_usage_instructions: false, include_apps_usage_instructions: false,
     supports_reasoning_summary_parameter: false, default_reasoning_summary: 'none', support_verbosity: false, default_verbosity: null,
-    apply_patch_tool_type: null, web_search_tool_type: 'text', truncation_policy: { mode: 'tokens', limit: 10000 },
-    context_window: 200000, max_context_window: 200000, effective_context_window_percent: 90,
+    apply_patch_tool_type: null, web_search_tool_type: 'text', truncation_policy: { mode: 'tokens', limit: largeRequestMode ? fixtureContextWindow : 10000 },
+    context_window: fixtureContextWindow, max_context_window: fixtureContextWindow, effective_context_window_percent: 90,
     experimental_supported_tools: [], input_modalities: ['text'], supports_image_detail_original: false,
     supports_parallel_tool_calls: false, supports_search_tool: false, supports_experimental_context: false,
     use_responses_lite: false, supports_reasoning_effort_updates: false, prefer_websockets: false,
@@ -64,22 +72,50 @@ const bCatalog = structuredClone(aCatalog);
 bCatalog.models[0].display_name = 'GPT-6.1 Sol';
 bCatalog.models[1].display_name = 'GPT-6 Astra';
 bCatalog.models.push({ ...model('gpt-b-directory-fixture', 2), display_name: 'B directory fixture' });
+if (largeRequestMode) {
+  // Load synthetic context through model metadata so each app-server RPC stays small.
+  for (const entry of [aCatalog.models[0], bCatalog.models[0]]) {
+    entry.base_instructions = `${instructions}\n${largeContext}`;
+    entry.model_messages = null;
+  }
+}
 const presentationAccounts = [
   { id: 'offline-caller-a', kind: 'codex-client', modelPresentation: { prefix: '', order: 0 } },
   { id: 'offline-managed-b', kind: 'codex', modelPresentation: { prefix: 'Team', order: 100 } },
 ];
 const safeUrl = value => String(value).replace(/bfn_[A-Za-z0-9_-]+/g, '[local-capability]');
 const hash = value => createHash('sha256').update(value).digest('hex');
-function payload(bytes, headers) {
+function payload(bytes, headers, measurement = {}) {
   let decoded = bytes;
   for (const encoding of (headers['content-encoding'] || 'identity').split(',').reverse()) {
     if (encoding.trim() === 'identity') continue;
     const decompress = { gzip: zlib.gunzipSync, deflate: zlib.inflateSync, br: zlib.brotliDecompressSync,
       zstd: zlib.zstdDecompressSync }[encoding.trim()];
     assert.equal(typeof decompress, 'function', 'Unsupported fixture request compression.');
-    decoded = decompress(decoded);
+    decoded = decompress(decoded, { maxOutputLength: 128 * 1024 * 1024 });
   }
+  measurement.decodedBytes = decoded.length;
   return JSON.parse(decoded.toString('utf8'));
+}
+async function inspectLargeSyntheticRequest(bytes) {
+  const observed = {};
+  try {
+    const { buffer, engine } = zlib.zstdDecompressSync(bytes, { maxOutputLength: 128 * 1024 * 1024, info: true });
+    observed.decodedBytes = buffer.length; observed.decoderConsumedWireBytes = engine.bytesWritten;
+    observed.decodedHash = hash(buffer);
+    observed.syntheticStartOffset = buffer.indexOf('SYNTHETIC_LARGE_INPUT_START');
+    observed.syntheticEndOffset = buffer.indexOf('SYNTHETIC_LARGE_INPUT_END');
+    try { JSON.parse(buffer.toString('utf8')); observed.validJson = true; } catch { observed.validJson = false; }
+    try { zlib.zstdDecompressSync(bytes, { maxOutputLength: 64 * 1024 * 1024 }); observed.previousLimitRejected = false; }
+    catch (error) { observed.previousLimitRejected = true; observed.previousLimitErrorCode = error.code; }
+  } catch (error) { observed.errorCode = error.code; observed.zstdErrorCode = error.errno; }
+  try {
+    const { buffer, engine } = await promisify(zlib.zstdDecompress)(bytes, { maxOutputLength: 128 * 1024 * 1024, info: true });
+    observed.asyncDecodedBytes = buffer.length; observed.asyncDecoderConsumedWireBytes = engine.bytesWritten;
+    observed.asyncDecodedHash = hash(buffer);
+    try { JSON.parse(buffer.toString('utf8')); observed.asyncValidJson = true; } catch { observed.asyncValidJson = false; }
+  } catch (error) { observed.asyncErrorCode = error.code; observed.asyncZstdErrorCode = error.errno; }
+  return observed;
 }
 function response(account, upstreamModel, count) {
   const text = account === 'A' ? 'OFFLINE_A_OK' : 'OFFLINE_B_OK';
@@ -102,7 +138,7 @@ function response(account, upstreamModel, count) {
     { headers: { 'content-type': 'text/event-stream' } });
 }
 
-const received = [], upstreamRequests = [], bootstrapRequests = [], upgrades = [], errors = [], runs = [], seedRuns = [];
+const received = [], upstreamRequests = [], bootstrapRequests = [], upgrades = [], errors = [], runs = [], seedRuns = [], capturedWireWrites = [];
 const counts = { A: 0, B: 0 };
 let server, bootstrap, seedServer, rpc, nativeVersion, threadId, phase = 'bootstrap', listed = [], seedInferenceCalls = 0;
 let displayNames = {};
@@ -131,15 +167,40 @@ const gateway = new Gateway({ backend, gatewayKey, upstream: upstreamB, catalogW
     const body = Buffer.from(options.body);
     const incoming = received.findLast(item => item.phase === phase && item.method === 'POST');
     assert.ok(incoming?.bytes, 'The native client request must be observed before forwarding.');
-    const original = payload(incoming.bytes, incoming.headers);
-    const forwarded = payload(body, Object.fromEntries(headers));
+    const originalMeasurement = {}, forwardedMeasurement = {};
+    const original = payload(incoming.bytes, incoming.headers, originalMeasurement);
+    const forwarded = payload(body, Object.fromEntries(headers), forwardedMeasurement);
     summary.requestBodyHash = hash(body);
     summary.clientModel = original.model; summary.upstreamModel = forwarded.model;
+    summary.incomingContentEncoding = incoming.headers['content-encoding'] ?? 'identity';
+    summary.originalWireBytes = incoming.bytes.length; summary.forwardedWireBytes = body.length;
+    summary.originalDecodedBytes = originalMeasurement.decodedBytes; summary.forwardedDecodedBytes = forwardedMeasurement.decodedBytes;
+    if (largeRequestMode) {
+      assert.equal(summary.incomingContentEncoding, 'zstd', 'The installed native client must send a zstd request.');
+      assert.ok(originalMeasurement.decodedBytes > 64 * 1024 * 1024, 'The native request must exceed the previous decoded-body limit.');
+      const requestText = [original.instructions ?? '', ...original.input
+        .flatMap(item => item.content ?? []).map(content => content.text ?? '')].join('');
+      assert.ok(requestText.includes(largeContext),
+        'The native client must preserve the complete synthetic context without truncating it.');
+      assert.throws(() => zlib.zstdDecompressSync(incoming.bytes, { maxOutputLength: 64 * 1024 * 1024 }),
+        { code: 'ERR_BUFFER_TOO_LARGE' }, 'The exact native request must reproduce the previous decoder limit.');
+      summary.syntheticContextBytes = largeContextBytes; summary.completeSyntheticContextPreserved = true;
+      summary.syntheticPayloadLocation = 'model_catalog.base_instructions';
+      summary.previousDecoderLimitBytes = 64 * 1024 * 1024; summary.previousDecoderErrorCode = 'ERR_BUFFER_TOO_LARGE';
+    }
     if (account === 'A') {
       assert.equal(hash(body), hash(incoming.bytes), 'A body must be byte-for-byte unchanged.');
       assert.equal(headers.get('content-encoding'), incoming.headers['content-encoding'] ?? null);
       assert.equal(headers.get('originator'), incoming.headers.originator ?? null);
       summary.bodyUnchanged = true;
+      if (largeRequestMode) {
+        const transportHeaders = new Set(['host', 'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+          'te', 'trailer', 'transfer-encoding', 'upgrade', 'content-length', 'x-account-bridge-key']);
+        for (const [name, value] of Object.entries(incoming.headers)) {
+          if (!transportHeaders.has(name)) assert.equal(headers.get(name), value, `A header ${name} must be unchanged.`);
+        }
+        summary.endToEndHeadersUnchanged = true;
+      }
     } else {
       const alias = resolveBModel(original.model);
       assert.ok(alias && bCatalog.models.some(model => model.slug === alias.upstream));
@@ -168,13 +229,14 @@ async function turn(modelName, expected) {
       if (method === 'turn/completed') resolve(params.turn);
     };
     client.on('notification', listener);
-    timer = setTimeout(() => reject(new Error('Offline native routing turn timed out.')), 30000);
+    timer = setTimeout(() => reject(new Error('Offline native routing turn timed out.')), largeRequestMode ? 180000 : 30000);
   });
   // A failed or slow start must not leave the notification timeout unhandled.
   void completion.catch(() => {});
   try {
-    const started = await client.request('turn/start', { threadId, model: modelName, effort: 'medium',
-      input: [{ type: 'text', text: 'Reply with the canned fixture response. Do not run tools or use the network.' }] });
+    const input = [{ type: 'text', text: 'Reply with the canned fixture response. Do not run tools or use the network.' }];
+    const started = await client.request('turn/start', { threadId, model: modelName, effort: 'medium', input },
+    { timeoutMs: largeRequestMode ? 180000 : 45000 });
     const finished = await completion;
     assert.equal(finished.id, started.turn.id);
     assert.equal(finished.status, 'completed', finished.error?.message || 'The offline turn did not complete.');
@@ -234,7 +296,16 @@ try {
     const item = { phase, method: req.method, path: safeUrl(req.url), headers: { ...req.headers } };
     received.push(item);
     const chunks = [];
-    req.on('data', chunk => chunks.push(chunk)); req.on('end', () => { item.bytes = Buffer.concat(chunks); });
+    req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
+      item.bytes = Buffer.concat(chunks);
+      if (largeRequestMode && req.method === 'POST' && req.headers['content-encoding'] === 'zstd') {
+        item.syntheticWirePath = join(work, `synthetic-native-${phase}-${received.length}.zstd`);
+        capturedWireWrites.push(writeFile(item.syntheticWirePath, item.bytes, { mode: 0o600 }),
+          inspectLargeSyntheticRequest(item.bytes).then(observed => { item.codecObservation = observed; }));
+      }
+    });
+    // Observe bytes read by the gateway without starting flowing mode before its iterator is ready.
+    req.pause();
   });
   server.on('upgrade', req => { upgrades.push({ phase, path: safeUrl(req.url), method: req.method,
     hasCallerAuthorization: req.headers.authorization === `Bearer ${aCredential}`, hasAccountId: req.headers['chatgpt-account-id'] === accountA }); });
@@ -255,40 +326,55 @@ try {
   const newRpc = () => new CodexRpc({ binary, home, cwd: work,
     spawnImpl: (file, options, settings) => spawn(file, options, { ...settings, env, windowsHide: true }) });
   nativeVersion = (await promisify(execFile)(binary, ['--version'], { env, cwd: work, windowsHide: true, timeout: 10000 })).stdout.trim();
-  await saveConfig(originalEndpoint);
-  rpc = newRpc();
-  const created = await rpc.request('thread/start', { model: 'gpt-6.1-sol', modelProvider: 'openai',
-    cwd: work, ephemeral: false, approvalPolicy: 'never', sandbox: 'read-only' });
-  threadId = created.thread.id; originalProvider = created.modelProvider;
-  assert.equal(originalProvider, 'openai'); assert.equal(created.thread.modelProvider, 'openai');
-  await turn('gpt-6.1-sol', 'OFFLINE_A_OK'); seedRuns.push(runs.pop());
-  await closeRpc();
-  await saveConfig(endpoint.href);
-  rpc = newRpc();
-  // No modelProvider override and no direct database or rollout edits.
-  const resumed = await rpc.request('thread/resume', { threadId, excludeTurns: true });
-  resumedProvider = resumed.modelProvider;
-  assert.equal(resumedProvider, 'openai'); assert.equal(resumed.thread.id, threadId);
-  const catalog = await rpc.request('model/list', { includeHidden: false });
-  listed = catalog.data.map(item => item.model);
-  assert.deepEqual(listed, ['gpt-6.1-sol', 'gpt-6-astra', 'B-gpt-6.1-sol', 'B-gpt-6-astra', 'B-gpt-b-directory-fixture'], 'The real client must list A first and keep the complete B source in native priority order.');
-  displayNames = Object.fromEntries(catalog.data.map(item => [item.model, item.displayName]));
-  assert.deepEqual(displayNames, {
-    'gpt-6.1-sol': 'Offline fixture gpt-6.1-sol', 'gpt-6-astra': 'Offline fixture gpt-6-astra',
-    'B-gpt-6-astra': 'Team · GPT-6 Astra', 'B-gpt-6.1-sol': 'Team · GPT-6.1 Sol',
-    'B-gpt-b-directory-fixture': 'Team · B directory fixture',
-  }, 'The source prefix changes display names while the existing routing model IDs remain unchanged.');
-  phase = 'A'; await turn('gpt-6.1-sol', 'OFFLINE_A_OK');
-  phase = 'B'; await turn('B-gpt-6.1-sol', 'OFFLINE_B_OK');
-  phase = 'B-extra'; await turn('B-gpt-b-directory-fixture', 'OFFLINE_B_OK');
-  const stored = await rpc.request('thread/read', { threadId, includeTurns: false });
-  persistedProvider = stored.thread.modelProvider;
-  assert.equal(persistedProvider, 'openai');
-  assert.equal(seedInferenceCalls, 1);
-  assert.deepEqual(counts, { A: 1, B: 2 });
+  if (largeRequestMode) {
+    await saveConfig(endpoint.href);
+    rpc = newRpc();
+    for (const [account, modelName, reply] of [['A', 'gpt-6.1-sol', 'OFFLINE_A_OK'], ['B', 'B-gpt-6.1-sol', 'OFFLINE_B_OK']]) {
+      phase = account;
+      const created = await rpc.request('thread/start', { model: modelName, modelProvider: 'openai',
+        cwd: work, ephemeral: true, approvalPolicy: 'never', sandbox: 'read-only' },
+      { timeoutMs: 180000 });
+      threadId = created.thread.id;
+      assert.equal(created.modelProvider, 'openai'); assert.equal(created.thread.modelProvider, 'openai');
+      await turn(modelName, reply);
+    }
+    assert.equal(new Set(runs.map(run => run.threadId)).size, 2, 'Each large request must use a fresh thread to avoid accumulating input.');
+  } else {
+    await saveConfig(originalEndpoint);
+    rpc = newRpc();
+    const created = await rpc.request('thread/start', { model: 'gpt-6.1-sol', modelProvider: 'openai',
+      cwd: work, ephemeral: false, approvalPolicy: 'never', sandbox: 'read-only' });
+    threadId = created.thread.id; originalProvider = created.modelProvider;
+    assert.equal(originalProvider, 'openai'); assert.equal(created.thread.modelProvider, 'openai');
+    await turn('gpt-6.1-sol', 'OFFLINE_A_OK'); seedRuns.push(runs.pop());
+    await closeRpc();
+    await saveConfig(endpoint.href);
+    rpc = newRpc();
+    // No modelProvider override and no direct database or rollout edits.
+    const resumed = await rpc.request('thread/resume', { threadId, excludeTurns: true });
+    resumedProvider = resumed.modelProvider;
+    assert.equal(resumedProvider, 'openai'); assert.equal(resumed.thread.id, threadId);
+    const catalog = await rpc.request('model/list', { includeHidden: false });
+    listed = catalog.data.map(item => item.model);
+    assert.deepEqual(listed, ['gpt-6.1-sol', 'gpt-6-astra', 'B-gpt-6.1-sol', 'B-gpt-6-astra', 'B-gpt-b-directory-fixture'], 'The real client must list A first and keep the complete B source in native priority order.');
+    displayNames = Object.fromEntries(catalog.data.map(item => [item.model, item.displayName]));
+    assert.deepEqual(displayNames, {
+      'gpt-6.1-sol': 'Offline fixture gpt-6.1-sol', 'gpt-6-astra': 'Offline fixture gpt-6-astra',
+      'B-gpt-6-astra': 'Team · GPT-6 Astra', 'B-gpt-6.1-sol': 'Team · GPT-6.1 Sol',
+      'B-gpt-b-directory-fixture': 'Team · B directory fixture',
+    }, 'The source prefix changes display names while the existing routing model IDs remain unchanged.');
+    phase = 'A'; await turn('gpt-6.1-sol', 'OFFLINE_A_OK');
+    phase = 'B'; await turn('B-gpt-6.1-sol', 'OFFLINE_B_OK');
+    phase = 'B-extra'; await turn('B-gpt-b-directory-fixture', 'OFFLINE_B_OK');
+    const stored = await rpc.request('thread/read', { threadId, includeTurns: false });
+    persistedProvider = stored.thread.modelProvider;
+    assert.equal(persistedProvider, 'openai');
+  }
+  assert.equal(seedInferenceCalls, largeRequestMode ? 0 : 1);
+  assert.deepEqual(counts, { A: 1, B: largeRequestMode ? 1 : 2 });
   assert.ok(upgrades.length > 0, 'The built-in provider must exercise the real server 426 fallback.');
   assert.ok(upgrades.every(item => item.hasCallerAuthorization && item.hasAccountId));
-  assert.equal(gateway.metrics.accounts.A.completed, 1); assert.equal(gateway.metrics.accounts.B.completed, 2);
+  assert.equal(gateway.metrics.accounts.A.completed, 1); assert.equal(gateway.metrics.accounts.B.completed, largeRequestMode ? 1 : 2);
   assert.equal(gateway.metrics.failed, 0);
   assert.equal(bootstrapRequests.some(item => item.blocked), false, 'No unexpected external request is needed for this proof.');
 } catch (error) {
@@ -296,16 +382,25 @@ try {
   process.exitCode = 1;
 } finally {
   await closeRpc();
+  await Promise.all(capturedWireWrites);
   server?.closeAllConnections(); if (server?.listening) await new Promise(resolve => server.close(resolve));
   bootstrap?.closeAllConnections(); if (bootstrap?.listening) await new Promise(resolve => bootstrap.close(resolve));
   seedServer?.closeAllConnections(); if (seedServer?.listening) await new Promise(resolve => seedServer.close(resolve));
   const proof = { passed: errors.length === 0, nativeVersion, realCredentialsRead: false, userConfigModified: false,
     realInference: false, externalInference: false, fixtureDirectory: work, originalProvider, resumedProvider, persistedProvider,
-    noProviderOverrideOnResume: true, sameThreadForBothAccounts: runs.length === 3 && runs.every(run => run.threadId === runs[0].threadId),
+    largeRequestMode, syntheticContextBytes: largeRequestMode ? largeContextBytes : null,
+    syntheticPayloadLocation: largeRequestMode ? 'model_catalog.base_instructions' : null,
+    freshThreadPerAccount: largeRequestMode ? runs.length === 2 && new Set(runs.map(run => run.threadId)).size === 2 : null,
+    noProviderOverrideOnResume: largeRequestMode ? null : true,
+    sameThreadForBothAccounts: largeRequestMode ? null : runs.length === 3 && runs.every(run => run.threadId === runs[0].threadId),
     listed, displayNames, seedRuns, seedInferenceCalls, runs, counts, upgrades, requests: received.map(item => ({ phase: item.phase, method: item.method, path: item.path,
       hasCallerAuthorization: item.headers.authorization === `Bearer ${aCredential}`, hasCallerAccountId: item.headers['chatgpt-account-id'] === accountA,
+      contentEncoding: item.headers['content-encoding'] ?? 'identity', wireBytes: item.bytes?.length ?? null,
+      codecObservation: item.codecObservation,
+      syntheticWirePath: item.syntheticWirePath,
       originalBodyHash: item.bytes?.length ? hash(item.bytes) : null })), upstreamRequests, bootstrapRequests, errors };
   await writeFile(evidencePath, JSON.stringify(proof, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify({ passed: proof.passed, nativeVersion, realInference: false, realCredentialsRead: false,
+    largeRequestMode, freshThreadPerAccount: proof.freshThreadPerAccount,
     sameThreadForBothAccounts: proof.sameThreadForBothAccounts, counts, evidencePath, errors }, null, 2));
 }

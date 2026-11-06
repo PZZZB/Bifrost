@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { RequestDiagnostics, classifyDiagnosticFailure, normalizeDiagnosticRecord,
   normalizeDiagnosticUsage, responsesTerminalEvidence } from '../src/request-diagnostics.mjs';
+import { decodeModelRequestBody } from '../src/request-body.mjs';
 
 const entry = (overrides = {}) => ({ requestId: randomUUID(), time: '2026-10-23T10:00:00.000Z',
   account: 'B', model: 'B-gpt-6.1-sol', upstreamModel: 'gpt-6.1-sol', status: 'completed', httpStatus: 200,
@@ -36,6 +37,47 @@ test('diagnostic persistence and exports retain only the public whitelist and fi
   }
   assert.equal(journal.exportReport(randomUUID()), null);
   assert.equal(journal.detail('not-a-request'), null);
+});
+
+test('a decoder failure keeps its exact safe category and measurements across persistence and export', async t => {
+  const { journal, path } = await fixture(t);
+  let decodingError;
+  try { await decodeModelRequestBody(Buffer.from('PRIVATE_INVALID_ZSTD_PAYLOAD'), { 'content-encoding': 'zstd' }); }
+  catch (error) { decodingError = error; }
+  assert.ok(decodingError);
+  const failure = classifyDiagnosticFailure(decodingError, { httpStatus: decodingError.status, stage: 'validation' });
+  assert.equal(failure.errorCode, 'request_body_invalid_compression');
+  assert.equal(failure.requestBodyDiagnostics.encodings[0], 'zstd');
+  assert.equal(failure.requestBodyDiagnostics.wireBytes, 28);
+  assert.equal(failure.requestBodyDiagnostics.decodedBytes, null, 'Failed decoding must not invent an output byte count.');
+  const record = entry({ ...failure, account: null, model: null, upstreamModel: null, status: 'failed', httpStatus: 400,
+    message: 'PRIVATE_DECODER_MESSAGE', requestBodyDiagnostics: { ...failure.requestBodyDiagnostics,
+      body: 'PRIVATE_BODY', headers: { authorization: 'Bearer PRIVATE_TOKEN' }, errorMessage: 'PRIVATE_ERROR' } });
+  await journal.record(record); await journal.close();
+  const reopened = await RequestDiagnostics.open({ path }); t.after(() => reopened.close());
+  const saved = reopened.detail(record.requestId);
+  assert.equal(saved.errorCode, failure.errorCode); assert.equal(saved.failureStage, 'validation');
+  assert.deepEqual(saved.requestBodyDiagnostics, failure.requestBodyDiagnostics);
+  for (const wire of [await readFile(path, 'utf8'), JSON.stringify(reopened.exportReport(record.requestId))]) {
+    assert.doesNotMatch(wire, /PRIVATE_|Bearer|authorization|errorMessage/);
+  }
+});
+
+test('request-body failure codes remain distinct from generic status errors and never use provider text', () => {
+  for (const [code, status] of [
+    ['request_body_wire_too_large', 413], ['request_body_decoded_too_large', 413],
+    ['request_body_invalid_compression', 400], ['request_body_unsupported_encoding', 415],
+    ['request_body_zstd_window_limit', 400], ['request_body_zstd_dictionary_error', 400],
+    ['request_body_aborted', 499], ['request_body_read_failed', 400],
+  ]) {
+    const failure = classifyDiagnosticFailure({ code, status, message: 'PRIVATE_PROVIDER_TEXT' }, { stage: 'validation' });
+    assert.equal(failure.errorCode, code); assert.doesNotMatch(failure.message, /PRIVATE/);
+    const normalized = normalizeDiagnosticRecord(entry({ ...failure, status: 'failed', httpStatus: status }));
+    assert.equal(normalized.errorCode, code); assert.equal(normalized.message, failure.message);
+  }
+  const cancelled = classifyDiagnosticFailure({ code: 'request_body_invalid_compression' }, { interrupted: true, stage: 'validation' });
+  assert.equal(cancelled.errorCode, 'request_interrupted');
+  assert.equal(classifyDiagnosticFailure({ code: 'request_body_PRIVATE' }, { httpStatus: 400 }).errorCode, 'payload_rejected');
 });
 
 test('a source failure after HTTP 200 retains its safe cause across diagnostics persistence and export', async t => {
