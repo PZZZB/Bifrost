@@ -190,6 +190,7 @@ export class CodeBuddyResponsesProvider {
       // Inbound ChatGPT credentials and client metadata never reach CodeBuddy.
       upstream = await this.provider.request({ path: '/v1/messages', body: Buffer.from(JSON.stringify(request.upstream)),
         clientScope,
+        toolNameAliases: request.tools.declaredNameAliases((request.upstream.tools ?? []).map(tool => tool.name)),
         headers: new Headers({ 'content-type': 'application/json', 'anthropic-version': '2023-06-01' }), signal: abort.signal });
       if (!upstream?.ok) {
         let message = 'CodeBuddy 上游请求失败。', code = null, sourceDiagnostics;

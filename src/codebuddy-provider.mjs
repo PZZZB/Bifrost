@@ -31,6 +31,23 @@ class AdapterError extends Error {
 }
 
 function invalid(message = 'CodeBuddy 适配器不支持此请求。') { throw new AdapterError(message); }
+function snapshotToolNameAliases(value) {
+  if (value == null) return new Map();
+  let aliases;
+  try { aliases = new Map(Map.prototype.entries.call(value)); }
+  catch { invalid('工具别名映射无效。'); }
+  if (aliases.size > 256) invalid('工具别名映射无效。');
+  for (const [reference, target] of aliases) {
+    if (typeof reference !== 'string' || !reference || reference.length > 128 || /[\x00-\x20\x7f]/.test(reference)
+      || !isName(target)) invalid('工具别名映射无效。');
+  }
+  return aliases;
+}
+function validateToolNameAliases(aliases, declared) {
+  for (const [reference, target] of aliases) {
+    if (!declared.has(target) || declared.has(reference) && reference !== target) invalid('工具别名映射未匹配当前声明。');
+  }
+}
 function sourceFailure(message, code, sourceDiagnostics = null) {
   throw new AdapterError(message, 502, code, sourceDiagnostics);
 }
@@ -565,15 +582,16 @@ class Completion {
       if (index !== expected) protocol('tool_index_sequence', 'CodeBuddy 返回了未声明或无效的工具调用。');
       if (!isId(call.id)) protocol('tool_id_invalid', 'CodeBuddy 返回了未声明或无效的工具调用。', observed(call.id));
       if (seen.has(call.id)) protocol('tool_id_duplicate', 'CodeBuddy 返回了未声明或无效的工具调用。');
-      if (!this.request.toolNames.has(call.name)) protocol('tool_not_declared', 'CodeBuddy 返回了未声明或无效的工具调用。', observed(call.name));
-      if (this.request.forcedTool && call.name !== this.request.forcedTool) protocol('forced_tool_mismatch', 'CodeBuddy 返回了未声明或无效的工具调用。');
+      const toolName = this.request.toolNames.has(call.name) ? call.name : this.request.toolNameAliases.get(call.name);
+      if (!this.request.toolNames.has(toolName)) protocol('tool_not_declared', 'CodeBuddy 返回了未声明或无效的工具调用。', observed(call.name));
+      if (this.request.forcedTool && toolName !== this.request.forcedTool) protocol('forced_tool_mismatch', 'CodeBuddy 返回了未声明或无效的工具调用。');
       let input;
       try { input = JSON.parse(call.arguments); } catch { protocol('tool_arguments_json', 'CodeBuddy 工具参数不是完整 JSON。', observed(call.arguments)); }
       if (!object(input)) protocol('tool_arguments_object', 'CodeBuddy 工具参数必须是对象。', observed(input));
       seen.add(call.id);
       const blockIndex = this.blocks.length;
-      this.blocks.push({ type: 'tool_use', id: call.id, name: call.name, input });
-      this.emit('content_block_start', { index: blockIndex, content_block: { type: 'tool_use', id: call.id, name: call.name, input: {} } });
+      this.blocks.push({ type: 'tool_use', id: call.id, name: toolName, input });
+      this.emit('content_block_start', { index: blockIndex, content_block: { type: 'tool_use', id: call.id, name: toolName, input: {} } });
       this.emit('content_block_delta', { index: blockIndex, delta: { type: 'input_json_delta', partial_json: call.arguments } });
       this.emit('content_block_stop', { index: blockIndex });
     }
@@ -698,7 +716,7 @@ export class CodeBuddyProvider {
     // Only expose the comparison. Source reasoning and opaque metadata stay private.
     return saved.map(state => state.model === selected.source.id);
   }
-  async request({ path, body, headers: _headers, signal, clientScope = null } = {}) {
+  async request({ path, body, headers: _headers, signal, clientScope = null, toolNameAliases = null } = {}) {
     let parsedPath;
     try {
       if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) throw new Error();
@@ -708,6 +726,9 @@ export class CodeBuddyProvider {
     if (parsedPath !== '/v1/messages') return errorResponse(new AdapterError('CodeBuddy 未提供此接口。', 404));
     let request, model, identity, thinkingState;
     try {
+      // This process-only option never comes from Messages JSON. Snapshot it
+      // before any await so callers cannot change routing during authorization.
+      const aliases = snapshotToolNameAliases(toolNameAliases);
       clientScope = validateClientScope(clientScope);
       thinkingState = await this.#state();
       const scopes = [], compactionScopes = [];
@@ -720,6 +741,8 @@ export class CodeBuddyProvider {
       }, token => {
         const state = thinkingState.openCompaction(token); compactionScopes.push(state); return state.summary;
       });
+      validateToolNameAliases(aliases, request.toolNames);
+      request.toolNameAliases = aliases;
       const metadata = await this.#metadata(signal);
       const selected = metadata.models.find(model => model.descriptor.id === request.alias.id);
       if (!selected?.descriptor.available) throw new AdapterError(selected?.descriptor.reason || '当前 CodeBuddy 账号目录未提供可用的所选模型。', 503);

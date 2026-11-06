@@ -201,6 +201,23 @@ class ToolMap {
     return this.byKey.get(key) ?? this.add(type === 'tool_search' ? { type, execution: 'client' }
       : { type, name: toolName }, namespace ?? null, '', false);
   }
+  declaredNameAliases(wireNames = this.declarations.map(tool => tool.name)) {
+    const allowed = new Set(wireNames), candidates = new Map();
+    for (const tool of this.byKey.values()) {
+      const references = [tool.name, ...(tool.namespace === null ? [] : [`${tool.namespace}.${tool.name}`])];
+      for (const reference of new Set(references)) {
+        // Preserve wire identities, including historical ones. Only an exact,
+        // unambiguous display name may refer back to a currently declared tool.
+        if (reference.length > 128 || this.byAlias.has(reference)) continue;
+        if (!candidates.has(reference)) candidates.set(reference, tool);
+        else if (candidates.get(reference) !== tool) candidates.set(reference, null);
+      }
+    }
+    // Inactive tools still disambiguate references visible in prior history or
+    // deferred declarations. They never become executable alias targets.
+    return new Map([...candidates].filter(([, tool]) => tool?.declared && allowed.has(tool.alias))
+      .map(([reference, tool]) => [reference, tool.alias]));
+  }
 }
 
 function translate(raw, instructionMarker, profile = {}) {

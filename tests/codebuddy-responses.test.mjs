@@ -213,15 +213,18 @@ test('generic models without mapped effort controls ignore only known inherited 
   assert.equal(client.calls.length, 1);
 });
 
-test('namespace function and custom tool calls preserve names, namespace, call_id, grammar, and exact raw input', async () => {
+for (const toolNameStyle of ['wire', 'original', 'qualified']) {
+test(`namespace function and custom tool calls preserve history and raw input with ${toolNameStyle} names`, async () => {
   const { client, request } = fixture();
   const raw = '*** Begin Patch\n*** Add File: x.txt\n+ 中 文\t🙂\n*** End Patch\n';
   const tools = [{ type: 'namespace', name: 'functions', description: 'Local client tools.', tools: [fn, custom] },
     { ...fn, name: 'functions__read_file' }];
   client.respond = ({ body }) => source([chunk({ reasoning_content: 'SECRET_TOOL_THINKING' }), chunk({ content: '读取文件并修改。' }),
     chunk({ tool_calls: [
-      { index: 0, id: 'call_read:1', type: 'function', function: { name: body.tools[0].function.name, arguments: '{ "path" : "x.txt" }' } },
-      { index: 1, id: 'call_patch:2', type: 'function', function: { name: body.tools[1].function.name, arguments: JSON.stringify({ input: raw }) } },
+      { index: 0, id: 'call_read:1', type: 'function', function: { name: toolNameStyle === 'wire' ? body.tools[0].function.name
+        : toolNameStyle === 'qualified' ? 'functions.read_file' : 'read_file', arguments: '{ "path" : "x.txt" }' } },
+      { index: 1, id: 'call_patch:2', type: 'function', function: { name: toolNameStyle === 'wire' ? body.tools[1].function.name
+        : toolNameStyle === 'qualified' ? 'functions.apply_patch' : 'apply_patch', arguments: JSON.stringify({ input: raw }) } },
     ], extra_fields: { tag: 'opaque-round' } }), chunk({}, 'tool_calls'), { choices: [], usage: realUsage }, '[DONE]'], 1);
   const response = await request({ ...base, tools }), wire = await events(response);
   const calls = output(wire).filter(item => item.type.endsWith('tool_call') || item.type === 'function_call');
@@ -249,7 +252,108 @@ test('namespace function and custom tool calls preserve names, namespace, call_i
   assert.deepEqual(previous.extra_fields, { tag: 'opaque-round' });
   assert.equal(JSON.parse(previous.tool_calls[1].function.arguments).input, raw);
   assert.equal(previous.tool_calls[0].id, 'call_read:1');
+  assert.deepEqual(previous.tool_calls.map(call => call.function.name), client.calls[0].body.tools.slice(0, 2).map(tool => tool.function.name),
+    'History always uses the original stable wire aliases, including after the current declarations are reordered.');
   assert.equal(sent.filter(message => message.role === 'tool')[0].content[1].type, 'image_url');
+});
+}
+
+for (const stream of [true, false]) {
+test(`original tool names preserve the discovery, execution and continuation loop over ${stream ? 'SSE' : 'JSON'}`, async () => {
+  const { client, request } = fixture();
+  const search = { type: 'tool_search', execution: 'client', description: 'Discover client tools.',
+    parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } };
+  const loaded = { type: 'namespace', name: 'functions', description: 'Client file tools.', tools: [{ ...fn, defer_loading: true }] };
+  const tools = [search, loaded], wireNames = new Map(); let round = 0;
+  client.respond = ({ body }) => {
+    const current = round++;
+    if (current === 0) {
+      assert.equal(body.tools.length, 1, 'Deferred tools are not executable until discovery returns their schemas.');
+      wireNames.set('search', body.tools[0].function.name);
+      return source([chunk({ reasoning_content: 'PRIVATE_DISCOVERY_REASONING' }), chunk({ tool_calls: [
+        { index: 0, id: 'discover:1', type: 'function', function: { name: 'tool_search', arguments: '{"query":"file"}' } },
+      ], extra_fields: { checkpoint: 'discovery' } }), chunk({}, 'tool_calls'), '[DONE]']);
+    }
+    if (current === 1) {
+      assert.equal(body.tools.length, 2);
+      assert.equal(body.messages.find(message => message.role === 'assistant').tool_calls[0].function.name, wireNames.get('search'));
+      const file = body.tools.find(tool => /Tool read_file:/.test(tool.function.description));
+      assert.ok(file); wireNames.set('file', file.function.name);
+      assert.match(body.messages.find(message => message.role === 'tool').content, /Available tools:/);
+      return source([chunk({ reasoning_content: 'PRIVATE_EXECUTION_REASONING' }), chunk({ tool_calls: [
+        { index: 0, id: 'read:2', type: 'function', function: { name: 'read_file', arguments: '{"path":"x.txt"}' } },
+      ], extra_fields: { checkpoint: 'execution' } }), chunk({}, 'tool_calls'), '[DONE]']);
+    }
+    assert.equal(current, 2, 'One upstream response per phase; no implicit inference replay.');
+    const history = body.messages.filter(message => message.role === 'assistant');
+    assert.deepEqual(history.flatMap(message => message.tool_calls.map(call => call.function.name)), [wireNames.get('search'), wireNames.get('file')]);
+    assert.deepEqual(history.map(message => message.extra_fields), [{ checkpoint: 'discovery' }, { checkpoint: 'execution' }]);
+    assert.deepEqual(body.messages.filter(message => message.role === 'tool').map(message => message.tool_call_id), ['discover:1', 'read:2']);
+    assert.equal(body.messages.at(-1).content, 'Fixture file contents.');
+    return answer('OFFLINE_DISCOVERY_EXECUTION_DONE');
+  };
+  const take = async input => {
+    const response = await request({ ...base, stream, tools, input }); assert.equal(response.status, 200);
+    const result = stream ? completion(await events(response)).response : await response.json();
+    assert.equal(result.status, 'completed', JSON.stringify(result.error));
+    return result.output;
+  };
+  const first = await take(base.input), searchCall = first.find(item => item.type === 'tool_search_call');
+  assert.equal(searchCall.call_id, 'discover:1'); assert.deepEqual(searchCall.arguments, { query: 'file' });
+  const discovered = [...base.input, ...first, { type: 'tool_search_output', call_id: searchCall.call_id, tools: [loaded] }];
+  const second = await take(discovered), fileCall = second.find(item => item.type === 'function_call');
+  assert.deepEqual({ name: fileCall.name, namespace: fileCall.namespace, callId: fileCall.call_id, arguments: JSON.parse(fileCall.arguments) },
+    { name: 'read_file', namespace: 'functions', callId: 'read:2', arguments: { path: 'x.txt' } });
+  const third = await take([...discovered, ...second, { type: 'function_call_output', call_id: fileCall.call_id, output: 'Fixture file contents.' }]);
+  assert.equal(third.find(item => item.type === 'message').content[0].text, 'OFFLINE_DISCOVERY_EXECUTION_DONE');
+  assert.equal(client.calls.length, 3);
+});
+}
+
+for (const [label, tools, input, returned] of [
+  ['ambiguous namespaces', [
+    { type: 'namespace', name: 'one', tools: [fn] }, { type: 'namespace', name: 'two', tools: [fn] },
+  ], base.input, 'read_file'],
+  ['ambiguous tool types', [fn, { ...custom, name: 'read_file' }], base.input, 'read_file'],
+  ['unloaded deferred tool', [{ ...fn, defer_loading: true }], base.input, 'read_file'],
+  ['unloaded namesake in another namespace', [
+    { type: 'namespace', name: 'old', tools: [{ ...fn, defer_loading: true }] },
+    { type: 'namespace', name: 'current', tools: [fn] },
+  ], base.input, 'read_file'],
+  ['history-only namesake in another namespace', [{ type: 'namespace', name: 'current', tools: [fn] }], [...base.input,
+    { type: 'function_call', name: 'read_file', namespace: 'old', call_id: 'old_call', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'old_call', output: 'Earlier tool output.' },
+  ], 'read_file'],
+  ['history-only tool', [fn], [...base.input,
+    { type: 'function_call', name: 'old_tool', namespace: 'functions', call_id: 'old_call', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'old_call', output: 'Earlier tool output.' },
+  ], 'old_tool'],
+]) test(`name compatibility rejects ${label} without committing a client tool call`, async () => {
+  const { client, request } = fixture();
+  client.respond = () => source([chunk({ tool_calls: [
+    { index: 0, id: 'must_not_execute', type: 'function', function: { name: returned, arguments: '{}' } },
+  ] }), chunk({}, 'tool_calls'), '[DONE]']);
+  const wire = await events(await request({ ...base, tools, input }));
+  assert.equal(completion(wire).type, 'response.failed', 'An undeclared or ambiguous tool reference must never become an executable call.');
+  assert.equal(completion(wire).response.error.sourceDiagnostics.check, 'tool_not_declared');
+  assert.deepEqual(completion(wire).response.output, []);
+  assert.equal(wire.some(event => event.type === 'response.output_item.done'), false);
+  assert.equal(client.calls.length, 1);
+});
+
+test('a qualified current tool stays callable when an unloaded namesake makes its bare name ambiguous', async () => {
+  const { client, request } = fixture();
+  const tools = [{ type: 'namespace', name: 'old', tools: [{ ...fn, defer_loading: true }] },
+    { type: 'namespace', name: 'current', tools: [fn] }];
+  client.respond = () => source([chunk({ tool_calls: [
+    { index: 0, id: 'current_scope', type: 'function', function: { name: 'current.read_file', arguments: '{"path":"x.txt"}' } },
+  ] }), chunk({}, 'tool_calls'), '[DONE]']);
+  const wire = await events(await request({ ...base, tools }));
+  assert.equal(completion(wire).type, 'response.completed');
+  const call = output(wire).find(item => item.type === 'function_call');
+  assert.deepEqual({ namespace: call.namespace, name: call.name, callId: call.call_id },
+    { namespace: 'current', name: 'read_file', callId: 'current_scope' });
+  assert.equal(client.calls.length, 1);
 });
 
 test('client tool search loads function schemas and returns executable client search calls', async () => {

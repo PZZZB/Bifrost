@@ -19,6 +19,9 @@ import { Gateway } from '../src/gateway.mjs';
 // Run the installed native Codex against a loopback gateway and canned CodeBuddy
 // responses. Both credentials and question answers are fixtures. No existing
 // account, user configuration, production service or real inference is used.
+// Each native mode runs with the declared wire alias and with the original
+// question name. The latter checks normalization against the current declarations
+// instead of assuming that every model obeys a hashed alias perfectly.
 const args = process.argv.slice(2);
 if (args.length && (args.length !== 2 || args[0] !== '--binary' || !args[1] || args[1].startsWith('--'))) {
   throw new Error('Expected [--binary /path/to/native/codex].');
@@ -43,6 +46,7 @@ const answerPayload = { answers: {
   fixture_choice: { answers: ['Fixture A (Recommended)'] }, fixture_theme: { answers: ['Dark'] },
 } };
 const unavailable = 'request_user_input is unavailable in Default mode';
+const nameVariants = ['wire-alias', 'original-name'];
 const cases = [], failures = [], blockedNetworkRequests = [], sockets = new Set();
 let active, binary, nativeVersion;
 const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => [
@@ -87,10 +91,13 @@ const provider = new CodeBuddyProvider({ loadThinkingState: () => new CodeBuddyT
       assert.ok(tool, 'The full adapter must declare the native question tool upstream.');
       const nativeTool = active.nativeRequests[0]?.questionTools[0];
       assert.ok(nativeTool, 'Native Codex must declare the question tool.');
+      assert.equal(nativeTool.name, 'request_user_input');
+      assert.notEqual(tool.function.name, nativeTool.name, 'The fixture must exercise distinct wire and original tool names.');
       assert.deepEqual(tool.function.parameters, nativeTool.parameters, 'The adapter must preserve the native question schema.');
       active.upstreamQuestionTool = tool;
+      active.returnedToolName = active.nameVariant === 'original-name' ? nativeTool.name : tool.function.name;
       return stream([chunk({ role: 'assistant', tool_calls: [{ index: 0, id: active.callId, type: 'function',
-        function: { name: tool.function.name, arguments: JSON.stringify(questionArgs) } }] }), chunk({}, 'tool_calls'), '[DONE]']);
+        function: { name: active.returnedToolName, arguments: JSON.stringify(questionArgs) } }] }), chunk({}, 'tool_calls'), '[DONE]']);
     }
     assert.equal(active.modelCalls, 2, 'A case permits exactly two canned model responses.');
     active.upstreamToolOutputs = body.messages.filter(message => message.role === 'tool').map(message => ({
@@ -138,8 +145,10 @@ server.on('connect', (_req, socket) => {
 server.on('upgrade', (_req, socket) => { blockedNetworkRequests.push({ kind: 'upgrade' }); socket.destroy(); });
 server.on('clientError', (_error, socket) => socket.destroy());
 
-async function runCase(name, mode, enableDefault, origin) {
-  const result = { name, mode, enableDefault, callId: `call_question_${name}`, modelCalls: 0, nativeRequests: [], hostRequests: [], errors: [] };
+async function runCase(name, mode, enableDefault, nameVariant, origin) {
+  assert.ok(nameVariants.includes(nameVariant));
+  const result = { name, mode, enableDefault, nameVariant, callId: `call_question_${name}`, modelCalls: 0,
+    reconnects: 0, nativeErrorNotifications: 0, nativeRequests: [], hostRequests: [], errors: [] };
   active = result; cases.push(result);
   const home = join(work, name); await mkdir(home, { recursive: true, mode: 0o700 });
   const env = { ...inherited, CODEX_HOME: home, HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
@@ -201,7 +210,11 @@ async function runCase(name, mode, enableDefault, origin) {
         assert.equal(message.params.isBlocking, mode === 'plan');
         send({ id: message.id, result: answerPayload });
       } else if (message.method === 'turn/completed') turnWaiter?.resolve(message.params.turn);
-      else if (message.method === 'error') abort(new Error(message.params?.error?.message || 'Native Codex reported a turn error.'));
+      else if (message.method === 'error') {
+        result.nativeErrorNotifications++;
+        if (message.params?.willRetry === true) result.reconnects++;
+        abort(new Error(message.params?.error?.message || 'Native Codex reported a turn error.'));
+      }
     } catch (error) { abort(error); }
   });
   try {
@@ -219,6 +232,8 @@ async function runCase(name, mode, enableDefault, origin) {
     assert.ok(result.turn.items.some(item => item.type === 'agentMessage' && item.text === marker), 'Native Codex must receive the canned final reply.');
     assert.equal(result.modelCalls, 2, 'Native Codex must continue with the question result.');
     assert.equal(result.nativeRequests.length, 2);
+    assert.equal(result.reconnects, 0, 'The native question round must not reconnect.');
+    assert.equal(result.nativeErrorNotifications, 0, 'The native question round must not report a stream error.');
     for (const native of result.nativeRequests) assert.equal(native.questionTools.length, 1);
     const outputs = result.nativeRequests[1].functionOutputs;
     assert.equal(outputs.length, 1); assert.equal(outputs[0].call_id, result.callId);
@@ -256,21 +271,26 @@ try {
   })).stdout.trim();
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
-  await runCase('default-off', 'default', false, origin);
-  await runCase('plan', 'plan', false, origin);
-  await runCase('default-on', 'default', true, origin);
-  assert.equal(cases.length, 3); assert.ok(cases.every(result => result.passed), 'At least one native question case failed.');
+  for (const nameVariant of nameVariants) {
+    const suffix = nameVariant === 'wire-alias' ? '' : '-original-name';
+    await runCase(`default-off${suffix}`, 'default', false, nameVariant, origin);
+    await runCase(`plan${suffix}`, 'plan', false, nameVariant, origin);
+    await runCase(`default-on${suffix}`, 'default', true, nameVariant, origin);
+  }
+  assert.equal(cases.length, 6); assert.ok(cases.every(result => result.passed), 'At least one native question case failed.');
 } catch (error) { failures.push(error.message); }
 finally {
   await provider.close?.();
   for (const socket of sockets) socket.destroy();
   if (server.listening) await new Promise(resolve => server.close(resolve));
-  const passed = failures.length === 0 && cases.length === 3 && cases.every(result => result.passed);
+  const passed = failures.length === 0 && cases.length === 6 && cases.every(result => result.passed);
   const evidencePath = join(work, 'proof.json');
   await writeFile(evidencePath, JSON.stringify({ passed, nativeVersion, realInference: false, existingAuthLoaded: false,
-    userConfigurationModified: false, questionArgs, answerPayload, cases, blockedNetworkRequests, failures }, null, 2) + '\n', { mode: 0o600 });
+    userConfigurationModified: false, nameVariants, expectedCases: 6, questionArgs, answerPayload, cases, blockedNetworkRequests, failures }, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify({ passed, nativeVersion, realInference: false, evidencePath,
-    cases: cases.map(({ name, passed, modelCalls, hostRequests, turn, errors }) => ({ name, passed, modelCalls,
-      hostRequests: hostRequests.length, turnStatus: turn?.status ?? null, errors })), failures }, null, 2));
+    cases: cases.map(({ name, nameVariant, passed, returnedToolName, upstreamQuestionTool, modelCalls, nativeRequests,
+      reconnects, nativeErrorNotifications, hostRequests, turn, errors }) => ({ name, nameVariant, passed,
+      returnedToolName, declaredWireName: upstreamQuestionTool?.function.name ?? null, modelCalls, nativeRequests: nativeRequests.length,
+      reconnects, nativeErrorNotifications, hostRequests: hostRequests.length, turnStatus: turn?.status ?? null, errors })), failures }, null, 2));
   if (!passed) process.exitCode = 1;
 }
