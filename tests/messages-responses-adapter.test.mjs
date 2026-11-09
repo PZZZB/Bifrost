@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { MessagesResponsesAdapter } from '../src/protocols/messages-responses-adapter.mjs';
 import { claudeSourceError } from '../src/claude-source-errors.mjs';
+import { translateResponses, ResponsesConversion } from '../src/protocols/responses-messages.mjs';
 
 const scope = '203cc356-cb05-4a8e-8f5e-363b768eb97e';
 const request = { model: 'plain-provider-model', input: 'hello', store: false };
@@ -233,4 +234,178 @@ for (const mode of ['unknown', 'oversized']) test(`${mode} HTTP error details ke
   const response = await adapter.request({ body: request, scope }), wire = await response.text();
   assert.equal(response.status, 400); assert.equal(calls, 1); assert.equal(JSON.parse(wire).error.code, 'invalid_request');
   assert.equal(JSON.parse(wire).error.message, '模型来源拒绝了请求（HTTP 400）。'); assert.doesNotMatch(wire, /PRIVATE_HTTP_ERROR|claude_rate_limited/);
+});
+
+const rawArgumentsFunction = { type: 'function', name: 'exec_command',
+  parameters: { type: 'object', properties: { command: { type: 'string' } } } };
+const preserveArgumentsProfile = { model: request.model, preserveFunctionArguments: true };
+
+function functionHistory(arguments_, { namespace = null, declaration = rawArgumentsFunction } = {}) {
+  return { ...request, tools: namespace === null ? [declaration]
+    : [{ type: 'namespace', name: namespace, tools: [declaration] }], input: [
+    { role: 'user', content: 'Offline tool task.' },
+    { type: 'function_call', call_id: 'call_raw', name: declaration.name,
+      ...(namespace === null ? {} : { namespace }), arguments: arguments_, status: 'completed' },
+    { type: 'function_call_output', call_id: 'call_raw', output: 'The client could not parse the tool arguments.' },
+  ] };
+}
+
+function convertToolFragments(tool, fragments, profile = {}, { initialInput = {}, namespace = null } = {}) {
+  const selected = { model: request.model, ...profile };
+  const body = { ...request, tools: namespace === null ? [tool] : [{ type: 'namespace', name: namespace, tools: [tool] }] };
+  const translated = translateResponses(body, 'offline-marker', selected);
+  const conversion = new ResponsesConversion(translated, selected), wire = [];
+  const accept = event => wire.push(...conversion.accept(event));
+  accept({ type: 'message_start', message: { type: 'message', role: 'assistant', content: [] } });
+  accept({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call_raw',
+    name: translated.tools.declarations[0]?.name ?? translated.tools.byAlias.keys().next().value, input: initialInput } });
+  for (const fragment of fragments) accept({ type: 'content_block_delta', index: 0,
+    delta: { type: 'input_json_delta', partial_json: fragment } });
+  accept({ type: 'content_block_stop', index: 0 });
+  accept({ type: 'message_delta', delta: { stop_reason: 'tool_use' } });
+  accept({ type: 'message_stop' });
+  wire.push(...conversion.finishEvents(null));
+  return { translated, wire, response: wire.at(-1).response };
+}
+
+test('an enabled profile retains ordinary function history arguments in a private exact-string map', () => {
+  for (const arguments_ of ['{"command":', '[]', '{"number":1e400}', '', ' { "command" : "offline" } ']) {
+    const body = functionHistory(arguments_), original = structuredClone(body);
+    const translated = translateResponses(body, 'offline-marker', preserveArgumentsProfile);
+    const call = translated.upstream.messages.find(message => message.role === 'assistant').content[0];
+    assert.deepEqual(call.input, {});
+    assert.ok(translated.rawFunctionArguments instanceof Map);
+    assert.deepEqual([...translated.rawFunctionArguments], [['call_raw', { name: call.name, arguments: arguments_ }]]);
+    assert.equal(Object.hasOwn(translated.upstream, 'rawFunctionArguments'), false);
+    assert.deepEqual(body, original);
+  }
+});
+
+test('an enabled profile returns ordinary function arguments unchanged for client-side validation', () => {
+  for (const fragments of [['{"command":', '"offline"'], ['[', ']'], ['{"number":', '1e400}'], [''], [' {"command":"offline"} ']]) {
+    const observed = [];
+    const converted = convertToolFragments(rawArgumentsFunction, fragments,
+      { preserveFunctionArguments: true, observeTool: value => observed.push(value) });
+    const arguments_ = fragments.join('');
+    assert.equal(converted.response.status, 'completed');
+    assert.equal(converted.response.output[0].type, 'function_call');
+    assert.equal(converted.response.output[0].arguments, arguments_);
+    assert.equal(converted.wire.filter(event => event.type === 'response.function_call_arguments.delta').map(event => event.delta).join(''), arguments_);
+    assert.equal(converted.wire.find(event => event.type === 'response.function_call_arguments.done').arguments, arguments_);
+    assert.deepEqual(observed, []);
+  }
+});
+
+test('raw function argument preservation requires an exact process profile opt-in', async () => {
+  for (const enabled of [undefined, false, 'true']) {
+    const profile = { model: request.model, preserveFunctionArguments: enabled };
+    for (const arguments_ of ['{"command":', '[]', '{"number":1e400}', '']) {
+      assert.throws(() => translateResponses(functionHistory(arguments_), 'offline-marker', profile), { status: 400 });
+      assert.throws(() => convertToolFragments(rawArgumentsFunction, [arguments_], profile), { status: 502 });
+    }
+    const translated = translateResponses(functionHistory('{"command":"offline"}'), 'offline-marker', profile);
+    assert.equal(Object.hasOwn(translated, 'rawFunctionArguments'), false);
+    assert.deepEqual(translated.upstream.messages.find(message => message.role === 'assistant').content[0].input,
+      { command: 'offline' });
+  }
+  let calls = 0;
+  const adapter = new MessagesResponsesAdapter({ stateSecret: randomBytes(32).toString('base64url'),
+    requestMessages: async () => { calls++; return reply([{ type: 'text', text: 'unexpected' }]); } });
+  for (const body of [functionHistory('{"command":'), { ...request, preserveFunctionArguments: true },
+    { ...request, rawFunctionArguments: { call_raw: '{"command":' } }]) {
+    assert.equal((await adapter.request({ body, scope })).status, 400);
+  }
+  assert.equal(calls, 0);
+});
+
+test('raw function history and output retain exact namespace identity and canonical aliases', () => {
+  const arguments_ = '{"command":"offline"';
+  const translated = translateResponses(functionHistory(arguments_, { namespace: 'functions' }),
+    'offline-marker', preserveArgumentsProfile);
+  const canonical = translated.tools.declarations[0].name;
+  assert.deepEqual(translated.rawFunctionArguments.get('call_raw'), { name: canonical, arguments: arguments_ });
+  assert.equal(translated.tools.byAlias.get(canonical).namespace, 'functions');
+  const converted = convertToolFragments(rawArgumentsFunction, [arguments_], { preserveFunctionArguments: true },
+    { namespace: 'functions' });
+  const output = converted.response.output[0];
+  assert.equal(output.name, 'exec_command'); assert.equal(output.namespace, 'functions');
+  assert.equal(output.arguments, arguments_); assert.deepEqual(output.encrypted_function_args, []);
+  const done = converted.wire.find(event => event.type === 'response.function_call_arguments.done');
+  assert.equal(done.namespace, 'functions'); assert.equal(done.arguments, arguments_);
+});
+
+test('raw function history still requires valid call identity, completed status and exactly matched results', () => {
+  const change = transform => { const value = functionHistory('{"command":', { namespace: 'functions' }); transform(value); return value; };
+  for (const body of [
+    change(value => { value.input.pop(); }),
+    change(value => { value.input.splice(2, 0, structuredClone(value.input[1])); }),
+    change(value => { value.input[1].call_id = 'invalid call id'; }),
+    change(value => { value.input[1].name = 'invalid name'; }),
+    change(value => { value.input[1].status = 'in_progress'; }),
+    change(value => { value.input[1].arguments = { command: 'offline' }; }),
+    change(value => { value.input[2].call_id = 'different_call'; }),
+    change(value => { value.input[2].name = 'different_tool'; }),
+    change(value => { value.input[2].namespace = 'different_namespace'; }),
+    change(value => { value.input[2].type = 'custom_tool_call_output'; }),
+    change(value => { value.input[2].status = 'in_progress'; }),
+  ]) assert.throws(() => translateResponses(body, 'offline-marker', preserveArgumentsProfile), { status: 400 });
+});
+
+test('completed historical functions remain replayable while deferred declarations do not authorize new calls', () => {
+  const deferred = { ...rawArgumentsFunction, defer_loading: true };
+  const translated = translateResponses(functionHistory('{"command":', { declaration: deferred }),
+    'offline-marker', preserveArgumentsProfile);
+  const saved = translated.rawFunctionArguments.get('call_raw');
+  assert.ok(saved); assert.equal(translated.tools.byAlias.get(saved.name).declared, false);
+  assert.equal(translated.upstream.tools, undefined);
+  assert.throws(() => convertToolFragments(deferred, ['{"command":'], { preserveFunctionArguments: true }), { status: 502 });
+});
+
+test('compaction retains raw function history without declaring any executable tools', () => {
+  const arguments_ = '{"command":';
+  const body = functionHistory(arguments_); body.input.push({ type: 'compaction_trigger' });
+  const translated = translateResponses(body, 'offline-marker', { ...preserveArgumentsProfile, sealCompaction: () => 'sealed' });
+  assert.equal(translated.compaction, true); assert.equal(translated.upstream.tools, undefined);
+  assert.deepEqual(translated.upstream.tool_choice, { type: 'none' });
+  const call = translated.upstream.messages.find(message => message.role === 'assistant').content[0];
+  assert.deepEqual(call.input, {});
+  assert.deepEqual(translated.rawFunctionArguments.get('call_raw'), { name: call.name, arguments: arguments_ });
+  const result = translated.upstream.messages.find(message => message.content.some(block => block.type === 'tool_result'));
+  assert.equal(result.content[0].tool_use_id, 'call_raw');
+});
+
+test('custom and discovery tools retain strict JSON and object checks under the function profile', () => {
+  const custom = { type: 'custom', name: 'apply_patch', format: { type: 'text' } };
+  const search = { type: 'tool_search', execution: 'client' };
+  for (const tool of [custom, search]) for (const arguments_ of ['{"input":', '[]', '{"number":1e400}']) {
+    assert.throws(() => convertToolFragments(tool, [arguments_], { preserveFunctionArguments: true }), { status: 502 });
+  }
+  assert.throws(() => convertToolFragments(custom, ['{"input":12}'], { preserveFunctionArguments: true }), { status: 502 });
+  const customHistory = { ...request, tools: [custom], input: [
+    { role: 'user', content: 'offline' }, { type: 'custom_tool_call', call_id: 'custom_raw', name: 'apply_patch', input: 12 },
+    { type: 'custom_tool_call_output', call_id: 'custom_raw', output: 'offline' },
+  ] };
+  assert.throws(() => translateResponses(customHistory, 'offline-marker', preserveArgumentsProfile), { status: 400 });
+  for (const arguments_ of ['{"query":', '[]', '{"number":1e400}']) {
+    const searchHistory = { ...request, tools: [search], input: [
+      { role: 'user', content: 'offline' }, { type: 'tool_search_call', call_id: 'search_raw', execution: 'client', arguments: arguments_ },
+      { type: 'tool_search_output', call_id: 'search_raw', tools: [] },
+    ] };
+    assert.throws(() => translateResponses(searchHistory, 'offline-marker', preserveArgumentsProfile), { status: 400 });
+  }
+  const rawInput = '*** Begin Patch\n*** End Patch\n';
+  const converted = convertToolFragments(custom, [JSON.stringify({ input: rawInput })], { preserveFunctionArguments: true });
+  assert.equal(converted.response.output[0].input, rawInput);
+});
+
+test('initial Messages input objects and simultaneous initial/delta arguments retain validation', () => {
+  assert.throws(() => convertToolFragments(rawArgumentsFunction, [], { preserveFunctionArguments: true },
+    { initialInput: { number: Number.POSITIVE_INFINITY } }), { status: 502 });
+  assert.throws(() => convertToolFragments(rawArgumentsFunction, ['{"command":'], { preserveFunctionArguments: true },
+    { initialInput: { command: 'already supplied' } }), { status: 502 });
+  const observed = [], actual = { command: 'offline' };
+  const converted = convertToolFragments(rawArgumentsFunction, [], { preserveFunctionArguments: true,
+    observeTool: value => observed.push(value) }, { initialInput: actual });
+  assert.equal(converted.response.output[0].arguments, JSON.stringify(actual));
+  assert.deepEqual(observed.map(value => value.input), [actual]);
 });

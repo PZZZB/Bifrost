@@ -82,7 +82,7 @@ export class CodeBuddyResponsesProvider {
   constructor({ provider } = {}) {
     if (typeof provider?.request !== 'function' || typeof provider?.status !== 'function') throw new TypeError('provider.request() and status() are required.');
     this.provider = provider;
-    this.profile = { ...legacyProfile };
+    this.profile = { ...legacyProfile, preserveFunctionArguments: provider.supportsRawFunctionArguments === true };
     this.instructionMarker = `bifrost-priority-${randomUUID()}`;
   }
   async status() { return { ...await this.provider.status(), responsesCapabilities: CODEBUDDY_RESPONSES_CAPABILITIES }; }
@@ -191,6 +191,11 @@ export class CodeBuddyResponsesProvider {
       upstream = await this.provider.request({ path: '/v1/messages', body: Buffer.from(JSON.stringify(request.upstream)),
         clientScope,
         toolNameAliases: request.tools.declaredNameAliases((request.upstream.tools ?? []).map(tool => tool.name)),
+        ...(profile.preserveFunctionArguments ? {
+          rawFunctionTools: new Set((request.upstream.tools ?? []).filter(tool =>
+            request.tools.byAlias.get(tool.name)?.type === 'function').map(tool => tool.name)),
+          rawFunctionArguments: request.rawFunctionArguments,
+        } : {}),
         headers: new Headers({ 'content-type': 'application/json', 'anthropic-version': '2023-06-01' }), signal: abort.signal });
       if (!upstream?.ok) {
         let message = 'CodeBuddy 上游请求失败。', code = null, sourceDiagnostics;

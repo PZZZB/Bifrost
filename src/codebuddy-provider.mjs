@@ -48,6 +48,20 @@ function validateToolNameAliases(aliases, declared) {
     if (!declared.has(target) || declared.has(reference) && reference !== target) invalid('工具别名映射未匹配当前声明。');
   }
 }
+function snapshotFunctionArguments(toolNames, history) {
+  let tools, calls;
+  try {
+    tools = toolNames == null ? new Set() : new Set(Set.prototype.values.call(toolNames));
+    calls = history == null ? new Map() : new Map(Map.prototype.entries.call(history));
+  } catch { invalid('原始函数参数映射无效。'); }
+  if (tools.size > 128 || [...tools].some(name => !isName(name))) invalid('原始函数参数工具集合无效。');
+  for (const [callId, call] of calls) {
+    keys(call, ['name', 'arguments']);
+    if (!isId(callId) || !isName(call.name) || typeof call.arguments !== 'string') invalid('原始函数参数历史无效。');
+    calls.set(callId, { name: call.name, arguments: call.arguments });
+  }
+  return { tools, calls };
+}
 function sourceFailure(message, code, sourceDiagnostics = null) {
   throw new AdapterError(message, 502, code, sourceDiagnostics);
 }
@@ -134,7 +148,7 @@ function textBlocks(value, onHint = () => {}) {
 }
 
 function translate(body, upstreamModel, readThinking = thinkingText,
-  readCompaction = () => invalid('CodeBuddy 历史摘要状态未提供解封方式。')) {
+  readCompaction = () => invalid('CodeBuddy 历史摘要状态未提供解封方式。'), rawFunctionArguments = new Map()) {
   if (typeof body === 'string' || body instanceof Uint8Array) {
     try { body = JSON.parse(Buffer.from(body).toString('utf8')); } catch { invalid('请求不是有效 JSON。'); }
   }
@@ -218,7 +232,7 @@ function translate(body, upstreamModel, readThinking = thinkingText,
     } else invalid('tool_choice 无效。');
   }
   if (!Array.isArray(body.messages) || !body.messages.length) invalid('messages 不能为空。');
-  const pending = new Set(), seen = new Set();
+  const pending = new Set(), seen = new Set(), rawCalls = new Map(rawFunctionArguments);
   for (const message of body.messages) {
     keys(message, ['role', 'content']);
     if (!['user', 'assistant'].includes(message.role)) invalid();
@@ -246,7 +260,16 @@ function translate(body, upstreamModel, readThinking = thinkingText,
           cacheHint(block.cache_control, onHint);
           if (!isId(block.id) || !isName(block.name) || seen.has(block.id)) invalid('工具调用无效或重复。');
           seen.add(block.id); pending.add(block.id);
-          calls.push({ id: block.id, type: 'function', function: { name: block.name, arguments: JSON.stringify(jsonObject(block.input)) } });
+          let argumentsText;
+          if (rawCalls.has(block.id)) {
+            const call = rawCalls.get(block.id);
+            if (call.name !== block.name || !object(block.input) || Object.keys(block.input).length) {
+              invalid('原始函数参数历史未匹配工具调用。');
+            }
+            argumentsText = call.arguments;
+            rawCalls.delete(block.id);
+          } else argumentsText = JSON.stringify(jsonObject(block.input));
+          calls.push({ id: block.id, type: 'function', function: { name: block.name, arguments: argumentsText } });
         } else invalid('CodeBuddy 不支持此 assistant 内容类型。');
       }
       result.messages.push({ role: 'assistant', content: content || (calls.length ? null : ''),
@@ -281,6 +304,7 @@ function translate(body, upstreamModel, readThinking = thinkingText,
     }
   }
   if (pending.size || body.messages.at(-1).role !== 'user') invalid('工具结果缺失或 assistant 预填充未受支持。');
+  if (rawCalls.size) invalid('原始函数参数历史包含未匹配的调用。');
   return { body: result, streaming: body.stream === true, toolNames, forbidTools, requireTools, forcedTool,
     ignoredCacheHints, thinking, alias, original: body, images };
 }
@@ -585,9 +609,14 @@ class Completion {
       const toolName = this.request.toolNames.has(call.name) ? call.name : this.request.toolNameAliases.get(call.name);
       if (!this.request.toolNames.has(toolName)) protocol('tool_not_declared', 'CodeBuddy 返回了未声明或无效的工具调用。', observed(call.name));
       if (this.request.forcedTool && toolName !== this.request.forcedTool) protocol('forced_tool_mismatch', 'CodeBuddy 返回了未声明或无效的工具调用。');
-      let input;
-      try { input = JSON.parse(call.arguments); } catch { protocol('tool_arguments_json', 'CodeBuddy 工具参数不是完整 JSON。', observed(call.arguments)); }
-      if (!object(input)) protocol('tool_arguments_object', 'CodeBuddy 工具参数必须是对象。', observed(input));
+      // Responses function arguments are strings. Its client owns argument
+      // validation and feeds tool errors back to the model. This private option
+      // is enabled only for declared function tools on the Responses path.
+      let input = {};
+      if (!this.request.rawFunctionTools.has(toolName)) {
+        try { input = JSON.parse(call.arguments); } catch { protocol('tool_arguments_json', 'CodeBuddy 工具参数不是完整 JSON。', observed(call.arguments)); }
+        if (!object(input)) protocol('tool_arguments_object', 'CodeBuddy 工具参数必须是对象。', observed(input));
+      }
       seen.add(call.id);
       const blockIndex = this.blocks.length;
       this.blocks.push({ type: 'tool_use', id: call.id, name: toolName, input });
@@ -608,6 +637,7 @@ class Completion {
 function sse(event) { return new TextEncoder().encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`); }
 
 export class CodeBuddyProvider {
+  supportsRawFunctionArguments = true;
   #cache = null;
   #catalog = null;
   #readGeneration = 0;
@@ -716,7 +746,8 @@ export class CodeBuddyProvider {
     // Only expose the comparison. Source reasoning and opaque metadata stay private.
     return saved.map(state => state.model === selected.source.id);
   }
-  async request({ path, body, headers: _headers, signal, clientScope = null, toolNameAliases = null } = {}) {
+  async request({ path, body, headers: _headers, signal, clientScope = null, toolNameAliases = null,
+    rawFunctionTools = null, rawFunctionArguments = null } = {}) {
     let parsedPath;
     try {
       if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) throw new Error();
@@ -729,6 +760,7 @@ export class CodeBuddyProvider {
       // This process-only option never comes from Messages JSON. Snapshot it
       // before any await so callers cannot change routing during authorization.
       const aliases = snapshotToolNameAliases(toolNameAliases);
+      const functionArguments = snapshotFunctionArguments(rawFunctionTools, rawFunctionArguments);
       clientScope = validateClientScope(clientScope);
       thinkingState = await this.#state();
       const scopes = [], compactionScopes = [];
@@ -740,9 +772,12 @@ export class CodeBuddyProvider {
         return thinkingText(block);
       }, token => {
         const state = thinkingState.openCompaction(token); compactionScopes.push(state); return state.summary;
-      });
+      }, functionArguments.calls);
       validateToolNameAliases(aliases, request.toolNames);
       request.toolNameAliases = aliases;
+      if ([...functionArguments.tools].some(name => !request.toolNames.has(name))
+        || functionArguments.tools.size && !request.streaming) invalid('原始函数参数工具未匹配内部流式声明。');
+      request.rawFunctionTools = functionArguments.tools;
       const metadata = await this.#metadata(signal);
       const selected = metadata.models.find(model => model.descriptor.id === request.alias.id);
       if (!selected?.descriptor.available) throw new AdapterError(selected?.descriptor.reason || '当前 CodeBuddy 账号目录未提供可用的所选模型。', 503);

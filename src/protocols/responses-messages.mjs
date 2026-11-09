@@ -310,6 +310,7 @@ function translate(raw, instructionMarker, profile = {}) {
   let assistant = null, conversationStarted = false, hasLateInstruction = false, compaction = false, configurationEffort = null;
   const pendingContext = [];
   const pending = new Map(), seenCalls = new Set();
+  const rawFunctionArguments = profile.preserveFunctionArguments === true ? new Map() : null;
   const flush = () => { if (assistant) { upstream.messages.push({ role: 'assistant', content: assistant }); assistant = null; } };
   const userBlocks = blocks => {
     const last = upstream.messages.at(-1);
@@ -414,14 +415,22 @@ function translate(raw, instructionMarker, profile = {}) {
       if (toolType === 'tool_search' && item.execution !== 'client') fail('仅支持客户端 tool_search。', 'input');
       const mapped = tools.history(toolType, item.namespace, toolType === 'tool_search' ? 'tool_search' : name(item.name, 'input.name'));
       let args;
-      try {
-        args = type === 'custom_tool_call' ? { input: text(item.input, 'input.custom_tool_call.input') }
-          : type === 'tool_search_call' && object(item.arguments) ? clone(item.arguments) : JSON.parse(text(item.arguments, 'input.arguments'));
-      } catch (error) { if (error instanceof AdapterError) throw error; fail('工具 arguments 不是有效 JSON。', 'input.arguments'); }
-      if (!object(args)) fail('工具参数必须是对象。', 'input.arguments');
-      finiteJson(args, 'input.arguments');
+      const preserveArguments = type === 'function_call' && rawFunctionArguments !== null;
+      if (preserveArguments) {
+        rawFunctionArguments.set(call, { name: mapped.alias, arguments: text(item.arguments, 'input.arguments') });
+        args = {};
+      } else {
+        try {
+          args = type === 'custom_tool_call' ? { input: text(item.input, 'input.custom_tool_call.input') }
+            : type === 'tool_search_call' && object(item.arguments) ? clone(item.arguments) : JSON.parse(text(item.arguments, 'input.arguments'));
+        } catch (error) { if (error instanceof AdapterError) throw error; fail('工具 arguments 不是有效 JSON。', 'input.arguments'); }
+        if (!object(args)) fail('工具参数必须是对象。', 'input.arguments');
+        finiteJson(args, 'input.arguments');
+      }
       const block = { type: 'tool_use', id: call, name: mapped.alias, input: args };
-      assistantBlocks([(profile.restoreTool ?? (value => value))(block)]);
+      // The placeholder is transport scaffolding. Only the process-only map
+      // contains these function arguments, including client-rejected history.
+      assistantBlocks([preserveArguments ? block : (profile.restoreTool ?? (value => value))(block)]);
       pending.set(call, mapped); seenCalls.add(call);
     } else if (['function_call_output', 'custom_tool_call_output', 'tool_search_output'].includes(type)) {
       inputItemShape(item, ['type', 'id', 'call_id', 'name', 'output', 'status', 'namespace', 'execution', 'tools'], 'input.tool_output');
@@ -477,7 +486,8 @@ function translate(raw, instructionMarker, profile = {}) {
     delete upstream.tools;
     upstream.tool_choice = { type: 'none' };
   }
-  return { original: body, upstream, tools, parallel, effectiveTools, compaction };
+  return { original: body, upstream, tools, parallel, effectiveTools, compaction,
+    ...(rawFunctionArguments === null ? {} : { rawFunctionArguments }) };
 }
 
 function wireUsage(value) {
@@ -615,10 +625,13 @@ class MessageConversion {
       } else if (['thinking', 'redacted_thinking'].includes(block.type)) item.encrypted_content = (this.profile.sealState ?? (() => protocol('此来源未提供思考状态接续。')))(block);
       else {
         let args;
-        try { args = state.hadArguments ? JSON.parse(state.arguments) : block.input; } catch { protocol('Messages 工具参数 JSON 被截断。'); }
-        if (!object(args)) protocol('Messages 工具参数必须是对象。');
-        try { finiteJson(args, 'upstream.arguments'); } catch { protocol('Messages 工具参数含无效 JSON 数值或嵌套。'); }
-        this.profile.observeTool?.({ ...block, input: args });
+        const preserveArguments = this.profile.preserveFunctionArguments === true && item.type === 'function_call' && state.hadArguments;
+        if (!preserveArguments) {
+          try { args = state.hadArguments ? JSON.parse(state.arguments) : block.input; } catch { protocol('Messages 工具参数 JSON 被截断。'); }
+          if (!object(args)) protocol('Messages 工具参数必须是对象。');
+          try { finiteJson(args, 'upstream.arguments'); } catch { protocol('Messages 工具参数含无效 JSON 数值或嵌套。'); }
+          this.profile.observeTool?.({ ...block, input: args });
+        }
         if (item.type === 'custom_tool_call') {
           if (Object.keys(args).length !== 1 || typeof args.input !== 'string') protocol('Messages 自定义工具缺少原始 input。');
           item.input = args.input;
