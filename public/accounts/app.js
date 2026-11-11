@@ -25,7 +25,7 @@
     $('email').type = mode === 'register' ? 'email' : 'text';
     $('email').name = mode === 'register' ? 'email' : 'username';
     $('email-label').textContent = mode === 'register' ? '邮箱' : '邮箱或原用户名';
-    $('email-note').textContent = mode === 'register' ? '请使用自己的邮箱。只检查地址格式和域名收信配置，不发送验证码。' : '旧版用户名账号可直接使用原用户名登录。';
+    $('email-note').textContent = mode === 'register' ? '请填写能收信的邮箱。注册只检查邮箱格式和域名收信配置。' : '旧版用户名账号可直接使用原用户名登录。';
     for (const id of ['password-confirm', 'invite', 'consent']) $(id).required = mode === 'register';
     $('password').autocomplete = mode === 'register' ? 'new-password' : 'current-password';
     $('password').value = ''; $('password-confirm').value = '';
